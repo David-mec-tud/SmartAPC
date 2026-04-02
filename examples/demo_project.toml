@@ -1,0 +1,78 @@
+name = "rd_needs_demo"
+
+[communication]
+protocol = "opc_ua"
+endpoint_url = "opc.tcp://127.0.0.1:4855/"
+
+[watchdog]
+kind = "counter_mirror"
+read_node = "ns=2;s=WD.Counter"
+write_node = "ns=2;s=WD.Mirror"
+stale_timeout_ms = 3000
+
+[[io.inputs]]
+name = "pv"
+signal_type = "f64"
+address = "ns=2;s=PV"
+opc_tag = "PLC.PV"
+
+[[io.inputs]]
+name = "pump_on_feedback"
+signal_type = "bool"
+address = "ns=2;s=PumpOn"
+opc_tag = "PLC.PumpOn"
+
+[[io.outputs]]
+name = "mv"
+signal_type = "f64"
+address = "ns=2;s=MV"
+opc_tag = "PLC.MV"
+
+[[io.outputs]]
+name = "pump_on_cmd"
+signal_type = "bool"
+address = "ns=2;s=PumpCmd"
+opc_tag = "PLC.PumpCmd"
+
+[limits.values.mv]
+min = 0.0
+max = 100.0
+opc_tag = "PLC.MV.Limits"
+
+[limits.values.pump_on_cmd]
+min = 0.0
+max = 1.0
+
+[logic]
+kind = "mapping"
+mapping_rules = [
+  { input = "pv", output = "mv", gain = 1.0, offset = 0.0, invert_bool = false },
+  { input = "pump_on_feedback", output = "pump_on_cmd", gain = 1.0, offset = 0.0, invert_bool = false },
+]
+
+[logic.params]
+"mv.gain" = 1.25
+"mv.offset" = 2.0
+
+[logic.initial_values]
+mv = { kind = "f64", value = 0.0 }
+pump_on_cmd = { kind = "bool", value = false }
+
+[model]
+kind = "noop"
+
+[model.config]
+note = "placeholder for future model settings"
+
+[runtime]
+cycle_ms = 1000
+execution_time_test = true
+
+[alarms]
+alarm_timeout_ms = 5000
+off_timeout_ms = 10000
+
+[deployment]
+service_name = "smartapc_rd_needs_demo"
+display_name = "SmartAPC RD Needs Demo"
+description = "SmartAPC controller runtime"
