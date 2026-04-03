@@ -8,6 +8,7 @@ endpoint_url = "opc.tcp://127.0.0.1:4855/"
 kind = "counter_mirror"
 read_node = "ns=2;s=WD.Counter"
 write_node = "ns=2;s=WD.Mirror"
+mirror_cycle_ms = 1000
 stale_timeout_ms = 3000
 
 [[io.inputs]]

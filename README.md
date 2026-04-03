@@ -93,6 +93,11 @@ projects/
 
 - V1 enthält eine trait-basierte OPC-UA-Adapterstruktur mit einer austauschbaren Client-Implementierung.
 - Für produktive Feldintegration kann der Adapter intern gegen einen vollständigen OPC-UA-Transport ausgetauscht werden, ohne Runtime-/Web-API-Brüche.
+- Watchdog `counter_mirror` nutzt:
+  - `read_node` (OPC-UA Tagname Quelle)
+  - `write_node` (OPC-UA Tagname Spiegelziel)
+  - `mirror_cycle_ms` (Intervall für Read -> Write)
+  - `stale_timeout_ms` (Fault, wenn Read-Wert nicht mehr wechselt)
 
 ## OPC-UA Integrationstest
 
