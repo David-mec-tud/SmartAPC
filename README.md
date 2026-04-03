@@ -27,12 +27,20 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - Zyklusdauer
   - Jitter
   - Deadline-Miss-Zähler
+- Native Desktop-Setup-App mit `iced`:
+  - Projektanlage/-auswahl
+  - Sidebar-Setup-Aufgaben
+  - Runtime Start/Stop
+  - Online-Parameter (ändern + persistieren)
+  - Lokale Plotansicht aus SQLite
+  - Optional eingebettete Web-API parallel zur Desktop-App
 
 ## Build & Test
 
 ```bash
 cargo test
 cargo run -- serve
+cargo run -- desktop
 ```
 
 ## Schnellstart
@@ -50,6 +58,18 @@ cargo run -- init-project --name demo --project-root ./projects
 
 ```bash
 cargo run -- serve --project-root ./projects --project demo --host 127.0.0.1 --port 8080
+```
+
+Alternative: Native Desktop-App (inkl. optional eingebettetem Webserver):
+
+```bash
+cargo run -- desktop --project-root ./projects --host 127.0.0.1 --port 8080
+```
+
+Webserver im Desktop-Modus deaktivieren:
+
+```bash
+cargo run -- desktop --project-root ./projects --no-web
 ```
 
 4. API nutzen:
