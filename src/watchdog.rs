@@ -43,9 +43,11 @@ impl WatchdogModule for NoneWatchdog {
 pub struct CounterMirrorWatchdog {
     read_node: String,
     write_node: String,
+    mirror_cycle: Duration,
     stale_timeout: Duration,
     last_counter: Option<f64>,
     last_change: Instant,
+    last_mirror: Instant,
     status: WatchdogStatus,
 }
 
@@ -53,14 +55,17 @@ impl CounterMirrorWatchdog {
     pub fn new(
         read_node: impl Into<String>,
         write_node: impl Into<String>,
+        mirror_cycle: Duration,
         stale_timeout: Duration,
     ) -> Self {
         Self {
             read_node: read_node.into(),
             write_node: write_node.into(),
+            mirror_cycle,
             stale_timeout,
             last_counter: None,
             last_change: Instant::now(),
+            last_mirror: Instant::now(),
             status: WatchdogStatus::Ok,
         }
     }
@@ -85,6 +90,7 @@ impl WatchdogModule for CounterMirrorWatchdog {
             .await?;
         self.last_counter = Some(value);
         self.last_change = Instant::now();
+        self.last_mirror = Instant::now();
         self.status = WatchdogStatus::Ok;
         Ok(())
     }
@@ -114,12 +120,15 @@ impl WatchdogModule for CounterMirrorWatchdog {
             return Ok(self.set_fault("watchdog stale counter timeout"));
         }
 
-        if protocol
-            .write(&self.write_node, SignalValue::F64(counter))
-            .await
-            .is_err()
-        {
-            return Ok(self.set_fault("watchdog mirror write failed"));
+        if self.last_mirror.elapsed() >= self.mirror_cycle {
+            if protocol
+                .write(&self.write_node, SignalValue::F64(counter))
+                .await
+                .is_err()
+            {
+                return Ok(self.set_fault("watchdog mirror write failed"));
+            }
+            self.last_mirror = Instant::now();
         }
 
         self.status = WatchdogStatus::Ok;
@@ -136,4 +145,62 @@ pub fn stale_timeout_or_default(ms: u64) -> anyhow::Result<Duration> {
         bail!("watchdog stale timeout must be > 0");
     }
     Ok(Duration::from_millis(ms))
+}
+
+pub fn mirror_cycle_or_default(ms: u64) -> anyhow::Result<Duration> {
+    if ms == 0 {
+        bail!("watchdog mirror cycle must be > 0");
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{
+        communication::{ProtocolAdapter, opcua::OpcUaClientAdapter},
+        types::SignalValue,
+    };
+
+    use super::{CounterMirrorWatchdog, WatchdogModule, mirror_cycle_or_default};
+
+    #[test]
+    fn mirror_cycle_must_be_positive() {
+        assert!(mirror_cycle_or_default(0).is_err());
+        assert!(mirror_cycle_or_default(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn counter_mirror_respects_configured_cycle() {
+        let adapter = OpcUaClientAdapter::new("mock://watchdog-cycle");
+        adapter.connect().await.expect("connect");
+        adapter.seed_node("ns=2;s=WD.Read", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=WD.Write", SignalValue::F64(0.0));
+
+        let mut watchdog = CounterMirrorWatchdog::new(
+            "ns=2;s=WD.Read",
+            "ns=2;s=WD.Write",
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        );
+
+        watchdog.init(&adapter).await.expect("init");
+        adapter.seed_node("ns=2;s=WD.Read", SignalValue::F64(2.0));
+
+        watchdog.tick(&adapter).await.expect("first tick");
+        let write_after_first = adapter
+            .read("ns=2;s=WD.Write")
+            .await
+            .expect("read write tag after first tick");
+        assert_eq!(write_after_first, SignalValue::F64(1.0));
+
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        watchdog.tick(&adapter).await.expect("second tick");
+        let write_after_second = adapter
+            .read("ns=2;s=WD.Write")
+            .await
+            .expect("read write tag after second tick");
+        assert_eq!(write_after_second, SignalValue::F64(2.0));
+    }
 }

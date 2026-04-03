@@ -47,8 +47,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -95,38 +94,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             project_root,
             project,
-        } => {
-            std::fs::create_dir_all(&project_root).with_context(|| {
-                format!("failed to create project root {}", project_root.display())
-            })?;
-
-            let project_service = ProjectService::new(&project_root);
-            let runtime = Arc::new(RuntimeManager::new());
-
-            if let Some(project_name) = project {
-                runtime
-                    .start(&project_service, &project_name)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to auto-start runtime for project '{}'",
-                            project_name
-                        )
-                    })?;
-            }
-
-            let state = AppState {
-                project_service,
-                runtime,
-                executable_path: std::env::current_exe()
-                    .context("unable to resolve current exe")?,
-            };
-
-            let bind: SocketAddr = format!("{host}:{port}")
-                .parse()
-                .context("invalid bind host/port")?;
-            serve(state, bind).await
-        }
+        } => run_serve(host, port, project_root, project),
         Command::InitProject { name, project_root } => {
             std::fs::create_dir_all(&project_root).with_context(|| {
                 format!("failed to create project root {}", project_root.display())
@@ -142,4 +110,47 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_serve(
+    host: String,
+    port: u16,
+    project_root: PathBuf,
+    project: Option<String>,
+) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime for web server")?;
+
+    runtime.block_on(async move {
+        std::fs::create_dir_all(&project_root)
+            .with_context(|| format!("failed to create project root {}", project_root.display()))?;
+
+        let project_service = ProjectService::new(&project_root);
+        let runtime = Arc::new(RuntimeManager::new());
+
+        if let Some(project_name) = project {
+            runtime
+                .start(&project_service, &project_name)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to auto-start runtime for project '{}'",
+                        project_name
+                    )
+                })?;
+        }
+
+        let state = AppState {
+            project_service,
+            runtime,
+            executable_path: std::env::current_exe().context("unable to resolve current exe")?,
+        };
+
+        let bind: SocketAddr = format!("{host}:{port}")
+            .parse()
+            .context("invalid bind host/port")?;
+        serve(state, bind).await
+    })
 }

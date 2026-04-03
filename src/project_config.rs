@@ -57,11 +57,15 @@ impl ProjectConfig {
         if let WatchdogConfig::CounterMirror {
             read_node,
             write_node,
+            mirror_cycle_ms,
             stale_timeout_ms,
         } = &self.watchdog
         {
             if read_node.trim().is_empty() || write_node.trim().is_empty() {
                 bail!("watchdog counter_mirror requires read_node and write_node");
+            }
+            if *mirror_cycle_ms == 0 {
+                bail!("watchdog mirror_cycle_ms must be > 0");
             }
             if *stale_timeout_ms == 0 {
                 bail!("watchdog stale_timeout_ms must be > 0");
@@ -175,8 +179,19 @@ pub enum WatchdogConfig {
     CounterMirror {
         read_node: String,
         write_node: String,
+        #[serde(default = "default_watchdog_mirror_cycle_ms")]
+        mirror_cycle_ms: u64,
+        #[serde(default = "default_watchdog_stale_timeout_ms")]
         stale_timeout_ms: u64,
     },
+}
+
+const fn default_watchdog_mirror_cycle_ms() -> u64 {
+    1_000
+}
+
+const fn default_watchdog_stale_timeout_ms() -> u64 {
+    2_000
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

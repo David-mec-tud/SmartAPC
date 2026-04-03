@@ -21,7 +21,7 @@ use crate::{
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
         CounterMirrorWatchdog, NoneWatchdog, WatchdogModule, WatchdogStatus,
-        stale_timeout_or_default,
+        mirror_cycle_or_default, stale_timeout_or_default,
     },
 };
 
@@ -441,10 +441,12 @@ fn build_watchdog(cfg: &WatchdogConfig) -> Result<Box<dyn WatchdogModule>> {
         WatchdogConfig::CounterMirror {
             read_node,
             write_node,
+            mirror_cycle_ms,
             stale_timeout_ms,
         } => Ok(Box::new(CounterMirrorWatchdog::new(
             read_node.clone(),
             write_node.clone(),
+            mirror_cycle_or_default(*mirror_cycle_ms)?,
             stale_timeout_or_default(*stale_timeout_ms)?,
         ))),
     }
