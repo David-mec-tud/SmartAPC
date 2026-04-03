@@ -1,5 +1,6 @@
 pub mod communication;
 pub mod deployment;
+pub mod desktop;
 pub mod logic;
 pub mod model;
 pub mod project;

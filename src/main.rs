@@ -4,6 +4,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use smartapc::{
+    desktop::{DesktopSettings, run as run_desktop},
     project::ProjectService,
     runtime::RuntimeManager,
     web::{AppState, serve},
@@ -18,6 +19,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Desktop {
+        #[arg(long, default_value = "./projects")]
+        project_root: PathBuf,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long, default_value_t = false)]
+        no_web: bool,
+    },
     Serve {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -52,6 +63,33 @@ async fn main() -> anyhow::Result<()> {
         project_root: PathBuf::from("./projects"),
         project: None,
     }) {
+        Command::Desktop {
+            project_root,
+            host,
+            port,
+            no_web,
+        } => {
+            std::fs::create_dir_all(&project_root).with_context(|| {
+                format!("failed to create project root {}", project_root.display())
+            })?;
+
+            let web_bind = if no_web {
+                None
+            } else {
+                Some(
+                    format!("{host}:{port}")
+                        .parse()
+                        .context("invalid desktop web host/port")?,
+                )
+            };
+
+            run_desktop(DesktopSettings {
+                project_root,
+                executable_path: std::env::current_exe()
+                    .context("unable to resolve current exe")?,
+                web_bind,
+            })
+        }
         Command::Serve {
             host,
             port,
