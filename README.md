@@ -90,7 +90,7 @@ cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5
 
 Die virtuelle Hardware stellt diese OPC-UA-Tags bereit:
 
-- `ns=2;s=y1_sp`
+- `ns=2;s=y1_value`
 - `ns=2;s=y1_target`
 - `ns=2;s=y1_HL`
 - `ns=2;s=y1_LL`
@@ -104,7 +104,7 @@ Zusätzliche Watchdog-Testtags:
 
 Beim Start öffnet sich außerdem ein Plot-Fenster (Popup):
 
-- y-Plot: `y1_sp`, `y1_target`, `y1_HL`, `y1_LL`
+- y-Plot: `y1_value`, `y1_target`, `y1_HL`, `y1_LL`
 - u-Plot: `u1_write/u1_read`
 - Zeitfenster: immer die letzten `3 Minuten` (fix)
 

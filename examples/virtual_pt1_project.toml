@@ -13,9 +13,9 @@ mirror_cycle_ms = 1000
 stale_timeout_ms = 5000
 
 [[io.inputs]]
-name = "y1_sp"
+name = "y1_value"
 signal_type = "f64"
-address = "ns=2;s=y1_sp"
+address = "ns=2;s=y1_value"
 
 [[io.inputs]]
 name = "y1_target"

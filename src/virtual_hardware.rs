@@ -23,7 +23,7 @@ use eframe::egui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use parking_lot::RwLock;
 
-const Y_SP: &str = "y1_sp";
+const Y_VALUE: &str = "y1_value";
 const Y_TARGET: &str = "y1_target";
 const Y_HL: &str = "y1_HL";
 const Y_LL: &str = "y1_LL";
@@ -143,7 +143,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
         .ok_or_else(|| anyhow!("virtual hardware namespace index not found"))?;
 
     let folder_id = NodeId::new(ns, "VirtualHardware");
-    let y_sp_id = NodeId::new(ns, Y_SP);
+    let y_value_id = NodeId::new(ns, Y_VALUE);
     let y_target_id = NodeId::new(ns, Y_TARGET);
     let y_hl_id = NodeId::new(ns, Y_HL);
     let y_ll_id = NodeId::new(ns, Y_LL);
@@ -188,7 +188,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
         );
         let _ = address_space.add_variables(
             vec![
-                rw_f64_var(&y_sp_id, Y_SP, 0.0),
+                rw_f64_var(&y_value_id, Y_VALUE, 0.0),
                 rw_f64_var(&y_target_id, Y_TARGET, 0.0),
                 rw_f64_var(&y_hl_id, Y_HL, 1.0),
                 rw_f64_var(&y_ll_id, Y_LL, -1.0),
@@ -214,7 +214,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     println!("Virtual PT1 hardware started");
     println!("Endpoint: {endpoint}");
     println!("Node addresses:");
-    println!("  ns={ns};s={Y_SP}");
+    println!("  ns={ns};s={Y_VALUE}");
     println!("  ns={ns};s={Y_TARGET}");
     println!("  ns={ns};s={Y_HL}");
     println!("  ns={ns};s={Y_LL}");
@@ -261,7 +261,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
 
             let _ = sim_node_manager.set_value(
                 subscriptions.as_ref(),
-                &y_sp_id,
+                &y_value_id,
                 None,
                 DataValue::new_now(state.y),
             );
@@ -430,7 +430,7 @@ impl eframe::App for PlotWindowApp {
             ui.heading("SmartAPC Virtual Hardware PT1");
             ui.label(format!("Endpoint: {}", self.endpoint));
             ui.label(format!(
-                "Current values | y1_sp={:.4}  u1={:.4}  y1_target={:.4}  y1_HL={:.4}  y1_LL={:.4}",
+                "Current values | y1_value={:.4}  u1={:.4}  y1_target={:.4}  y1_HL={:.4}  y1_LL={:.4}",
                 current.y, current.u, current.target, current.hl, current.ll
             ));
 
@@ -444,7 +444,8 @@ impl eframe::App for PlotWindowApp {
                 .include_x(max_t)
                 .show(ui, |plot_ui| {
                     plot_ui.line(
-                        Line::new("y1_sp", y_points).color(egui::Color32::from_rgb(50, 180, 220)),
+                        Line::new("y1_value", y_points)
+                            .color(egui::Color32::from_rgb(50, 180, 220)),
                     );
                     plot_ui.line(
                         Line::new("y1_target", target_points)
