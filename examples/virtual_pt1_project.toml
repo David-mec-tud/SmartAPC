@@ -3,6 +3,7 @@ name = "virtual_pt1_demo"
 [communication]
 protocol = "opc_ua"
 endpoint_url = "opc.tcp://127.0.0.1:4855/"
+io_cycle_ms = 1000
 
 [watchdog]
 kind = "counter_mirror"

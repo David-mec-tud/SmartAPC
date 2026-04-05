@@ -78,6 +78,12 @@ impl ProjectConfig {
     pub fn sidebar_tasks(&self) -> Vec<SidebarTask> {
         vec![
             SidebarTask::new(
+                "communication",
+                "OPC-UA Kommunikation konfigurieren",
+                !self.communication.endpoint_url.trim().is_empty()
+                    && self.communication.io_cycle_ms > 0,
+            ),
+            SidebarTask::new(
                 "watchdog",
                 "Watchdog definieren",
                 !matches!(self.watchdog, WatchdogConfig::None),
@@ -146,6 +152,8 @@ impl SidebarTask {
 pub struct CommunicationConfig {
     pub protocol: ProtocolKind,
     pub endpoint_url: String,
+    #[serde(default = "default_communication_io_cycle_ms")]
+    pub io_cycle_ms: u64,
 }
 
 impl Default for CommunicationConfig {
@@ -153,6 +161,7 @@ impl Default for CommunicationConfig {
         Self {
             protocol: ProtocolKind::OpcUa,
             endpoint_url: "opc.tcp://127.0.0.1:4840".to_string(),
+            io_cycle_ms: default_communication_io_cycle_ms(),
         }
     }
 }
@@ -162,8 +171,15 @@ impl CommunicationConfig {
         if self.endpoint_url.trim().is_empty() {
             bail!("communication.endpoint_url must not be empty");
         }
+        if self.io_cycle_ms == 0 {
+            bail!("communication.io_cycle_ms must be > 0");
+        }
         Ok(())
     }
+}
+
+const fn default_communication_io_cycle_ms() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

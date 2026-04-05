@@ -142,6 +142,9 @@ projects/
   - `write_node` (OPC-UA Tagname Spiegelziel)
   - `mirror_cycle_ms` (Intervall für Read -> Write)
   - `stale_timeout_ms` (Fault, wenn Read-Wert nicht mehr wechselt)
+- Kommunikationsbasis (`[communication]`):
+  - `endpoint_url` (OPC-UA Serveradresse)
+  - `io_cycle_ms` (Read/Write Intervall für I/O-Kommunikation)
 
 ## OPC-UA Integrationstest
 

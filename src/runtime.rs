@@ -60,6 +60,7 @@ struct RuntimeCore {
     last_duration_us: u64,
     last_jitter_us: i64,
     last_cycle_start: Option<Instant>,
+    last_io_exchange: Option<Instant>,
 }
 
 impl RuntimeCore {
@@ -95,6 +96,7 @@ impl RuntimeCore {
             last_duration_us: 0,
             last_jitter_us: 0,
             last_cycle_start: None,
+            last_io_exchange: None,
         })
     }
 
@@ -140,17 +142,22 @@ impl RuntimeCore {
 
     async fn tick_once(&mut self) -> Result<()> {
         let cycle_start = Instant::now();
+        let should_exchange_io = self.should_exchange_io(cycle_start);
 
-        let (inputs, input_ok) = match self.read_inputs().await {
-            Ok(inputs) => {
-                self.storage.store_signal_map("input", &inputs)?;
-                self.last_inputs = inputs.clone();
-                (inputs, true)
+        let (inputs, input_ok) = if should_exchange_io {
+            match self.read_inputs().await {
+                Ok(inputs) => {
+                    self.storage.store_signal_map("input", &inputs)?;
+                    self.last_inputs = inputs.clone();
+                    (inputs, true)
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed reading inputs; entering fault path");
+                    (self.last_inputs.clone(), false)
+                }
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "failed reading inputs; entering fault path");
-                (self.last_inputs.clone(), false)
-            }
+        } else {
+            (self.last_inputs.clone(), true)
         };
 
         let watchdog_status = match self.watchdog.tick(self.protocol.as_ref()).await {
@@ -169,12 +176,14 @@ impl RuntimeCore {
             RuntimeState::Running => {
                 let mut outputs = self.logic.step(&inputs, self.state)?;
                 apply_output_limits(&self.config, &mut outputs);
-                self.write_outputs(&outputs).await?;
-                self.storage.store_signal_map("output", &outputs)?;
-                self.last_outputs = outputs;
+                self.last_outputs = outputs.clone();
+                if should_exchange_io {
+                    self.write_outputs(&outputs).await?;
+                    self.storage.store_signal_map("output", &outputs)?;
+                }
             }
             RuntimeState::Hold | RuntimeState::Alarm => {
-                if !self.last_outputs.is_empty() {
+                if should_exchange_io && !self.last_outputs.is_empty() {
                     self.write_outputs(&self.last_outputs).await?;
                     self.storage
                         .store_signal_map("output", &self.last_outputs)?;
@@ -185,11 +194,25 @@ impl RuntimeCore {
             }
         }
 
+        if should_exchange_io {
+            self.last_io_exchange = Some(cycle_start);
+        }
+
         let duration = cycle_start.elapsed();
         self.update_metrics(cycle_start, duration)?;
         self.total_cycles += 1;
 
         Ok(())
+    }
+
+    fn should_exchange_io(&self, cycle_start: Instant) -> bool {
+        match self.last_io_exchange {
+            None => true,
+            Some(last) => {
+                cycle_start.saturating_duration_since(last)
+                    >= Duration::from_millis(self.config.communication.io_cycle_ms)
+            }
+        }
     }
 
     async fn read_inputs(&self) -> Result<HashMap<String, SignalValue>> {
@@ -597,8 +620,8 @@ mod tests {
     #[tokio::test]
     async fn fault_state_machine_transitions_hold_alarm_off() {
         let mut cfg = base_config();
-        cfg.alarms.alarm_timeout_ms = 10;
-        cfg.alarms.off_timeout_ms = 20;
+        cfg.alarms.alarm_timeout_ms = 40;
+        cfg.alarms.off_timeout_ms = 80;
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-fault"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
@@ -631,11 +654,11 @@ mod tests {
         core.tick_once().await.expect("hold");
         assert_eq!(core.state, RuntimeState::Hold);
 
-        tokio::time::sleep(Duration::from_millis(12)).await;
+        tokio::time::sleep(Duration::from_millis(45)).await;
         core.tick_once().await.expect("alarm");
         assert_eq!(core.state, RuntimeState::Alarm);
 
-        tokio::time::sleep(Duration::from_millis(12)).await;
+        tokio::time::sleep(Duration::from_millis(45)).await;
         core.tick_once().await.expect("off");
         assert_eq!(core.state, RuntimeState::Off);
     }
