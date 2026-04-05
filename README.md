@@ -102,10 +102,11 @@ Zusätzliche Watchdog-Testtags:
 - `ns=2;s=wd_counter_read` (läuft hoch)
 - `ns=2;s=wd_counter_mirror` (Schreibziel)
 
-Beim Start läuft außerdem ein Live-Sliding-Plot im Terminal:
+Beim Start öffnet sich außerdem ein Plot-Fenster (Popup):
 
 - y-Plot: `y1_sp`, `y1_target`, `y1_HL`, `y1_LL`
 - u-Plot: `u1_write/u1_read`
+- Zeitfenster: immer die letzten `3 Minuten` (fix)
 
 Beispielprojekt für diese Hardware:
 
