@@ -41,6 +41,7 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
 cargo test
 cargo run -- serve
 cargo run -- desktop
+cargo run -- virtual-hardware
 ```
 
 ## Schnellstart
@@ -78,6 +79,48 @@ cargo run -- desktop --project-root ./projects --no-web
 - `GET /api/runtime/params`
 - `PUT /api/runtime/params`
 - `GET /api/plots?limit=250`
+
+## Virtuelle Hardware (separater OPC-UA PT1 Server)
+
+Für unabhängige End-to-End-Tests kannst du eine lokale, separate PT1-Hardware-Simulation starten:
+
+```bash
+cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120
+```
+
+Die virtuelle Hardware stellt diese OPC-UA-Tags bereit:
+
+- `ns=2;s=y1_sp`
+- `ns=2;s=y1_target`
+- `ns=2;s=y1_HL`
+- `ns=2;s=y1_LL`
+- `ns=2;s=u1_write`
+- `ns=2;s=u1_read`
+
+Zusätzliche Watchdog-Testtags:
+
+- `ns=2;s=wd_counter_read` (läuft hoch)
+- `ns=2;s=wd_counter_mirror` (Schreibziel)
+
+Beim Start läuft außerdem ein Live-Sliding-Plot im Terminal:
+
+- y-Plot: `y1_sp`, `y1_target`, `y1_HL`, `y1_LL`
+- u-Plot: `u1_write/u1_read`
+
+Beispielprojekt für diese Hardware:
+
+- [`examples/virtual_pt1_project.toml`](examples/virtual_pt1_project.toml)
+
+Watchdog-Test gegen die virtuelle Hardware:
+
+1. Virtuelle Hardware in Terminal A starten (`cargo run -- virtual-hardware ...`).
+2. In Terminal B SmartAPC starten (`cargo run -- desktop` oder `cargo run -- serve --project ...`).
+3. Endpoint auf `opc.tcp://127.0.0.1:4855/` setzen.
+4. Watchdog konfigurieren:
+   - `read_node = ns=2;s=wd_counter_read`
+   - `write_node = ns=2;s=wd_counter_mirror`
+   - z. B. `mirror_cycle_ms = 1000`, `stale_timeout_ms = 5000`
+5. In der Desktop-App auf der Watchdog-Seite `Test` ausführen und dann Runtime starten.
 
 ## Projektlayout
 

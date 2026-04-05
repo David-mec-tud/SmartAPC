@@ -1,0 +1,59 @@
+name = "virtual_pt1_demo"
+
+[communication]
+protocol = "opc_ua"
+endpoint_url = "opc.tcp://127.0.0.1:4855/"
+
+[watchdog]
+kind = "counter_mirror"
+read_node = "ns=2;s=wd_counter_read"
+write_node = "ns=2;s=wd_counter_mirror"
+mirror_cycle_ms = 1000
+stale_timeout_ms = 5000
+
+[[io.inputs]]
+name = "y1_sp"
+signal_type = "f64"
+address = "ns=2;s=y1_sp"
+
+[[io.inputs]]
+name = "y1_target"
+signal_type = "f64"
+address = "ns=2;s=y1_target"
+
+[[io.outputs]]
+name = "u1_write"
+signal_type = "f64"
+address = "ns=2;s=u1_write"
+
+[limits.values.u1_write]
+min = -100.0
+max = 100.0
+
+[logic]
+kind = "mapping"
+mapping_rules = [
+  { input = "y1_target", output = "u1_write", gain = 1.0, offset = 0.0, invert_bool = false },
+]
+
+[logic.params]
+"u1_write.gain" = 1.0
+
+[logic.initial_values]
+u1_write = { kind = "f64", value = 0.0 }
+
+[model]
+kind = "noop"
+
+[runtime]
+cycle_ms = 1000
+execution_time_test = true
+
+[alarms]
+alarm_timeout_ms = 5000
+off_timeout_ms = 10000
+
+[deployment]
+service_name = "smartapc_virtual_pt1_demo"
+display_name = "SmartAPC Virtual PT1 Demo"
+description = "SmartAPC runtime against local PT1 virtual hardware"
