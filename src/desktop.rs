@@ -16,7 +16,7 @@ use iced::{
 use crate::{
     communication::{ProtocolAdapter, opcua::OpcUaClientAdapter},
     project::ProjectService,
-    project_config::{NumericLimit, SidebarTask, SignalPoint, WatchdogConfig},
+    project_config::{CommunicationConfig, NumericLimit, SidebarTask, SignalPoint, WatchdogConfig},
     runtime::{RuntimeManager, RuntimeSnapshot},
     storage::SignalSample,
     types::{SignalType, SignalValue},
@@ -116,7 +116,8 @@ struct SignalPointEditorRow {
     name: String,
     signal_type: SignalTypeChoice,
     address: String,
-    opc_tag: String,
+    test_read: String,
+    test_write: String,
 }
 
 impl SignalPointEditorRow {
@@ -125,7 +126,8 @@ impl SignalPointEditorRow {
             name: String::new(),
             signal_type: SignalTypeChoice::F64,
             address: String::new(),
-            opc_tag: String::new(),
+            test_read: String::new(),
+            test_write: String::new(),
         }
     }
 
@@ -134,7 +136,8 @@ impl SignalPointEditorRow {
             name: point.name.clone(),
             signal_type: point.signal_type.into(),
             address: point.address.clone(),
-            opc_tag: point.opc_tag.clone().unwrap_or_default(),
+            test_read: String::new(),
+            test_write: String::new(),
         }
     }
 }
@@ -163,6 +166,28 @@ impl NumericLimitEditorRow {
             min: format!("{}", limit.min),
             max: format!("{}", limit.max),
             opc_tag: limit.opc_tag.clone().unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CommunicationEditorState {
+    endpoint_url: String,
+    io_cycle_ms: String,
+}
+
+impl CommunicationEditorState {
+    fn from_config(config: &CommunicationConfig) -> Self {
+        Self {
+            endpoint_url: config.endpoint_url.clone(),
+            io_cycle_ms: config.io_cycle_ms.to_string(),
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            endpoint_url: "opc.tcp://127.0.0.1:4840".to_string(),
+            io_cycle_ms: "1000".to_string(),
         }
     }
 }
@@ -216,6 +241,7 @@ enum WebStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetupPage {
+    Communication,
     Watchdog,
     Io,
     Limits,
@@ -231,6 +257,7 @@ enum SetupPage {
 impl SetupPage {
     fn from_task_id(task_id: &str) -> Option<Self> {
         match task_id {
+            "communication" => Some(Self::Communication),
             "watchdog" => Some(Self::Watchdog),
             "io" => Some(Self::Io),
             "limits" => Some(Self::Limits),
@@ -246,6 +273,7 @@ impl SetupPage {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Communication => "OPC-UA Kommunikation",
             Self::Watchdog => "Watchdog",
             Self::Io => "Ein- und Ausgänge",
             Self::Limits => "Limits",
@@ -264,6 +292,7 @@ impl SetupPage {
 struct ProjectPanelData {
     sidebar_tasks: Vec<SidebarTask>,
     config_params: HashMap<String, f64>,
+    communication: CommunicationEditorState,
     io_inputs: Vec<SignalPointEditorRow>,
     io_outputs: Vec<SignalPointEditorRow>,
     limits: Vec<NumericLimitEditorRow>,
@@ -280,6 +309,12 @@ struct RefreshData {
 #[derive(Debug, Clone)]
 struct ParamApplyResult {
     params: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone)]
+struct IoReadTestResult {
+    input_values: Vec<String>,
+    output_values: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +336,10 @@ enum Message {
     ParamApplied(Result<ParamApplyResult, String>),
     StartWebPressed,
     WebStarted(Result<String, String>),
+    CommunicationEndpointChanged(String),
+    CommunicationCycleChanged(String),
+    SaveCommunicationPressed,
+    CommunicationSaved(Result<String, String>),
     WatchdogKindChanged(WatchdogKindChoice),
     WatchdogReadTagChanged(String),
     WatchdogWriteTagChanged(String),
@@ -315,13 +354,19 @@ enum Message {
     InputRowNameChanged(usize, String),
     InputRowTypeChanged(usize, SignalTypeChoice),
     InputRowAddressChanged(usize, String),
-    InputRowOpcTagChanged(usize, String),
+    InputRowTestWriteChanged(usize, String),
     AddOutputRow,
     RemoveOutputRow(usize),
     OutputRowNameChanged(usize, String),
     OutputRowTypeChanged(usize, SignalTypeChoice),
     OutputRowAddressChanged(usize, String),
-    OutputRowOpcTagChanged(usize, String),
+    OutputRowTestWriteChanged(usize, String),
+    TestIoReadPressed,
+    IoReadTested(Result<IoReadTestResult, String>),
+    TestIoWriteInputPressed(usize),
+    TestIoWriteOutputPressed(usize),
+    InputIoWriteTested(usize, Result<String, String>),
+    OutputIoWriteTested(usize, Result<String, String>),
     SaveIoPressed,
     IoSaved(Result<String, String>),
     LimitMinChanged(String, String),
@@ -346,6 +391,7 @@ struct DesktopApp {
     runtime_snapshot: Option<RuntimeSnapshot>,
     selected_page: SetupPage,
     new_project_name: String,
+    communication_editor: CommunicationEditorState,
     io_input_rows: Vec<SignalPointEditorRow>,
     io_output_rows: Vec<SignalPointEditorRow>,
     limit_rows: Vec<NumericLimitEditorRow>,
@@ -376,8 +422,9 @@ impl DesktopApp {
             param_inputs: HashMap::new(),
             samples: Vec::new(),
             runtime_snapshot: None,
-            selected_page: SetupPage::Watchdog,
+            selected_page: SetupPage::Communication,
             new_project_name: String::new(),
+            communication_editor: CommunicationEditorState::blank(),
             io_input_rows: vec![SignalPointEditorRow::blank()],
             io_output_rows: vec![SignalPointEditorRow::blank()],
             limit_rows: vec![NumericLimitEditorRow::blank()],
@@ -431,6 +478,7 @@ impl DesktopApp {
             Message::ProjectPanelLoaded(result) => match result {
                 Ok(panel) => {
                     self.sidebar_tasks = panel.sidebar_tasks;
+                    self.communication_editor = panel.communication;
                     self.io_input_rows = panel.io_inputs;
                     self.io_output_rows = panel.io_outputs;
                     self.limit_rows = panel.limits;
@@ -587,6 +635,49 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::CommunicationEndpointChanged(value) => {
+                self.communication_editor.endpoint_url = value;
+                Task::none()
+            }
+            Message::CommunicationCycleChanged(value) => {
+                self.communication_editor.io_cycle_ms = value;
+                Task::none()
+            }
+            Message::SaveCommunicationPressed => {
+                if self.runtime_snapshot.is_some() {
+                    self.error_message = Some(
+                        "Runtime läuft. Für Kommunikations-Änderungen bitte erst stoppen."
+                            .to_string(),
+                    );
+                    return Task::none();
+                }
+
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+
+                save_communication_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.communication_editor.clone(),
+                )
+            }
+            Message::CommunicationSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
             Message::WatchdogKindChanged(kind) => {
                 self.watchdog_editor.kind = kind;
                 Task::none()
@@ -685,24 +776,27 @@ impl DesktopApp {
             Message::InputRowNameChanged(index, value) => {
                 if let Some(row) = self.io_input_rows.get_mut(index) {
                     row.name = value;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
             Message::InputRowTypeChanged(index, signal_type) => {
                 if let Some(row) = self.io_input_rows.get_mut(index) {
                     row.signal_type = signal_type;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
             Message::InputRowAddressChanged(index, value) => {
                 if let Some(row) = self.io_input_rows.get_mut(index) {
                     row.address = value;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
-            Message::InputRowOpcTagChanged(index, value) => {
+            Message::InputRowTestWriteChanged(index, value) => {
                 if let Some(row) = self.io_input_rows.get_mut(index) {
-                    row.opc_tag = value;
+                    row.test_write = value;
                 }
                 Task::none()
             }
@@ -719,27 +813,124 @@ impl DesktopApp {
             Message::OutputRowNameChanged(index, value) => {
                 if let Some(row) = self.io_output_rows.get_mut(index) {
                     row.name = value;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
             Message::OutputRowTypeChanged(index, signal_type) => {
                 if let Some(row) = self.io_output_rows.get_mut(index) {
                     row.signal_type = signal_type;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
             Message::OutputRowAddressChanged(index, value) => {
                 if let Some(row) = self.io_output_rows.get_mut(index) {
                     row.address = value;
+                    row.test_read.clear();
                 }
                 Task::none()
             }
-            Message::OutputRowOpcTagChanged(index, value) => {
+            Message::OutputRowTestWriteChanged(index, value) => {
                 if let Some(row) = self.io_output_rows.get_mut(index) {
-                    row.opc_tag = value;
+                    row.test_write = value;
                 }
                 Task::none()
             }
+            Message::TestIoReadPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+
+                let endpoint_url = self.communication_editor.endpoint_url.clone();
+                test_io_read_task(
+                    self.project_service.clone(),
+                    project_name,
+                    endpoint_url,
+                    self.io_input_rows.clone(),
+                    self.io_output_rows.clone(),
+                )
+            }
+            Message::IoReadTested(result) => match result {
+                Ok(values) => {
+                    for (row, value) in self.io_input_rows.iter_mut().zip(values.input_values) {
+                        row.test_read = value;
+                    }
+                    for (row, value) in self.io_output_rows.iter_mut().zip(values.output_values) {
+                        row.test_read = value;
+                    }
+                    self.status_message = "I/O OPC-UA Read-Test abgeschlossen".to_string();
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::TestIoWriteInputPressed(index) => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                let Some(row) = self.io_input_rows.get(index).cloned() else {
+                    self.error_message = Some("Ungültige Input-Zeile".to_string());
+                    return Task::none();
+                };
+                test_io_write_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.communication_editor.endpoint_url.clone(),
+                    row,
+                    move |result| Message::InputIoWriteTested(index, result),
+                )
+            }
+            Message::TestIoWriteOutputPressed(index) => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                let Some(row) = self.io_output_rows.get(index).cloned() else {
+                    self.error_message = Some("Ungültige Output-Zeile".to_string());
+                    return Task::none();
+                };
+                test_io_write_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.communication_editor.endpoint_url.clone(),
+                    row,
+                    move |result| Message::OutputIoWriteTested(index, result),
+                )
+            }
+            Message::InputIoWriteTested(index, result) => match result {
+                Ok(read_back) => {
+                    if let Some(row) = self.io_input_rows.get_mut(index) {
+                        row.test_read = read_back;
+                    }
+                    self.status_message = "I/O test_write (input) erfolgreich".to_string();
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::OutputIoWriteTested(index, result) => match result {
+                Ok(read_back) => {
+                    if let Some(row) = self.io_output_rows.get_mut(index) {
+                        row.test_read = read_back;
+                    }
+                    self.status_message = "I/O test_write (output) erfolgreich".to_string();
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
             Message::SaveIoPressed => {
                 if self.runtime_snapshot.is_some() {
                     self.error_message = Some(
@@ -997,6 +1188,7 @@ impl DesktopApp {
     fn current_page_view(&self) -> Element<'_, Message> {
         let runtime_running = self.runtime_snapshot.is_some();
         match self.selected_page {
+            SetupPage::Communication => self.communication_editor_view(runtime_running),
             SetupPage::Watchdog => self.watchdog_editor_view(runtime_running),
             SetupPage::Io => self.io_editor_view(runtime_running),
             SetupPage::Limits => self.limits_editor_view(runtime_running),
@@ -1039,6 +1231,63 @@ impl DesktopApp {
             .spacing(12),
         )
         .padding(12)
+        .into()
+    }
+
+    fn communication_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
+        let can_save = self.selected_project.is_some() && !runtime_running;
+
+        let save_button = if can_save {
+            button("Kommunikation speichern").on_press(Message::SaveCommunicationPressed)
+        } else {
+            button("Kommunikation speichern")
+        };
+
+        let runtime_hint = if runtime_running {
+            "Runtime läuft: Für Kommunikations-Änderungen erst stoppen."
+        } else {
+            ""
+        };
+
+        container(
+            column![
+                text("OPC-UA Basis-Konfiguration").size(20),
+                row![
+                    text("Protokoll").width(Length::Fixed(120.0)),
+                    text("opc_ua").size(15),
+                    text("(V1 fest)").size(13)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Server Adresse").width(Length::Fixed(120.0)),
+                    text_input(
+                        "opc.tcp://127.0.0.1:4840",
+                        &self.communication_editor.endpoint_url
+                    )
+                    .on_input(Message::CommunicationEndpointChanged)
+                    .width(Length::Fill)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Kommunikationszeit")
+                        .width(Length::Fixed(120.0)),
+                    text_input("io_cycle_ms", &self.communication_editor.io_cycle_ms)
+                        .on_input(Message::CommunicationCycleChanged)
+                        .width(Length::Fixed(180.0)),
+                    text("ms: Read/Write Intervall für OPC-UA I/O").size(14),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                text("Hinweis: Effektive minimale I/O-Rate wird zusätzlich durch runtime.cycle_ms begrenzt.")
+                    .size(13),
+                text(runtime_hint).size(13),
+                save_button
+            ]
+            .spacing(10),
+        )
+        .padding(10)
         .into()
     }
 
@@ -1140,6 +1389,7 @@ impl DesktopApp {
 
     fn io_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
         let can_save = self.selected_project.is_some() && !runtime_running;
+        let can_test = self.selected_project.is_some();
 
         let mut inputs_col = column![
             row![
@@ -1166,9 +1416,11 @@ impl DesktopApp {
                     text_input("OPC-UA Adresse", &entry.address)
                         .on_input(move |value| Message::InputRowAddressChanged(index, value))
                         .width(Length::FillPortion(3)),
-                    text_input("OPC Tag (optional)", &entry.opc_tag)
-                        .on_input(move |value| Message::InputRowOpcTagChanged(index, value))
+                    text_input("test_read", &entry.test_read).width(Length::FillPortion(2)),
+                    text_input("test_write", &entry.test_write)
+                        .on_input(move |value| Message::InputRowTestWriteChanged(index, value))
                         .width(Length::FillPortion(2)),
+                    button("test_write").on_press(Message::TestIoWriteInputPressed(index)),
                     button("-").on_press(Message::RemoveInputRow(index))
                 ]
                 .spacing(8)
@@ -1201,9 +1453,11 @@ impl DesktopApp {
                     text_input("OPC-UA Adresse", &entry.address)
                         .on_input(move |value| Message::OutputRowAddressChanged(index, value))
                         .width(Length::FillPortion(3)),
-                    text_input("OPC Tag (optional)", &entry.opc_tag)
-                        .on_input(move |value| Message::OutputRowOpcTagChanged(index, value))
+                    text_input("test_read", &entry.test_read).width(Length::FillPortion(2)),
+                    text_input("test_write", &entry.test_write)
+                        .on_input(move |value| Message::OutputRowTestWriteChanged(index, value))
                         .width(Length::FillPortion(2)),
+                    button("test_write").on_press(Message::TestIoWriteOutputPressed(index)),
                     button("-").on_press(Message::RemoveOutputRow(index))
                 ]
                 .spacing(8)
@@ -1215,6 +1469,11 @@ impl DesktopApp {
             button("I/O speichern").on_press(Message::SaveIoPressed)
         } else {
             button("I/O speichern")
+        };
+        let test_button = if can_test {
+            button("test_read").on_press(Message::TestIoReadPressed)
+        } else {
+            button("test_read")
         };
 
         let hint = if runtime_running {
@@ -1228,8 +1487,12 @@ impl DesktopApp {
                 text("I/O Definition").size(20),
                 inputs_col,
                 outputs_col,
+                text(
+                    "test_read liest alle Zeilen; test_write schreibt den Zeilenwert und liest danach zurück."
+                )
+                .size(13),
                 hint,
-                save_button
+                row![save_button, test_button].spacing(10)
             ]
             .spacing(10),
         )
@@ -1437,6 +1700,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             let cfg = project_service.load_config(&project_name).map_err(|err| {
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
+            let communication = CommunicationEditorState::from_config(&cfg.communication);
 
             let io_inputs = if cfg.io.inputs.is_empty() {
                 vec![SignalPointEditorRow::blank()]
@@ -1471,7 +1735,8 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
 
             Ok(ProjectPanelData {
                 sidebar_tasks,
-                config_params: cfg.logic.params,
+                config_params: cfg.logic.params.clone(),
+                communication,
                 io_inputs,
                 io_outputs,
                 limits: limit_rows,
@@ -1584,6 +1849,49 @@ fn set_param_task(
             Ok(ParamApplyResult { params })
         },
         Message::ParamApplied,
+    )
+}
+
+fn parse_communication_editor(editor: &CommunicationEditorState) -> Result<(String, u64), String> {
+    let endpoint_url = editor.endpoint_url.trim().to_string();
+    if endpoint_url.is_empty() {
+        return Err("Kommunikation benötigt eine OPC-UA Server-Adresse".to_string());
+    }
+
+    let io_cycle_ms = editor
+        .io_cycle_ms
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "communication.io_cycle_ms muss eine ganze Zahl sein".to_string())?;
+    if io_cycle_ms == 0 {
+        return Err("communication.io_cycle_ms muss > 0 sein".to_string());
+    }
+
+    Ok((endpoint_url, io_cycle_ms))
+}
+
+fn save_communication_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: CommunicationEditorState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+
+            let (endpoint_url, io_cycle_ms) = parse_communication_editor(&editor)?;
+            cfg.communication.endpoint_url = endpoint_url;
+            cfg.communication.io_cycle_ms = io_cycle_ms;
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Kommunikation konnte nicht gespeichert werden: {err}"))?;
+
+            Ok(format!("Kommunikation für '{}' gespeichert", project_name))
+        },
+        Message::CommunicationSaved,
     )
 }
 
@@ -1735,6 +2043,124 @@ fn save_io_task(
     )
 }
 
+fn test_io_read_task(
+    project_service: ProjectService,
+    project_name: String,
+    endpoint_url_from_editor: String,
+    input_rows: Vec<SignalPointEditorRow>,
+    output_rows: Vec<SignalPointEditorRow>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+
+            let endpoint_url = if endpoint_url_from_editor.trim().is_empty() {
+                cfg.communication.endpoint_url
+            } else {
+                endpoint_url_from_editor.trim().to_string()
+            };
+
+            let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
+            adapter.connect().await.map_err(|err| {
+                format!("I/O Read-Test: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
+            })?;
+
+            let mut input_values = Vec::with_capacity(input_rows.len());
+            for row in &input_rows {
+                if row.address.trim().is_empty() {
+                    input_values.push(String::new());
+                    continue;
+                }
+                let value = match adapter.read(row.address.trim()).await {
+                    Ok(value) => signal_value_to_test_string(value),
+                    Err(err) => format!("ERR: {err}"),
+                };
+                input_values.push(value);
+            }
+
+            let mut output_values = Vec::with_capacity(output_rows.len());
+            for row in &output_rows {
+                if row.address.trim().is_empty() {
+                    output_values.push(String::new());
+                    continue;
+                }
+                let value = match adapter.read(row.address.trim()).await {
+                    Ok(value) => signal_value_to_test_string(value),
+                    Err(err) => format!("ERR: {err}"),
+                };
+                output_values.push(value);
+            }
+
+            Ok(IoReadTestResult {
+                input_values,
+                output_values,
+            })
+        },
+        Message::IoReadTested,
+    )
+}
+
+fn test_io_write_task<F>(
+    project_service: ProjectService,
+    project_name: String,
+    endpoint_url_from_editor: String,
+    row: SignalPointEditorRow,
+    map_message: F,
+) -> Task<Message>
+where
+    F: FnOnce(Result<String, String>) -> Message + Send + 'static,
+{
+    Task::perform(
+        async move {
+            let cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+
+            let endpoint_url = if endpoint_url_from_editor.trim().is_empty() {
+                cfg.communication.endpoint_url
+            } else {
+                endpoint_url_from_editor.trim().to_string()
+            };
+
+            let address = row.address.trim().to_string();
+            if address.is_empty() {
+                return Err("test_write: OPC-UA Adresse darf nicht leer sein".to_string());
+            }
+
+            let raw_value = row.test_write.trim().to_string();
+            if raw_value.is_empty() {
+                return Err("test_write: Bitte zuerst einen Wert eintragen".to_string());
+            }
+
+            let value = parse_test_write_value(row.signal_type, &raw_value)?;
+
+            let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
+            adapter.connect().await.map_err(|err| {
+                format!("test_write: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
+            })?;
+
+            adapter.write(&address, value).await.map_err(|err| {
+                format!(
+                    "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
+                    address
+                )
+            })?;
+
+            let read_back = adapter.read(&address).await.map_err(|err| {
+                format!(
+                    "test_write: Rücklesen von '{}' fehlgeschlagen: {err}",
+                    address
+                )
+            })?;
+
+            Ok(signal_value_to_test_string(read_back))
+        },
+        map_message,
+    )
+}
+
 fn save_limits_task(
     project_service: ProjectService,
     project_name: String,
@@ -1766,9 +2192,7 @@ fn build_signal_points(
     let mut out = Vec::new();
 
     for (index, row) in rows.iter().enumerate() {
-        let blank = row.name.trim().is_empty()
-            && row.address.trim().is_empty()
-            && row.opc_tag.trim().is_empty();
+        let blank = row.name.trim().is_empty() && row.address.trim().is_empty();
 
         if blank {
             continue;
@@ -1794,7 +2218,7 @@ fn build_signal_points(
             name: row.name.trim().to_string(),
             signal_type: row.signal_type.into(),
             address: row.address.trim().to_string(),
-            opc_tag: optional_trimmed(&row.opc_tag),
+            opc_tag: None,
         });
     }
 
@@ -1852,6 +2276,38 @@ fn build_limits_map_for_signals(
     }
 
     Ok(out)
+}
+
+fn signal_value_to_test_string(value: SignalValue) -> String {
+    match value {
+        SignalValue::F64(v) => format!("{v:.6}"),
+        SignalValue::Bool(v) => v.to_string(),
+    }
+}
+
+fn parse_test_write_value(signal_type: SignalTypeChoice, raw: &str) -> Result<SignalValue, String> {
+    match signal_type {
+        SignalTypeChoice::F64 => {
+            let value = raw
+                .parse::<f64>()
+                .map_err(|_| format!("test_write: '{}' ist kein gültiger f64-Wert", raw))?;
+            Ok(SignalValue::F64(value))
+        }
+        SignalTypeChoice::Bool => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            let value = match normalized.as_str() {
+                "true" | "1" | "on" | "yes" => true,
+                "false" | "0" | "off" | "no" => false,
+                _ => {
+                    return Err(format!(
+                        "test_write: '{}' ist kein gültiger bool-Wert (true/false/1/0)",
+                        raw
+                    ));
+                }
+            };
+            Ok(SignalValue::Bool(value))
+        }
+    }
 }
 
 fn optional_trimmed(value: &str) -> Option<String> {
