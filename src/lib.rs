@@ -8,5 +8,6 @@ pub mod project_config;
 pub mod runtime;
 pub mod storage;
 pub mod types;
+pub mod virtual_hardware;
 pub mod watchdog;
 pub mod web;

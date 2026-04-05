@@ -7,6 +7,7 @@ use smartapc::{
     desktop::{DesktopSettings, run as run_desktop},
     project::ProjectService,
     runtime::RuntimeManager,
+    virtual_hardware::{VirtualHardwareConfig, run as run_virtual_hardware},
     web::{AppState, serve},
 };
 
@@ -44,6 +45,20 @@ enum Command {
         name: String,
         #[arg(long, default_value = "./projects")]
         project_root: PathBuf,
+    },
+    VirtualHardware {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 4855)]
+        port: u16,
+        #[arg(long, default_value_t = 100)]
+        dt_ms: u64,
+        #[arg(long, default_value_t = 5.0)]
+        tau_s: f64,
+        #[arg(long, default_value_t = 1.0)]
+        gain: f64,
+        #[arg(long, default_value_t = 120)]
+        history: usize,
     },
 }
 
@@ -108,6 +123,28 @@ fn main() -> anyhow::Result<()> {
                 service.project_dir(&name).display()
             );
             Ok(())
+        }
+        Command::VirtualHardware {
+            host,
+            port,
+            dt_ms,
+            tau_s,
+            gain,
+            history,
+        } => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("failed to create tokio runtime for virtual hardware")?;
+
+            runtime.block_on(run_virtual_hardware(VirtualHardwareConfig {
+                host,
+                port,
+                dt_ms,
+                tau_s,
+                gain,
+                history,
+            }))
         }
     }
 }
