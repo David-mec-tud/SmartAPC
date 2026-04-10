@@ -10,6 +10,10 @@ pub struct ProjectConfig {
     pub name: String,
     pub communication: CommunicationConfig,
     pub watchdog: WatchdogConfig,
+    #[serde(default)]
+    pub variables: VariableCatalogConfig,
+    #[serde(default)]
+    pub io_definition: IoDefinitionConfig,
     pub io: IoConfig,
     pub limits: LimitsConfig,
     pub logic: LogicConfig,
@@ -27,6 +31,8 @@ impl ProjectConfig {
             name,
             communication: CommunicationConfig::default(),
             watchdog: WatchdogConfig::None,
+            variables: VariableCatalogConfig::default(),
+            io_definition: IoDefinitionConfig::default(),
             io: IoConfig::default(),
             limits: LimitsConfig::default(),
             logic: LogicConfig::default(),
@@ -38,6 +44,8 @@ impl ProjectConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.communication.validate()?;
+        self.variables.validate()?;
+        self.io_definition.validate(&self.variables)?;
         self.io.validate()?;
         self.limits.validate()?;
         self.logic.validate(&self.io)?;
@@ -75,7 +83,24 @@ impl ProjectConfig {
         Ok(())
     }
 
+    pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
+        let (io, limits) = self
+            .io_definition
+            .to_runtime_io_and_limits(&self.variables)?;
+        self.io = io;
+        self.limits = limits;
+        Ok(())
+    }
+
     pub fn sidebar_tasks(&self) -> Vec<SidebarTask> {
+        let legacy_io_present = !self.io.inputs.is_empty() || !self.io.outputs.is_empty();
+        let variables_configured = self.variables.has_any() || legacy_io_present;
+        let io_definition_configured = if self.variables.has_any() {
+            self.io_definition.is_complete_for(&self.variables)
+        } else {
+            !self.io.inputs.is_empty() && !self.io.outputs.is_empty()
+        };
+
         vec![
             SidebarTask::new(
                 "communication",
@@ -88,26 +113,13 @@ impl ProjectConfig {
                 "Watchdog definieren",
                 !matches!(self.watchdog, WatchdogConfig::None),
             ),
-            SidebarTask::new(
-                "io",
-                "Ein- und Ausgänge definieren",
-                !self.io.inputs.is_empty() && !self.io.outputs.is_empty(),
-            ),
-            SidebarTask::new(
-                "limits",
-                "Minima/Maxima für MV/CV festlegen",
-                !self.limits.values.is_empty(),
-            ),
+            SidebarTask::new("io", "Ein- und Ausgänge definieren", variables_configured),
+            SidebarTask::new("limits", "I/O definieren", io_definition_configured),
             SidebarTask::new("model", "Modell hinterlegen (optional)", true),
             SidebarTask::new(
                 "logic",
                 "Regellogik hinterlegen",
                 !self.logic.mapping_rules.is_empty(),
-            ),
-            SidebarTask::new(
-                "params",
-                "Parameter und Initialwerte festlegen",
-                !self.logic.params.is_empty() || !self.logic.initial_values.is_empty(),
             ),
             SidebarTask::new(
                 "timing",
@@ -201,6 +213,344 @@ const fn default_watchdog_mirror_cycle_ms() -> u64 {
 
 const fn default_watchdog_stale_timeout_ms() -> u64 {
     2_000
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VariableCatalogConfig {
+    #[serde(default)]
+    pub mvs: Vec<String>,
+    #[serde(default)]
+    pub cvs: Vec<String>,
+    #[serde(default)]
+    pub dvs: Vec<String>,
+}
+
+impl VariableCatalogConfig {
+    pub fn has_any(&self) -> bool {
+        !(self.mvs.is_empty() && self.cvs.is_empty() && self.dvs.is_empty())
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let mut seen = HashSet::new();
+        validate_variable_group("mv", &self.mvs, &mut seen)?;
+        validate_variable_group("cv", &self.cvs, &mut seen)?;
+        validate_variable_group("dv", &self.dvs, &mut seen)?;
+        Ok(())
+    }
+
+    fn has_mv(&self, name: &str) -> bool {
+        self.mvs.iter().any(|n| n == name)
+    }
+
+    fn has_cv(&self, name: &str) -> bool {
+        self.cvs.iter().any(|n| n == name)
+    }
+
+    fn has_dv(&self, name: &str) -> bool {
+        self.dvs.iter().any(|n| n == name)
+    }
+}
+
+fn validate_variable_group(kind: &str, names: &[String], seen: &mut HashSet<String>) -> Result<()> {
+    for raw_name in names {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            bail!("{} name must not be empty", kind);
+        }
+        if !seen.insert(name.to_string()) {
+            bail!("duplicate variable name '{}': names must be unique", name);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IoDefinitionConfig {
+    #[serde(default)]
+    pub mvs: Vec<MvIoDefinition>,
+    #[serde(default)]
+    pub cvs: Vec<CvIoDefinition>,
+    #[serde(default)]
+    pub dvs: Vec<DvIoDefinition>,
+}
+
+impl IoDefinitionConfig {
+    pub(crate) fn validate(&self, vars: &VariableCatalogConfig) -> Result<()> {
+        validate_named_entries("mv", &self.mvs, |row| &row.name, |name| vars.has_mv(name))?;
+        validate_named_entries("cv", &self.cvs, |row| &row.name, |name| vars.has_cv(name))?;
+        validate_named_entries("dv", &self.dvs, |row| &row.name, |name| vars.has_dv(name))?;
+
+        for row in &self.mvs {
+            if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
+                if ll > hl {
+                    bail!("mv '{}' has ll > hl", row.name);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn is_complete_for(&self, vars: &VariableCatalogConfig) -> bool {
+        for name in &vars.mvs {
+            let Some(row) = self.mvs.iter().find(|row| row.name == *name) else {
+                return false;
+            };
+            if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
+                if ll > hl {
+                    return false;
+                }
+            }
+        }
+
+        for name in &vars.cvs {
+            if self.cvs.iter().find(|row| row.name == *name).is_none() {
+                return false;
+            }
+        }
+
+        for name in &vars.dvs {
+            if self.dvs.iter().find(|row| row.name == *name).is_none() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn to_runtime_io_and_limits(
+        &self,
+        vars: &VariableCatalogConfig,
+    ) -> Result<(IoConfig, LimitsConfig)> {
+        if !self.is_complete_for(vars) {
+            bail!("io_definition is incomplete for configured variables");
+        }
+
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        let mut limits = HashMap::new();
+
+        for name in &vars.mvs {
+            let row = self
+                .mvs
+                .iter()
+                .find(|row| row.name == *name)
+                .expect("checked by is_complete_for");
+
+            if let Some(addr) = optional_trimmed(&row.mv_write) {
+                outputs.push(SignalPoint {
+                    name: format!("mv.{}.write", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+            if let Some(addr) = optional_trimmed(&row.mv_read) {
+                inputs.push(SignalPoint {
+                    name: format!("mv.{}.read", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+
+            if let Some(enable) = optional_trimmed(row.enable.as_deref().unwrap_or("")) {
+                inputs.push(SignalPoint {
+                    name: format!("mv.{}.enable", name),
+                    signal_type: SignalType::Bool,
+                    address: enable,
+                    opc_tag: None,
+                });
+            }
+
+            if let Some(addr) = optional_trimmed(row.hl_opc.as_deref().unwrap_or("")) {
+                inputs.push(SignalPoint {
+                    name: format!("mv.{}.hl", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+            if let Some(addr) = optional_trimmed(row.ll_opc.as_deref().unwrap_or("")) {
+                inputs.push(SignalPoint {
+                    name: format!("mv.{}.ll", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+
+            if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
+                if !row.mv_write.trim().is_empty() {
+                    limits.insert(
+                        format!("mv.{}.write", name),
+                        NumericLimit {
+                            min: ll,
+                            max: hl,
+                            opc_tag: None,
+                        },
+                    );
+                }
+            }
+        }
+
+        for name in &vars.cvs {
+            let row = self
+                .cvs
+                .iter()
+                .find(|row| row.name == *name)
+                .expect("checked by is_complete_for");
+
+            if let Some(addr) = optional_trimmed(&row.soll) {
+                inputs.push(SignalPoint {
+                    name: format!("cv.{}.soll", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+            if let Some(addr) = optional_trimmed(&row.ist) {
+                inputs.push(SignalPoint {
+                    name: format!("cv.{}.ist", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+
+            if let Some(sollband_opc) = optional_trimmed(row.sollband_opc.as_deref().unwrap_or(""))
+            {
+                inputs.push(SignalPoint {
+                    name: format!("cv.{}.sollband", name),
+                    signal_type: SignalType::F64,
+                    address: sollband_opc,
+                    opc_tag: None,
+                });
+            }
+
+            if let Some(enable) = optional_trimmed(row.enable.as_deref().unwrap_or("")) {
+                inputs.push(SignalPoint {
+                    name: format!("cv.{}.enable", name),
+                    signal_type: SignalType::Bool,
+                    address: enable,
+                    opc_tag: None,
+                });
+            }
+        }
+
+        for name in &vars.dvs {
+            let row = self
+                .dvs
+                .iter()
+                .find(|row| row.name == *name)
+                .expect("checked by is_complete_for");
+
+            if let Some(addr) = optional_trimmed(&row.read) {
+                inputs.push(SignalPoint {
+                    name: format!("dv.{}.read", name),
+                    signal_type: SignalType::F64,
+                    address: addr,
+                    opc_tag: None,
+                });
+            }
+
+            if let Some(enable) = optional_trimmed(row.enable.as_deref().unwrap_or("")) {
+                inputs.push(SignalPoint {
+                    name: format!("dv.{}.enable", name),
+                    signal_type: SignalType::Bool,
+                    address: enable,
+                    opc_tag: None,
+                });
+            }
+        }
+
+        Ok((
+            IoConfig { inputs, outputs },
+            LimitsConfig { values: limits },
+        ))
+    }
+}
+
+fn validate_named_entries<T, F, G>(
+    kind: &str,
+    rows: &[T],
+    get_name: F,
+    name_exists: G,
+) -> Result<()>
+where
+    F: Fn(&T) -> &String,
+    G: Fn(&str) -> bool,
+{
+    let mut seen = HashSet::new();
+    for row in rows {
+        let name = get_name(row).trim();
+        if name.is_empty() {
+            bail!("{} io_definition entry requires non-empty name", kind);
+        }
+        if !seen.insert(name.to_string()) {
+            bail!("duplicate {} io_definition name '{}'", kind, name);
+        }
+        if !name_exists(name) {
+            bail!(
+                "{} io_definition references unknown variable '{}'",
+                kind,
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn optional_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MvIoDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub mv_write: String,
+    #[serde(default)]
+    pub mv_read: String,
+    #[serde(default)]
+    pub hl_opc: Option<String>,
+    #[serde(default)]
+    pub ll_opc: Option<String>,
+    #[serde(default)]
+    pub hl: Option<f64>,
+    #[serde(default)]
+    pub ll: Option<f64>,
+    #[serde(default)]
+    pub enable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CvIoDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub soll: String,
+    #[serde(default)]
+    pub ist: String,
+    #[serde(default)]
+    pub sollband_opc: Option<String>,
+    #[serde(default)]
+    pub sollband_value: Option<f64>,
+    #[serde(default)]
+    pub enable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DvIoDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub read: String,
+    #[serde(default)]
+    pub enable: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -508,5 +858,23 @@ mod tests {
         assert!(model_task.configured);
         assert!(simulation_task.label.contains("optional"));
         assert!(simulation_task.configured);
+    }
+
+    #[test]
+    fn sidebar_uses_new_io_tasks_and_no_params_step() {
+        let cfg = ProjectConfig::new("demo");
+        let tasks = cfg.sidebar_tasks();
+
+        assert!(
+            tasks
+                .iter()
+                .any(|task| { task.id == "io" && task.label == "Ein- und Ausgänge definieren" })
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task.id == "limits" && task.label == "I/O definieren")
+        );
+        assert!(!tasks.iter().any(|task| task.id == "params"));
     }
 }

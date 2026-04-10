@@ -17,7 +17,7 @@ use async_opcua::{
         diagnostics::NamespaceMetadata,
         node_manager::memory::{SimpleNodeManager, simple_node_manager},
     },
-    types::{DataValue, MessageSecurityMode, NodeId, ObjectId, StatusCode},
+    types::{AttributeId, DataEncoding, DataValue, MessageSecurityMode, NodeId, ObjectId},
 };
 use eframe::egui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -151,33 +151,6 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     let u_read_id = NodeId::new(ns, U_READ);
     let wd_counter_id = NodeId::new(ns, WD_COUNTER);
     let wd_mirror_id = NodeId::new(ns, WD_MIRROR);
-    let external_inputs = Arc::new(RwLock::new(ExternalInputs::default()));
-
-    add_external_input_callback(
-        &node_manager,
-        y_target_id.clone(),
-        Arc::clone(&external_inputs),
-        |v, x| v.target = x,
-    );
-    add_external_input_callback(
-        &node_manager,
-        y_hl_id.clone(),
-        Arc::clone(&external_inputs),
-        |v, x| v.hl = x,
-    );
-    add_external_input_callback(
-        &node_manager,
-        y_ll_id.clone(),
-        Arc::clone(&external_inputs),
-        |v, x| v.ll = x,
-    );
-    add_external_input_callback(
-        &node_manager,
-        u_write_id.clone(),
-        Arc::clone(&external_inputs),
-        |v, x| v.u_write = x,
-    );
-
     {
         let mut address_space = node_manager.address_space().write();
         address_space.add_folder(
@@ -188,13 +161,13 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
         );
         let _ = address_space.add_variables(
             vec![
-                rw_f64_var(&y_value_id, Y_VALUE, 0.0),
+                ro_f64_var(&y_value_id, Y_VALUE, 0.0),
                 rw_f64_var(&y_target_id, Y_TARGET, 0.0),
                 rw_f64_var(&y_hl_id, Y_HL, 1.0),
                 rw_f64_var(&y_ll_id, Y_LL, -1.0),
                 rw_f64_var(&u_write_id, U_WRITE, 0.0),
-                rw_f64_var(&u_read_id, U_READ, 0.0),
-                rw_f64_var(&wd_counter_id, WD_COUNTER, 0.0),
+                ro_f64_var(&u_read_id, U_READ, 0.0),
+                ro_f64_var(&wd_counter_id, WD_COUNTER, 0.0),
                 rw_f64_var(&wd_mirror_id, WD_MIRROR, 0.0),
             ],
             &folder_id,
@@ -209,7 +182,6 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     let history = Arc::new(RwLock::new(VecDeque::<TimedSample>::with_capacity(
         history_cap,
     )));
-    let subscriptions = Arc::clone(handle.subscriptions());
 
     println!("Virtual PT1 hardware started");
     println!("Endpoint: {endpoint}");
@@ -230,7 +202,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     let sim_stop = Arc::clone(&stop);
     let sim_history = Arc::clone(&history);
     let sim_node_manager = Arc::clone(&node_manager);
-    let sim_external_inputs = Arc::clone(&external_inputs);
+    let subscriptions = Arc::clone(handle.subscriptions());
     let sim_task = tokio::spawn(async move {
         let mut state = Sample {
             y: 0.0,
@@ -250,7 +222,19 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
                 break;
             }
 
-            let external = *sim_external_inputs.read();
+            let external = read_external_inputs_from_nodes(
+                &sim_node_manager,
+                &y_target_id,
+                &y_hl_id,
+                &y_ll_id,
+                &u_write_id,
+                ExternalInputs {
+                    u_write: state.u,
+                    target: state.target,
+                    hl: state.hl,
+                    ll: state.ll,
+                },
+            );
             state.u = external.u_write;
             state.target = external.target;
             state.hl = external.hl;
@@ -349,22 +333,42 @@ fn rw_f64_var(id: &NodeId, browse_name: &str, initial: f64) -> Variable {
     var
 }
 
-fn add_external_input_callback(
+fn ro_f64_var(id: &NodeId, browse_name: &str, initial: f64) -> Variable {
+    let mut var = Variable::new(id, browse_name, browse_name, initial);
+    var.set_access_level(AccessLevel::CURRENT_READ);
+    var.set_user_access_level(AccessLevel::CURRENT_READ);
+    var
+}
+
+fn read_external_inputs_from_nodes(
     node_manager: &SimpleNodeManager,
-    node_id: NodeId,
-    state: Arc<RwLock<ExternalInputs>>,
-    setter: fn(&mut ExternalInputs, f64),
-) {
-    node_manager
-        .inner()
-        .add_write_callback(node_id, move |value, _index_range| {
-            let Some(next_value) = value.value.and_then(|v| v.as_f64()) else {
-                return StatusCode::BadTypeMismatch;
-            };
-            let mut guard = state.write();
-            setter(&mut guard, next_value);
-            StatusCode::Good
-        });
+    y_target_id: &NodeId,
+    y_hl_id: &NodeId,
+    y_ll_id: &NodeId,
+    u_write_id: &NodeId,
+    fallback: ExternalInputs,
+) -> ExternalInputs {
+    let address_space = node_manager.address_space().read();
+    ExternalInputs {
+        u_write: read_node_f64(&address_space, u_write_id).unwrap_or(fallback.u_write),
+        target: read_node_f64(&address_space, y_target_id).unwrap_or(fallback.target),
+        hl: read_node_f64(&address_space, y_hl_id).unwrap_or(fallback.hl),
+        ll: read_node_f64(&address_space, y_ll_id).unwrap_or(fallback.ll),
+    }
+}
+
+fn read_node_f64(
+    address_space: &async_opcua::server::address_space::AddressSpace,
+    node_id: &NodeId,
+) -> Option<f64> {
+    let node = address_space.find_node(node_id)?;
+    let data_value = node.as_node().get_attribute(
+        async_opcua::types::TimestampsToReturn::Neither,
+        AttributeId::Value,
+        &async_opcua::types::NumericRange::None,
+        &DataEncoding::Binary,
+    )?;
+    data_value.value.and_then(|v| v.as_f64())
 }
 
 #[derive(Clone)]
@@ -497,4 +501,39 @@ fn run_plot_window(
         }),
     )
     .map_err(|err| anyhow!("failed to launch plot window: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_opcua::server::address_space::{AddressSpace, NodeType};
+    use async_opcua::types::{NumericRange, ObjectId};
+
+    #[test]
+    fn read_node_f64_returns_current_written_value() {
+        let mut address_space = AddressSpace::new();
+        let ns = 2u16;
+        address_space.add_namespace("urn:smartapc:test", ns);
+
+        let node_id = NodeId::new(ns, "u1_write");
+        let inserted = address_space.add_variables(
+            vec![rw_f64_var(&node_id, "u1_write", 0.0)],
+            &ObjectId::ObjectsFolder.into(),
+        );
+        assert_eq!(inserted, vec![true]);
+
+        let node = address_space
+            .find_node_mut(&node_id)
+            .expect("u1_write node present");
+        match node {
+            NodeType::Variable(var) => {
+                var.set_value(&NumericRange::None, 1.0f64)
+                    .expect("set variable value");
+            }
+            _ => panic!("u1_write must be a variable"),
+        }
+
+        let value = read_node_f64(&address_space, &node_id).expect("read f64 value");
+        assert_eq!(value, 1.0);
+    }
 }

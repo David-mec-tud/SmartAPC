@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fmt,
     net::SocketAddr,
     path::PathBuf,
@@ -16,10 +16,13 @@ use iced::{
 use crate::{
     communication::{ProtocolAdapter, opcua::OpcUaClientAdapter},
     project::ProjectService,
-    project_config::{CommunicationConfig, NumericLimit, SidebarTask, SignalPoint, WatchdogConfig},
+    project_config::{
+        CommunicationConfig, CvIoDefinition, DvIoDefinition, MvIoDefinition, SidebarTask,
+        VariableCatalogConfig, WatchdogConfig,
+    },
     runtime::{RuntimeManager, RuntimeSnapshot},
     storage::SignalSample,
-    types::{SignalType, SignalValue},
+    types::SignalValue,
     web::{AppState, build_router},
 };
 
@@ -58,37 +61,15 @@ fn app_theme(_: &DesktopApp) -> Theme {
     Theme::Light
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignalTypeChoice {
-    F64,
-    Bool,
+#[derive(Debug, Clone)]
+struct VariableNameRow {
+    name: String,
 }
 
-const SIGNAL_TYPE_OPTIONS: [SignalTypeChoice; 2] = [SignalTypeChoice::F64, SignalTypeChoice::Bool];
-
-impl fmt::Display for SignalTypeChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SignalTypeChoice::F64 => write!(f, "f64"),
-            SignalTypeChoice::Bool => write!(f, "bool"),
-        }
-    }
-}
-
-impl From<SignalType> for SignalTypeChoice {
-    fn from(value: SignalType) -> Self {
-        match value {
-            SignalType::F64 => Self::F64,
-            SignalType::Bool => Self::Bool,
-        }
-    }
-}
-
-impl From<SignalTypeChoice> for SignalType {
-    fn from(value: SignalTypeChoice) -> Self {
-        match value {
-            SignalTypeChoice::F64 => Self::F64,
-            SignalTypeChoice::Bool => Self::Bool,
+impl VariableNameRow {
+    fn blank() -> Self {
+        Self {
+            name: String::new(),
         }
     }
 }
@@ -112,60 +93,142 @@ impl fmt::Display for WatchdogKindChoice {
 }
 
 #[derive(Debug, Clone)]
-struct SignalPointEditorRow {
+struct MvIoEditorRow {
     name: String,
-    signal_type: SignalTypeChoice,
-    address: String,
-    test_read: String,
+    mv_write: String,
+    mv_read: String,
+    hl_opc: String,
+    ll_opc: String,
+    hl: String,
+    ll: String,
+    enable: String,
+    read_mv_write: String,
+    read_mv_read: String,
+    read_hl: String,
+    read_ll: String,
+    read_enable: String,
     test_write: String,
 }
 
-impl SignalPointEditorRow {
+impl MvIoEditorRow {
     fn blank() -> Self {
         Self {
             name: String::new(),
-            signal_type: SignalTypeChoice::F64,
-            address: String::new(),
-            test_read: String::new(),
+            mv_write: String::new(),
+            mv_read: String::new(),
+            hl_opc: String::new(),
+            ll_opc: String::new(),
+            hl: String::new(),
+            ll: String::new(),
+            enable: String::new(),
+            read_mv_write: String::new(),
+            read_mv_read: String::new(),
+            read_hl: String::new(),
+            read_ll: String::new(),
+            read_enable: String::new(),
             test_write: String::new(),
         }
     }
 
-    fn from_signal_point(point: &SignalPoint) -> Self {
+    fn from_definition(def: &MvIoDefinition) -> Self {
         Self {
-            name: point.name.clone(),
-            signal_type: point.signal_type.into(),
-            address: point.address.clone(),
-            test_read: String::new(),
+            name: def.name.clone(),
+            mv_write: def.mv_write.clone(),
+            mv_read: def.mv_read.clone(),
+            hl_opc: def.hl_opc.clone().unwrap_or_default(),
+            ll_opc: def.ll_opc.clone().unwrap_or_default(),
+            hl: def.hl.map(|v| format!("{v}")).unwrap_or_default(),
+            ll: def.ll.map(|v| format!("{v}")).unwrap_or_default(),
+            enable: def.enable.clone().unwrap_or_default(),
+            read_mv_write: String::new(),
+            read_mv_read: String::new(),
+            read_hl: String::new(),
+            read_ll: String::new(),
+            read_enable: String::new(),
             test_write: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct NumericLimitEditorRow {
-    signal: String,
-    min: String,
-    max: String,
-    opc_tag: String,
+struct CvIoEditorRow {
+    name: String,
+    soll: String,
+    ist: String,
+    sollband_value: String,
+    sollband_opc: String,
+    enable: String,
+    read_soll: String,
+    read_ist: String,
+    read_sollband: String,
+    read_enable: String,
+    test_write: String,
 }
 
-impl NumericLimitEditorRow {
+impl CvIoEditorRow {
     fn blank() -> Self {
         Self {
-            signal: String::new(),
-            min: String::new(),
-            max: String::new(),
-            opc_tag: String::new(),
+            name: String::new(),
+            soll: String::new(),
+            ist: String::new(),
+            sollband_value: String::new(),
+            sollband_opc: String::new(),
+            enable: String::new(),
+            read_soll: String::new(),
+            read_ist: String::new(),
+            read_sollband: String::new(),
+            read_enable: String::new(),
+            test_write: String::new(),
         }
     }
 
-    fn from_limit(signal: &str, limit: &NumericLimit) -> Self {
+    fn from_definition(def: &CvIoDefinition) -> Self {
         Self {
-            signal: signal.to_string(),
-            min: format!("{}", limit.min),
-            max: format!("{}", limit.max),
-            opc_tag: limit.opc_tag.clone().unwrap_or_default(),
+            name: def.name.clone(),
+            soll: def.soll.clone(),
+            ist: def.ist.clone(),
+            sollband_value: def
+                .sollband_value
+                .map(|v| format!("{v}"))
+                .unwrap_or_default(),
+            sollband_opc: def.sollband_opc.clone().unwrap_or_default(),
+            enable: def.enable.clone().unwrap_or_default(),
+            read_soll: String::new(),
+            read_ist: String::new(),
+            read_sollband: String::new(),
+            read_enable: String::new(),
+            test_write: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DvIoEditorRow {
+    name: String,
+    read: String,
+    enable: String,
+    read_read: String,
+    read_enable: String,
+}
+
+impl DvIoEditorRow {
+    fn blank() -> Self {
+        Self {
+            name: String::new(),
+            read: String::new(),
+            enable: String::new(),
+            read_read: String::new(),
+            read_enable: String::new(),
+        }
+    }
+
+    fn from_definition(def: &DvIoDefinition) -> Self {
+        Self {
+            name: def.name.clone(),
+            read: def.read.clone(),
+            enable: def.enable.clone().unwrap_or_default(),
+            read_read: String::new(),
+            read_enable: String::new(),
         }
     }
 }
@@ -266,7 +329,6 @@ impl SetupPage {
             "timing" => Some(Self::Timing),
             "simulation" => Some(Self::Simulation),
             "deployment" => Some(Self::Deployment),
-            "params" => Some(Self::Params),
             _ => None,
         }
     }
@@ -276,7 +338,7 @@ impl SetupPage {
             Self::Communication => "OPC-UA Kommunikation",
             Self::Watchdog => "Watchdog",
             Self::Io => "Ein- und Ausgänge",
-            Self::Limits => "Limits",
+            Self::Limits => "I/O definieren",
             Self::Model => "Modell",
             Self::Logic => "Regellogik",
             Self::Timing => "Ausführungszeittest",
@@ -293,9 +355,13 @@ struct ProjectPanelData {
     sidebar_tasks: Vec<SidebarTask>,
     config_params: HashMap<String, f64>,
     communication: CommunicationEditorState,
-    io_inputs: Vec<SignalPointEditorRow>,
-    io_outputs: Vec<SignalPointEditorRow>,
-    limits: Vec<NumericLimitEditorRow>,
+    variables: VariableCatalogConfig,
+    mv_names: Vec<VariableNameRow>,
+    cv_names: Vec<VariableNameRow>,
+    dv_names: Vec<VariableNameRow>,
+    mv_io_rows: Vec<MvIoEditorRow>,
+    cv_io_rows: Vec<CvIoEditorRow>,
+    dv_io_rows: Vec<DvIoEditorRow>,
     watchdog: WatchdogEditorState,
 }
 
@@ -313,8 +379,32 @@ struct ParamApplyResult {
 
 #[derive(Debug, Clone)]
 struct IoReadTestResult {
-    input_values: Vec<String>,
-    output_values: Vec<String>,
+    mv_values: Vec<MvReadValues>,
+    cv_values: Vec<CvReadValues>,
+    dv_values: Vec<DvReadValues>,
+}
+
+#[derive(Debug, Clone)]
+struct MvReadValues {
+    mv_write: String,
+    mv_read: String,
+    hl: String,
+    ll: String,
+    enable: String,
+}
+
+#[derive(Debug, Clone)]
+struct CvReadValues {
+    soll: String,
+    ist: String,
+    sollband: String,
+    enable: String,
+}
+
+#[derive(Debug, Clone)]
+struct DvReadValues {
+    read: String,
+    enable: String,
 }
 
 #[derive(Debug, Clone)]
@@ -349,29 +439,36 @@ enum Message {
     WatchdogSaved(Result<String, String>),
     TestWatchdogPressed,
     WatchdogTested(Result<String, String>),
-    AddInputRow,
-    InputRowNameChanged(usize, String),
-    InputRowTypeChanged(usize, SignalTypeChoice),
-    InputRowAddressChanged(usize, String),
-    InputRowTestWriteChanged(usize, String),
-    AddOutputRow,
-    OutputRowNameChanged(usize, String),
-    OutputRowTypeChanged(usize, SignalTypeChoice),
-    OutputRowAddressChanged(usize, String),
-    OutputRowTestWriteChanged(usize, String),
-    TestIoReadPressed,
+    AddMvNameRow,
+    MvNameChanged(usize, String),
+    AddCvNameRow,
+    CvNameChanged(usize, String),
+    AddDvNameRow,
+    DvNameChanged(usize, String),
+    SaveVariablesPressed,
+    VariablesSaved(Result<String, String>),
+    MvWriteChanged(usize, String),
+    MvReadChanged(usize, String),
+    MvHlOpcChanged(usize, String),
+    MvLlOpcChanged(usize, String),
+    MvHlChanged(usize, String),
+    MvLlChanged(usize, String),
+    MvEnableChanged(usize, String),
+    MvTestWriteChanged(usize, String),
+    CvSollChanged(usize, String),
+    CvIstChanged(usize, String),
+    CvSollbandValueChanged(usize, String),
+    CvSollbandOpcChanged(usize, String),
+    CvEnableChanged(usize, String),
+    CvTestWriteChanged(usize, String),
+    DvReadChanged(usize, String),
+    DvEnableChanged(usize, String),
+    TestIoDefinitionReadPressed,
+    TestIoDefinitionWritePressed,
     IoReadTested(Result<IoReadTestResult, String>),
-    TestIoWriteInputPressed(usize),
-    TestIoWriteOutputPressed(usize),
-    InputIoWriteTested(usize, Result<String, String>),
-    OutputIoWriteTested(usize, Result<String, String>),
-    SaveIoPressed,
-    IoSaved(Result<String, String>),
-    LimitMinChanged(String, String),
-    LimitMaxChanged(String, String),
-    LimitOpcTagChanged(String, String),
-    SaveLimitsPressed,
-    LimitsSaved(Result<String, String>),
+    IoWriteTested(Result<String, String>),
+    SaveIoDefinitionPressed,
+    IoDefinitionSaved(Result<String, String>),
 }
 
 struct DesktopApp {
@@ -390,9 +487,13 @@ struct DesktopApp {
     selected_page: SetupPage,
     new_project_name: String,
     communication_editor: CommunicationEditorState,
-    io_input_rows: Vec<SignalPointEditorRow>,
-    io_output_rows: Vec<SignalPointEditorRow>,
-    limit_rows: Vec<NumericLimitEditorRow>,
+    variables: VariableCatalogConfig,
+    mv_name_rows: Vec<VariableNameRow>,
+    cv_name_rows: Vec<VariableNameRow>,
+    dv_name_rows: Vec<VariableNameRow>,
+    mv_io_rows: Vec<MvIoEditorRow>,
+    cv_io_rows: Vec<CvIoEditorRow>,
+    dv_io_rows: Vec<DvIoEditorRow>,
     watchdog_editor: WatchdogEditorState,
     status_message: String,
     error_message: Option<String>,
@@ -423,9 +524,13 @@ impl DesktopApp {
             selected_page: SetupPage::Communication,
             new_project_name: String::new(),
             communication_editor: CommunicationEditorState::blank(),
-            io_input_rows: vec![SignalPointEditorRow::blank()],
-            io_output_rows: vec![SignalPointEditorRow::blank()],
-            limit_rows: vec![NumericLimitEditorRow::blank()],
+            variables: VariableCatalogConfig::default(),
+            mv_name_rows: vec![VariableNameRow::blank()],
+            cv_name_rows: vec![VariableNameRow::blank()],
+            dv_name_rows: vec![VariableNameRow::blank()],
+            mv_io_rows: Vec::new(),
+            cv_io_rows: Vec::new(),
+            dv_io_rows: Vec::new(),
             watchdog_editor: WatchdogEditorState::blank(),
             status_message: format!("Projektordner: {}", settings.project_root.display()),
             error_message: None,
@@ -477,9 +582,13 @@ impl DesktopApp {
                 Ok(panel) => {
                     self.sidebar_tasks = panel.sidebar_tasks;
                     self.communication_editor = panel.communication;
-                    self.io_input_rows = panel.io_inputs;
-                    self.io_output_rows = panel.io_outputs;
-                    self.limit_rows = panel.limits;
+                    self.variables = panel.variables;
+                    self.mv_name_rows = panel.mv_names;
+                    self.cv_name_rows = panel.cv_names;
+                    self.dv_name_rows = panel.dv_names;
+                    self.mv_io_rows = panel.mv_io_rows;
+                    self.cv_io_rows = panel.cv_io_rows;
+                    self.dv_io_rows = panel.dv_io_rows;
                     self.watchdog_editor = panel.watchdog;
 
                     if self.runtime_snapshot.is_none() {
@@ -761,163 +870,43 @@ impl DesktopApp {
                     Task::none()
                 }
             },
-            Message::AddInputRow => {
-                self.io_input_rows.push(SignalPointEditorRow::blank());
+            Message::AddMvNameRow => {
+                self.mv_name_rows.push(VariableNameRow::blank());
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::InputRowNameChanged(index, value) => {
-                if let Some(row) = self.io_input_rows.get_mut(index) {
+            Message::MvNameChanged(index, value) => {
+                if let Some(row) = self.mv_name_rows.get_mut(index) {
                     row.name = value;
-                    row.test_read.clear();
                 }
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::InputRowTypeChanged(index, signal_type) => {
-                if let Some(row) = self.io_input_rows.get_mut(index) {
-                    row.signal_type = signal_type;
-                    row.test_read.clear();
-                }
+            Message::AddCvNameRow => {
+                self.cv_name_rows.push(VariableNameRow::blank());
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::InputRowAddressChanged(index, value) => {
-                if let Some(row) = self.io_input_rows.get_mut(index) {
-                    row.address = value;
-                    row.test_read.clear();
-                }
-                Task::none()
-            }
-            Message::InputRowTestWriteChanged(index, value) => {
-                if let Some(row) = self.io_input_rows.get_mut(index) {
-                    row.test_write = value;
-                }
-                Task::none()
-            }
-            Message::AddOutputRow => {
-                self.io_output_rows.push(SignalPointEditorRow::blank());
-                Task::none()
-            }
-            Message::OutputRowNameChanged(index, value) => {
-                if let Some(row) = self.io_output_rows.get_mut(index) {
+            Message::CvNameChanged(index, value) => {
+                if let Some(row) = self.cv_name_rows.get_mut(index) {
                     row.name = value;
-                    row.test_read.clear();
                 }
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::OutputRowTypeChanged(index, signal_type) => {
-                if let Some(row) = self.io_output_rows.get_mut(index) {
-                    row.signal_type = signal_type;
-                    row.test_read.clear();
-                }
+            Message::AddDvNameRow => {
+                self.dv_name_rows.push(VariableNameRow::blank());
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::OutputRowAddressChanged(index, value) => {
-                if let Some(row) = self.io_output_rows.get_mut(index) {
-                    row.address = value;
-                    row.test_read.clear();
+            Message::DvNameChanged(index, value) => {
+                if let Some(row) = self.dv_name_rows.get_mut(index) {
+                    row.name = value;
                 }
+                self.sync_io_rows_from_name_rows();
                 Task::none()
             }
-            Message::OutputRowTestWriteChanged(index, value) => {
-                if let Some(row) = self.io_output_rows.get_mut(index) {
-                    row.test_write = value;
-                }
-                Task::none()
-            }
-            Message::TestIoReadPressed => {
-                let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
-                    return Task::none();
-                };
-
-                let endpoint_url = self.communication_editor.endpoint_url.clone();
-                test_io_read_task(
-                    self.project_service.clone(),
-                    project_name,
-                    endpoint_url,
-                    self.io_input_rows.clone(),
-                    self.io_output_rows.clone(),
-                )
-            }
-            Message::IoReadTested(result) => match result {
-                Ok(values) => {
-                    for (row, value) in self.io_input_rows.iter_mut().zip(values.input_values) {
-                        row.test_read = value;
-                    }
-                    for (row, value) in self.io_output_rows.iter_mut().zip(values.output_values) {
-                        row.test_read = value;
-                    }
-                    self.status_message = "I/O OPC-UA Read-Test abgeschlossen".to_string();
-                    self.error_message = None;
-                    Task::none()
-                }
-                Err(err) => {
-                    self.error_message = Some(err);
-                    Task::none()
-                }
-            },
-            Message::TestIoWriteInputPressed(index) => {
-                let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
-                    return Task::none();
-                };
-                let Some(row) = self.io_input_rows.get(index).cloned() else {
-                    self.error_message = Some("Ungültige Input-Zeile".to_string());
-                    return Task::none();
-                };
-                test_io_write_task(
-                    self.project_service.clone(),
-                    project_name,
-                    self.communication_editor.endpoint_url.clone(),
-                    row,
-                    move |result| Message::InputIoWriteTested(index, result),
-                )
-            }
-            Message::TestIoWriteOutputPressed(index) => {
-                let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
-                    return Task::none();
-                };
-                let Some(row) = self.io_output_rows.get(index).cloned() else {
-                    self.error_message = Some("Ungültige Output-Zeile".to_string());
-                    return Task::none();
-                };
-                test_io_write_task(
-                    self.project_service.clone(),
-                    project_name,
-                    self.communication_editor.endpoint_url.clone(),
-                    row,
-                    move |result| Message::OutputIoWriteTested(index, result),
-                )
-            }
-            Message::InputIoWriteTested(index, result) => match result {
-                Ok(read_back) => {
-                    if let Some(row) = self.io_input_rows.get_mut(index) {
-                        row.test_read = read_back;
-                    }
-                    self.status_message = "I/O test_write (input) erfolgreich".to_string();
-                    self.error_message = None;
-                    Task::none()
-                }
-                Err(err) => {
-                    self.error_message = Some(err);
-                    Task::none()
-                }
-            },
-            Message::OutputIoWriteTested(index, result) => match result {
-                Ok(read_back) => {
-                    if let Some(row) = self.io_output_rows.get_mut(index) {
-                        row.test_read = read_back;
-                    }
-                    self.status_message = "I/O test_write (output) erfolgreich".to_string();
-                    self.error_message = None;
-                    Task::none()
-                }
-                Err(err) => {
-                    self.error_message = Some(err);
-                    Task::none()
-                }
-            },
-            Message::SaveIoPressed => {
+            Message::SaveVariablesPressed => {
                 if self.runtime_snapshot.is_some() {
                     self.error_message = Some(
                         "Runtime läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
@@ -931,14 +920,15 @@ impl DesktopApp {
                     return Task::none();
                 };
 
-                save_io_task(
+                save_variables_task(
                     self.project_service.clone(),
                     project_name,
-                    self.io_input_rows.clone(),
-                    self.io_output_rows.clone(),
+                    self.mv_name_rows.clone(),
+                    self.cv_name_rows.clone(),
+                    self.dv_name_rows.clone(),
                 )
             }
-            Message::IoSaved(result) => match result {
+            Message::VariablesSaved(result) => match result {
                 Ok(status) => {
                     self.status_message = status;
                     self.error_message = None;
@@ -953,28 +943,177 @@ impl DesktopApp {
                     Task::none()
                 }
             },
-            Message::LimitMinChanged(signal, value) => {
-                self.ensure_limit_row_exists(&signal);
-                if let Some(row) = self.find_limit_row_mut(&signal) {
-                    row.min = value;
+            Message::MvWriteChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.mv_write = value;
+                    row.read_mv_write.clear();
                 }
                 Task::none()
             }
-            Message::LimitMaxChanged(signal, value) => {
-                self.ensure_limit_row_exists(&signal);
-                if let Some(row) = self.find_limit_row_mut(&signal) {
-                    row.max = value;
+            Message::MvReadChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.mv_read = value;
+                    row.read_mv_read.clear();
                 }
                 Task::none()
             }
-            Message::LimitOpcTagChanged(signal, value) => {
-                self.ensure_limit_row_exists(&signal);
-                if let Some(row) = self.find_limit_row_mut(&signal) {
-                    row.opc_tag = value;
+            Message::MvHlOpcChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.hl_opc = value;
                 }
                 Task::none()
             }
-            Message::SaveLimitsPressed => {
+            Message::MvLlOpcChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.ll_opc = value;
+                }
+                Task::none()
+            }
+            Message::MvHlChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.hl = value;
+                }
+                Task::none()
+            }
+            Message::MvLlChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.ll = value;
+                }
+                Task::none()
+            }
+            Message::MvEnableChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.enable = value;
+                }
+                Task::none()
+            }
+            Message::MvTestWriteChanged(index, value) => {
+                if let Some(row) = self.mv_io_rows.get_mut(index) {
+                    row.test_write = value;
+                }
+                Task::none()
+            }
+            Message::CvSollChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.soll = value;
+                    row.read_soll.clear();
+                }
+                Task::none()
+            }
+            Message::CvIstChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.ist = value;
+                    row.read_ist.clear();
+                }
+                Task::none()
+            }
+            Message::CvSollbandValueChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.sollband_value = value;
+                }
+                Task::none()
+            }
+            Message::CvSollbandOpcChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.sollband_opc = value;
+                }
+                Task::none()
+            }
+            Message::CvEnableChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.enable = value;
+                }
+                Task::none()
+            }
+            Message::CvTestWriteChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.test_write = value;
+                }
+                Task::none()
+            }
+            Message::DvReadChanged(index, value) => {
+                if let Some(row) = self.dv_io_rows.get_mut(index) {
+                    row.read = value;
+                    row.read_read.clear();
+                }
+                Task::none()
+            }
+            Message::DvEnableChanged(index, value) => {
+                if let Some(row) = self.dv_io_rows.get_mut(index) {
+                    row.enable = value;
+                }
+                Task::none()
+            }
+            Message::TestIoDefinitionReadPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+
+                let endpoint_url = self.communication_editor.endpoint_url.clone();
+                test_io_read_task(
+                    self.project_service.clone(),
+                    project_name,
+                    endpoint_url,
+                    self.mv_io_rows.clone(),
+                    self.cv_io_rows.clone(),
+                    self.dv_io_rows.clone(),
+                )
+            }
+            Message::TestIoDefinitionWritePressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+
+                test_io_write_all_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.communication_editor.endpoint_url.clone(),
+                    self.mv_io_rows.clone(),
+                    self.cv_io_rows.clone(),
+                )
+            }
+            Message::IoReadTested(result) => match result {
+                Ok(values) => {
+                    for (row, value) in self.mv_io_rows.iter_mut().zip(values.mv_values) {
+                        row.read_mv_write = value.mv_write;
+                        row.read_mv_read = value.mv_read;
+                        row.read_hl = value.hl;
+                        row.read_ll = value.ll;
+                        row.read_enable = value.enable;
+                    }
+                    for (row, value) in self.cv_io_rows.iter_mut().zip(values.cv_values) {
+                        row.read_soll = value.soll;
+                        row.read_ist = value.ist;
+                        row.read_sollband = value.sollband;
+                        row.read_enable = value.enable;
+                    }
+                    for (row, value) in self.dv_io_rows.iter_mut().zip(values.dv_values) {
+                        row.read_read = value.read;
+                        row.read_enable = value.enable;
+                    }
+                    self.status_message = "I/O OPC-UA Read-Test abgeschlossen".to_string();
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::IoWriteTested(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::SaveIoDefinitionPressed => {
                 if self.runtime_snapshot.is_some() {
                     self.error_message = Some(
                         "Runtime läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
@@ -988,14 +1127,18 @@ impl DesktopApp {
                     return Task::none();
                 };
 
-                save_limits_task(
+                save_io_definition_task(
                     self.project_service.clone(),
                     project_name,
-                    self.numeric_signal_names(),
-                    self.limit_rows.clone(),
+                    self.mv_name_rows.clone(),
+                    self.cv_name_rows.clone(),
+                    self.dv_name_rows.clone(),
+                    self.mv_io_rows.clone(),
+                    self.cv_io_rows.clone(),
+                    self.dv_io_rows.clone(),
                 )
             }
-            Message::LimitsSaved(result) => match result {
+            Message::IoDefinitionSaved(result) => match result {
                 Ok(status) => {
                     self.status_message = status;
                     self.error_message = None;
@@ -1125,6 +1268,9 @@ impl DesktopApp {
             content = content.push(text("Kein Projekt geladen."));
         } else {
             for task in &self.sidebar_tasks {
+                if task.id == "params" {
+                    continue;
+                }
                 let marker = if task.configured { "[x]" } else { "[ ]" };
                 let label = format!("{} {}", marker, task.label);
                 if let Some(page) = SetupPage::from_task_id(&task.id) {
@@ -1375,181 +1521,355 @@ impl DesktopApp {
 
     fn io_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
         let can_save = self.selected_project.is_some() && !runtime_running;
-        let can_test = self.selected_project.is_some();
-
-        let mut inputs_col = column![
+        let mut mv_col = column![
             row![
-                text("Inputs").size(18),
-                button("+ Zeile").on_press(Message::AddInputRow)
+                text("MVs (manipulierende Variablen)").size(18),
+                button("+ Zeile").on_press(Message::AddMvNameRow)
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
         ]
         .spacing(6);
 
-        for (index, entry) in self.io_input_rows.iter().enumerate() {
-            inputs_col = inputs_col.push(
-                row![
-                    text_input("Name", &entry.name)
-                        .on_input(move |value| Message::InputRowNameChanged(index, value))
-                        .width(Length::FillPortion(2)),
-                    pick_list(
-                        SIGNAL_TYPE_OPTIONS.to_vec(),
-                        Some(entry.signal_type),
-                        move |value| { Message::InputRowTypeChanged(index, value) }
-                    )
-                    .width(Length::Fixed(90.0)),
-                    text_input("OPC-UA Adresse", &entry.address)
-                        .on_input(move |value| Message::InputRowAddressChanged(index, value))
-                        .width(Length::FillPortion(3)),
-                    text_input("test_read", &entry.test_read).width(Length::FillPortion(2)),
-                    text_input("test_write", &entry.test_write)
-                        .on_input(move |value| Message::InputRowTestWriteChanged(index, value))
-                        .width(Length::FillPortion(2)),
-                    button("test_write").on_press(Message::TestIoWriteInputPressed(index)),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+        for (index, row_data) in self.mv_name_rows.iter().enumerate() {
+            mv_col = mv_col.push(
+                text_input("MV Name", &row_data.name)
+                    .on_input(move |value| Message::MvNameChanged(index, value))
+                    .width(Length::Fill),
             );
         }
 
-        let mut outputs_col = column![
+        let mut cv_col = column![
             row![
-                text("Outputs").size(18),
-                button("+ Zeile").on_press(Message::AddOutputRow)
+                text("CVs (Regelgrößen)").size(18),
+                button("+ Zeile").on_press(Message::AddCvNameRow)
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
         ]
         .spacing(6);
 
-        for (index, entry) in self.io_output_rows.iter().enumerate() {
-            outputs_col = outputs_col.push(
-                row![
-                    text_input("Name", &entry.name)
-                        .on_input(move |value| Message::OutputRowNameChanged(index, value))
-                        .width(Length::FillPortion(2)),
-                    pick_list(
-                        SIGNAL_TYPE_OPTIONS.to_vec(),
-                        Some(entry.signal_type),
-                        move |value| { Message::OutputRowTypeChanged(index, value) }
-                    )
-                    .width(Length::Fixed(90.0)),
-                    text_input("OPC-UA Adresse", &entry.address)
-                        .on_input(move |value| Message::OutputRowAddressChanged(index, value))
-                        .width(Length::FillPortion(3)),
-                    text_input("test_read", &entry.test_read).width(Length::FillPortion(2)),
-                    text_input("test_write", &entry.test_write)
-                        .on_input(move |value| Message::OutputRowTestWriteChanged(index, value))
-                        .width(Length::FillPortion(2)),
-                    button("test_write").on_press(Message::TestIoWriteOutputPressed(index)),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+        for (index, row_data) in self.cv_name_rows.iter().enumerate() {
+            cv_col = cv_col.push(
+                text_input("CV Name", &row_data.name)
+                    .on_input(move |value| Message::CvNameChanged(index, value))
+                    .width(Length::Fill),
+            );
+        }
+
+        let mut dv_col = column![
+            row![
+                text("DVs (Störgrößen)").size(18),
+                button("+ Zeile").on_press(Message::AddDvNameRow)
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+        ]
+        .spacing(6);
+
+        for (index, row_data) in self.dv_name_rows.iter().enumerate() {
+            dv_col = dv_col.push(
+                text_input("DV Name", &row_data.name)
+                    .on_input(move |value| Message::DvNameChanged(index, value))
+                    .width(Length::Fill),
             );
         }
 
         let save_button = if can_save {
-            button("I/O speichern").on_press(Message::SaveIoPressed)
+            button("Variablen speichern").on_press(Message::SaveVariablesPressed)
         } else {
-            button("I/O speichern")
-        };
-        let test_button = if can_test {
-            button("test_read").on_press(Message::TestIoReadPressed)
-        } else {
-            button("test_read")
+            button("Variablen speichern")
         };
 
         let hint = if runtime_running {
-            text("Runtime läuft: Für I/O-Änderungen erst stoppen.").size(13)
+            text("Runtime läuft: Für strukturelle Änderungen erst stoppen.").size(13)
         } else {
             text("").size(13)
         };
 
+        let main_content = column![
+            text("Ein- und Ausgänge definieren").size(20),
+            text("Hier werden nur Namen für MV/CV/DV festgelegt. OPC-UA-Adressen folgen im nächsten Schritt \"I/O definieren\".").size(13),
+            mv_col,
+            cv_col,
+            dv_col,
+        ]
+        .spacing(10);
+
         container(
             column![
-                text("I/O Definition").size(20),
-                inputs_col,
-                outputs_col,
-                text(
-                    "test_read liest alle Zeilen; test_write schreibt den Zeilenwert und liest danach zurück."
-                )
-                .size(13),
+                scrollable(main_content)
+                    .direction(iced::widget::scrollable::Direction::Both {
+                        vertical: iced::widget::scrollable::Scrollbar::new(),
+                        horizontal: iced::widget::scrollable::Scrollbar::new(),
+                    })
+                    .height(Length::Fill),
                 hint,
-                row![save_button, test_button].spacing(10)
+                save_button
             ]
             .spacing(10),
         )
         .padding(10)
+        .height(Length::Fill)
         .into()
     }
 
     fn limits_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
         let can_save = self.selected_project.is_some() && !runtime_running;
-        let signal_names = self.numeric_signal_names();
+        let can_test = self.selected_project.is_some();
+        let has_any_names = self.variables.has_any();
+        let mut content = column![text("I/O definieren").size(20)].spacing(10);
 
-        let mut content = column![text("Limits").size(20)].spacing(10);
-
-        if signal_names.is_empty() {
+        if !has_any_names {
             content = content.push(text(
-                "Keine numerischen I/O-Signale definiert. Bitte zuerst I/O konfigurieren.",
+                "Keine MV/CV/DV-Namen vorhanden. Bitte zuerst \"Ein- und Ausgänge definieren\" ausfüllen.",
             ));
         } else {
-            for signal in signal_names {
-                let existing = self.find_limit_row(&signal);
-                let min_value = existing.map(|row| row.min.clone()).unwrap_or_default();
-                let max_value = existing.map(|row| row.max.clone()).unwrap_or_default();
-                let opc_tag_value = existing.map(|row| row.opc_tag.clone()).unwrap_or_default();
+            let header = row![
+                text("Unterparameter").width(Length::FillPortion(2)),
+                text("opc address").width(Length::FillPortion(3)),
+                text("optional init value").width(Length::FillPortion(2)),
+                text("read value").width(Length::FillPortion(2)),
+                text("write value").width(Length::FillPortion(2)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
 
-                let signal_for_min = signal.clone();
-                let signal_for_max = signal.clone();
-                let signal_for_tag = signal.clone();
-
+            content = content.push(header);
+            content = content.push(
+                text("Hinweis: test_read/test_write laufen über die Buttons unten; test_write nutzt befüllte write-value-Felder.")
+                    .size(13),
+            );
+            content = content.push(
+                text("MV: MV_WRITE/MV_READ/HL/LL/Enable mit optionaler OPC-Adresse (für Abschluss nicht Pflicht)")
+                    .size(13),
+            );
+            for (index, row_data) in self.mv_io_rows.iter().enumerate() {
                 content = content.push(
-                    row![
-                        text(signal).width(Length::FillPortion(2)),
-                        text_input("Min", &min_value)
-                            .on_input(move |value| {
-                                Message::LimitMinChanged(signal_for_min.clone(), value)
-                            })
-                            .width(Length::FillPortion(1)),
-                        text_input("Max", &max_value)
-                            .on_input(move |value| {
-                                Message::LimitMaxChanged(signal_for_max.clone(), value)
-                            })
-                            .width(Length::FillPortion(1)),
-                        text_input("OPC Tag (optional)", &opc_tag_value)
-                            .on_input(move |value| {
-                                Message::LimitOpcTagChanged(signal_for_tag.clone(), value)
-                            })
-                            .width(Length::FillPortion(2)),
+                    column![
+                        text(format!("MV: {}", row_data.name)).size(16),
+                        row![
+                            text("MV_WRITE").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.mv_write)
+                                .on_input(move |value| Message::MvWriteChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_mv_write)
+                                .width(Length::FillPortion(2)),
+                            text_input("write", &row_data.test_write)
+                                .on_input(move |value| Message::MvTestWriteChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("MV_READ").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.mv_read)
+                                .on_input(move |value| Message::MvReadChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_mv_read)
+                                .width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("HL").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.hl_opc)
+                                .on_input(move |value| Message::MvHlOpcChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", &row_data.hl)
+                                .on_input(move |value| Message::MvHlChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_hl).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("LL").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.ll_opc)
+                                .on_input(move |value| Message::MvLlOpcChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", &row_data.ll)
+                                .on_input(move |value| Message::MvLlChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_ll).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("Enable").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.enable)
+                                .on_input(move |value| Message::MvEnableChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_enable).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
                     ]
-                    .spacing(10)
-                    .align_y(iced::Alignment::Center),
+                    .spacing(8),
+                );
+            }
+
+            content = content.push(
+                text("CV: SOLL/IST/Sollband/Enable mit optionaler OPC-Adresse (Sollband alternativ als init value)")
+                    .size(13),
+            );
+            for (index, row_data) in self.cv_io_rows.iter().enumerate() {
+                content = content.push(
+                    column![
+                        text(format!("CV: {}", row_data.name)).size(16),
+                        row![
+                            text("SOLL").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.soll)
+                                .on_input(move |value| Message::CvSollChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_soll).width(Length::FillPortion(2)),
+                            text_input("write", &row_data.test_write)
+                                .on_input(move |value| Message::CvTestWriteChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("IST").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.ist)
+                                .on_input(move |value| Message::CvIstChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_ist).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("Sollband").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.sollband_opc)
+                                .on_input(move |value| Message::CvSollbandOpcChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", &row_data.sollband_value)
+                                .on_input(move |value| Message::CvSollbandValueChanged(
+                                    index, value
+                                ))
+                                .width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_sollband)
+                                .width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("Enable").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.enable)
+                                .on_input(move |value| Message::CvEnableChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_enable).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(8),
+                );
+            }
+
+            content = content.push(
+                text("DV: READ/Enable mit optionaler OPC-Adresse (für Abschluss nicht Pflicht)")
+                    .size(13),
+            );
+            for (index, row_data) in self.dv_io_rows.iter().enumerate() {
+                content = content.push(
+                    column![
+                        text(format!("DV: {}", row_data.name)).size(16),
+                        row![
+                            text("READ").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.read)
+                                .on_input(move |value| Message::DvReadChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_read).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("Enable").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.enable)
+                                .on_input(move |value| Message::DvEnableChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init", "").width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_enable).width(Length::FillPortion(2)),
+                            text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(8),
                 );
             }
         }
 
         let save_button = if can_save {
-            button("Limits speichern").on_press(Message::SaveLimitsPressed)
+            button("I/O Definition speichern").on_press(Message::SaveIoDefinitionPressed)
         } else {
-            button("Limits speichern")
+            button("I/O Definition speichern")
+        };
+        let test_read_button = if can_test {
+            button("test_read").on_press(Message::TestIoDefinitionReadPressed)
+        } else {
+            button("test_read")
+        };
+        let test_write_button = if can_test {
+            button("test_write").on_press(Message::TestIoDefinitionWritePressed)
+        } else {
+            button("test_write")
         };
 
         let hint = if runtime_running {
-            text("Runtime läuft: Für Limits-Änderungen erst stoppen.").size(13)
+            text("Runtime läuft: Für strukturelle Änderungen erst stoppen.").size(13)
         } else {
             text("").size(13)
         };
 
-        container(column![content, hint, save_button].spacing(10))
-            .padding(10)
-            .into()
+        let actions = row![save_button, test_read_button, test_write_button].spacing(10);
+
+        container(
+            column![
+                scrollable(content)
+                    .direction(iced::widget::scrollable::Direction::Both {
+                        vertical: iced::widget::scrollable::Scrollbar::new(),
+                        horizontal: iced::widget::scrollable::Scrollbar::new(),
+                    })
+                    .height(Length::Fill),
+                hint,
+                actions
+            ]
+            .spacing(10),
+        )
+        .padding(10)
+        .height(Length::Fill)
+        .into()
     }
 
     fn params_view(&self) -> Element<'_, Message> {
         let runtime_running = self.runtime_snapshot.is_some();
         let mut content = column![text("Online Parameter").size(20)].spacing(10);
+
+        if self.has_configured_variables() {
+            content =
+                content.push(text("Konfigurierte Variablen (für Regellogik verfügbar):").size(15));
+            for line in self.configured_variable_lines() {
+                content = content.push(text(line));
+            }
+            content = content.push(text(" "));
+        }
 
         if self.logic_params.is_empty() {
             content = content.push(text("Keine Parameter vorhanden."));
@@ -1628,40 +1948,110 @@ impl DesktopApp {
         self.param_inputs = next;
     }
 
-    fn numeric_signal_names(&self) -> Vec<String> {
-        let mut names = BTreeSet::new();
+    fn sync_io_rows_from_name_rows(&mut self) {
+        let mvs = collect_variable_names(&self.mv_name_rows);
+        let cvs = collect_variable_names(&self.cv_name_rows);
+        let dvs = collect_variable_names(&self.dv_name_rows);
 
-        for row in self.io_input_rows.iter().chain(self.io_output_rows.iter()) {
-            if row.signal_type == SignalTypeChoice::F64 {
-                let name = row.name.trim();
-                if !name.is_empty() {
-                    names.insert(name.to_string());
-                }
-            }
+        self.variables = VariableCatalogConfig {
+            mvs: mvs.clone(),
+            cvs: cvs.clone(),
+            dvs: dvs.clone(),
+        };
+        self.mv_io_rows = sync_mv_rows(&mvs, &self.mv_io_rows);
+        self.cv_io_rows = sync_cv_rows(&cvs, &self.cv_io_rows);
+        self.dv_io_rows = sync_dv_rows(&dvs, &self.dv_io_rows);
+
+        if self.mv_name_rows.is_empty() {
+            self.mv_name_rows.push(VariableNameRow::blank());
         }
-
-        names.into_iter().collect()
-    }
-
-    fn find_limit_row(&self, signal: &str) -> Option<&NumericLimitEditorRow> {
-        self.limit_rows.iter().find(|row| row.signal == signal)
-    }
-
-    fn find_limit_row_mut(&mut self, signal: &str) -> Option<&mut NumericLimitEditorRow> {
-        self.limit_rows.iter_mut().find(|row| row.signal == signal)
-    }
-
-    fn ensure_limit_row_exists(&mut self, signal: &str) {
-        if self.find_limit_row(signal).is_some() {
-            return;
+        if self.cv_name_rows.is_empty() {
+            self.cv_name_rows.push(VariableNameRow::blank());
         }
-        self.limit_rows.push(NumericLimitEditorRow {
-            signal: signal.to_string(),
-            min: String::new(),
-            max: String::new(),
-            opc_tag: String::new(),
-        });
+        if self.dv_name_rows.is_empty() {
+            self.dv_name_rows.push(VariableNameRow::blank());
+        }
     }
+
+    fn configured_variable_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.variables.mvs.is_empty() {
+            lines.push(format!("MV: {}", self.variables.mvs.join(", ")));
+        }
+        if !self.variables.cvs.is_empty() {
+            lines.push(format!("CV: {}", self.variables.cvs.join(", ")));
+        }
+        if !self.variables.dvs.is_empty() {
+            lines.push(format!("DV: {}", self.variables.dvs.join(", ")));
+        }
+        lines
+    }
+
+    fn has_configured_variables(&self) -> bool {
+        self.variables.has_any()
+            || !collect_variable_names(&self.mv_name_rows).is_empty()
+            || !collect_variable_names(&self.cv_name_rows).is_empty()
+            || !collect_variable_names(&self.dv_name_rows).is_empty()
+    }
+}
+
+fn collect_variable_names(rows: &[VariableNameRow]) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let name = row.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing: &String| existing == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+fn sync_mv_rows(names: &[String], existing: &[MvIoEditorRow]) -> Vec<MvIoEditorRow> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(row) = existing.iter().find(|row| row.name == *name) {
+            out.push(row.clone());
+        } else {
+            out.push(MvIoEditorRow {
+                name: name.clone(),
+                ..MvIoEditorRow::blank()
+            });
+        }
+    }
+    out
+}
+
+fn sync_cv_rows(names: &[String], existing: &[CvIoEditorRow]) -> Vec<CvIoEditorRow> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(row) = existing.iter().find(|row| row.name == *name) {
+            out.push(row.clone());
+        } else {
+            out.push(CvIoEditorRow {
+                name: name.clone(),
+                ..CvIoEditorRow::blank()
+            });
+        }
+    }
+    out
+}
+
+fn sync_dv_rows(names: &[String], existing: &[DvIoEditorRow]) -> Vec<DvIoEditorRow> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(row) = existing.iter().find(|row| row.name == *name) {
+            out.push(row.clone());
+        } else {
+            out.push(DvIoEditorRow {
+                name: name.clone(),
+                ..DvIoEditorRow::blank()
+            });
+        }
+    }
+    out
 }
 
 fn load_projects_task(project_service: ProjectService) -> Task<Message> {
@@ -1686,44 +2076,68 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             })?;
             let communication = CommunicationEditorState::from_config(&cfg.communication);
 
-            let io_inputs = if cfg.io.inputs.is_empty() {
-                vec![SignalPointEditorRow::blank()]
+            let mv_names = if cfg.variables.mvs.is_empty() {
+                vec![VariableNameRow::blank()]
             } else {
-                cfg.io
-                    .inputs
+                cfg.variables
+                    .mvs
                     .iter()
-                    .map(SignalPointEditorRow::from_signal_point)
+                    .map(|name| VariableNameRow { name: name.clone() })
+                    .collect()
+            };
+            let cv_names = if cfg.variables.cvs.is_empty() {
+                vec![VariableNameRow::blank()]
+            } else {
+                cfg.variables
+                    .cvs
+                    .iter()
+                    .map(|name| VariableNameRow { name: name.clone() })
+                    .collect()
+            };
+            let dv_names = if cfg.variables.dvs.is_empty() {
+                vec![VariableNameRow::blank()]
+            } else {
+                cfg.variables
+                    .dvs
+                    .iter()
+                    .map(|name| VariableNameRow { name: name.clone() })
                     .collect()
             };
 
-            let io_outputs = if cfg.io.outputs.is_empty() {
-                vec![SignalPointEditorRow::blank()]
-            } else {
-                cfg.io
-                    .outputs
-                    .iter()
-                    .map(SignalPointEditorRow::from_signal_point)
-                    .collect()
-            };
-
-            let mut limit_rows: Vec<_> = cfg
-                .limits
-                .values
+            let mv_io_existing: Vec<_> = cfg
+                .io_definition
+                .mvs
                 .iter()
-                .map(|(signal, limit)| NumericLimitEditorRow::from_limit(signal, limit))
+                .map(MvIoEditorRow::from_definition)
                 .collect();
-            limit_rows.sort_by(|a, b| a.signal.cmp(&b.signal));
-            if limit_rows.is_empty() {
-                limit_rows.push(NumericLimitEditorRow::blank());
-            }
+            let cv_io_existing: Vec<_> = cfg
+                .io_definition
+                .cvs
+                .iter()
+                .map(CvIoEditorRow::from_definition)
+                .collect();
+            let dv_io_existing: Vec<_> = cfg
+                .io_definition
+                .dvs
+                .iter()
+                .map(DvIoEditorRow::from_definition)
+                .collect();
+
+            let mv_io_rows = sync_mv_rows(&cfg.variables.mvs, &mv_io_existing);
+            let cv_io_rows = sync_cv_rows(&cfg.variables.cvs, &cv_io_existing);
+            let dv_io_rows = sync_dv_rows(&cfg.variables.dvs, &dv_io_existing);
 
             Ok(ProjectPanelData {
                 sidebar_tasks,
                 config_params: cfg.logic.params.clone(),
                 communication,
-                io_inputs,
-                io_outputs,
-                limits: limit_rows,
+                variables: cfg.variables.clone(),
+                mv_names,
+                cv_names,
+                dv_names,
+                mv_io_rows,
+                cv_io_rows,
+                dv_io_rows,
                 watchdog: WatchdogEditorState::from_config(&cfg.watchdog),
             })
         },
@@ -2002,11 +2416,12 @@ fn test_watchdog_task(
     )
 }
 
-fn save_io_task(
+fn save_variables_task(
     project_service: ProjectService,
     project_name: String,
-    input_rows: Vec<SignalPointEditorRow>,
-    output_rows: Vec<SignalPointEditorRow>,
+    mv_rows: Vec<VariableNameRow>,
+    cv_rows: Vec<VariableNameRow>,
+    dv_rows: Vec<VariableNameRow>,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -2014,16 +2429,15 @@ fn save_io_task(
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
 
-            cfg.io.inputs = build_signal_points("input", &input_rows)?;
-            cfg.io.outputs = build_signal_points("output", &output_rows)?;
+            cfg.variables = build_variable_catalog(&mv_rows, &cv_rows, &dv_rows)?;
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("I/O konnten nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Variablen konnten nicht gespeichert werden: {err}"))?;
 
-            Ok(format!("I/O für '{}' gespeichert", project_name))
+            Ok(format!("Variablen für '{}' gespeichert", project_name))
         },
-        Message::IoSaved,
+        Message::VariablesSaved,
     )
 }
 
@@ -2031,8 +2445,9 @@ fn test_io_read_task(
     project_service: ProjectService,
     project_name: String,
     endpoint_url_from_editor: String,
-    input_rows: Vec<SignalPointEditorRow>,
-    output_rows: Vec<SignalPointEditorRow>,
+    mv_rows: Vec<MvIoEditorRow>,
+    cv_rows: Vec<CvIoEditorRow>,
+    dv_rows: Vec<DvIoEditorRow>,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -2051,51 +2466,60 @@ fn test_io_read_task(
                 format!("I/O Read-Test: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
             })?;
 
-            let mut input_values = Vec::with_capacity(input_rows.len());
-            for row in &input_rows {
-                if row.address.trim().is_empty() {
-                    input_values.push(String::new());
-                    continue;
-                }
-                let value = match adapter.read(row.address.trim()).await {
-                    Ok(value) => signal_value_to_test_string(value),
-                    Err(err) => format!("ERR: {err}"),
-                };
-                input_values.push(value);
+            let mut mv_values = Vec::with_capacity(mv_rows.len());
+            for row in &mv_rows {
+                let mv_write = read_optional_tag(&adapter, row.mv_write.trim()).await;
+                let mv_read = read_optional_tag(&adapter, row.mv_read.trim()).await;
+                let hl = read_optional_tag(&adapter, row.hl_opc.trim()).await;
+                let ll = read_optional_tag(&adapter, row.ll_opc.trim()).await;
+                let enable = read_optional_tag(&adapter, row.enable.trim()).await;
+                mv_values.push(MvReadValues {
+                    mv_write,
+                    mv_read,
+                    hl,
+                    ll,
+                    enable,
+                });
             }
 
-            let mut output_values = Vec::with_capacity(output_rows.len());
-            for row in &output_rows {
-                if row.address.trim().is_empty() {
-                    output_values.push(String::new());
-                    continue;
-                }
-                let value = match adapter.read(row.address.trim()).await {
-                    Ok(value) => signal_value_to_test_string(value),
-                    Err(err) => format!("ERR: {err}"),
-                };
-                output_values.push(value);
+            let mut cv_values = Vec::with_capacity(cv_rows.len());
+            for row in &cv_rows {
+                let soll = read_optional_tag(&adapter, row.soll.trim()).await;
+                let ist = read_optional_tag(&adapter, row.ist.trim()).await;
+                let sollband = read_optional_tag(&adapter, row.sollband_opc.trim()).await;
+                let enable = read_optional_tag(&adapter, row.enable.trim()).await;
+                cv_values.push(CvReadValues {
+                    soll,
+                    ist,
+                    sollband,
+                    enable,
+                });
+            }
+
+            let mut dv_values = Vec::with_capacity(dv_rows.len());
+            for row in &dv_rows {
+                let read = read_optional_tag(&adapter, row.read.trim()).await;
+                let enable = read_optional_tag(&adapter, row.enable.trim()).await;
+                dv_values.push(DvReadValues { read, enable });
             }
 
             Ok(IoReadTestResult {
-                input_values,
-                output_values,
+                mv_values,
+                cv_values,
+                dv_values,
             })
         },
         Message::IoReadTested,
     )
 }
 
-fn test_io_write_task<F>(
+fn test_io_write_all_task(
     project_service: ProjectService,
     project_name: String,
     endpoint_url_from_editor: String,
-    row: SignalPointEditorRow,
-    map_message: F,
-) -> Task<Message>
-where
-    F: FnOnce(Result<String, String>) -> Message + Send + 'static,
-{
+    mv_rows: Vec<MvIoEditorRow>,
+    cv_rows: Vec<CvIoEditorRow>,
+) -> Task<Message> {
     Task::perform(
         async move {
             let cfg = project_service.load_config(&project_name).map_err(|err| {
@@ -2108,48 +2532,63 @@ where
                 endpoint_url_from_editor.trim().to_string()
             };
 
-            let address = row.address.trim().to_string();
-            if address.is_empty() {
-                return Err("test_write: OPC-UA Adresse darf nicht leer sein".to_string());
-            }
-
-            let raw_value = row.test_write.trim().to_string();
-            if raw_value.is_empty() {
-                return Err("test_write: Bitte zuerst einen Wert eintragen".to_string());
-            }
-
-            let value = parse_test_write_value(row.signal_type, &raw_value)?;
-
             let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
             adapter.connect().await.map_err(|err| {
                 format!("test_write: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
             })?;
 
-            adapter.write(&address, value).await.map_err(|err| {
-                format!(
-                    "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
-                    address
-                )
-            })?;
+            let mut write_count = 0usize;
 
-            let read_back = adapter.read(&address).await.map_err(|err| {
-                format!(
-                    "test_write: Rücklesen von '{}' fehlgeschlagen: {err}",
-                    address
-                )
-            })?;
+            for row in &mv_rows {
+                let address = row.mv_write.trim();
+                let raw_value = row.test_write.trim();
+                if address.is_empty() || raw_value.is_empty() {
+                    continue;
+                }
+                let value = parse_test_write_value(raw_value)?;
+                adapter.write(address, value).await.map_err(|err| {
+                    format!(
+                        "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
+                        address
+                    )
+                })?;
+                write_count += 1;
+            }
 
-            Ok(signal_value_to_test_string(read_back))
+            for row in &cv_rows {
+                let address = row.soll.trim();
+                let raw_value = row.test_write.trim();
+                if address.is_empty() || raw_value.is_empty() {
+                    continue;
+                }
+                let value = parse_test_write_value(raw_value)?;
+                adapter.write(address, value).await.map_err(|err| {
+                    format!(
+                        "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
+                        address
+                    )
+                })?;
+                write_count += 1;
+            }
+
+            Ok(format!(
+                "test_write abgeschlossen: {} Schreibvorgänge",
+                write_count
+            ))
         },
-        map_message,
+        Message::IoWriteTested,
     )
 }
 
-fn save_limits_task(
+fn save_io_definition_task(
     project_service: ProjectService,
     project_name: String,
-    signals: Vec<String>,
-    limit_rows: Vec<NumericLimitEditorRow>,
+    mv_name_rows: Vec<VariableNameRow>,
+    cv_name_rows: Vec<VariableNameRow>,
+    dv_name_rows: Vec<VariableNameRow>,
+    mv_rows: Vec<MvIoEditorRow>,
+    cv_rows: Vec<CvIoEditorRow>,
+    dv_rows: Vec<DvIoEditorRow>,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -2157,109 +2596,20 @@ fn save_limits_task(
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
 
-            cfg.limits.values = build_limits_map_for_signals(&signals, &limit_rows)?;
+            let vars = build_variable_catalog(&mv_name_rows, &cv_name_rows, &dv_name_rows)?;
+            cfg.variables = vars.clone();
+            cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
+            cfg.rebuild_runtime_io_from_definition()
+                .map_err(|err| format!("I/O-Ableitung fehlgeschlagen: {err}"))?;
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Limits konnten nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("I/O Definition konnte nicht gespeichert werden: {err}"))?;
 
-            Ok(format!("Limits für '{}' gespeichert", project_name))
+            Ok(format!("I/O Definition für '{}' gespeichert", project_name))
         },
-        Message::LimitsSaved,
+        Message::IoDefinitionSaved,
     )
-}
-
-fn build_signal_points(
-    kind: &str,
-    rows: &[SignalPointEditorRow],
-) -> Result<Vec<SignalPoint>, String> {
-    let mut out = Vec::new();
-
-    for (index, row) in rows.iter().enumerate() {
-        let blank = row.name.trim().is_empty() && row.address.trim().is_empty();
-
-        if blank {
-            continue;
-        }
-
-        if row.name.trim().is_empty() {
-            return Err(format!(
-                "{}-Zeile {}: Name darf nicht leer sein",
-                kind,
-                index + 1
-            ));
-        }
-
-        if row.address.trim().is_empty() {
-            return Err(format!(
-                "{}-Zeile {}: OPC-UA Adresse darf nicht leer sein",
-                kind,
-                index + 1
-            ));
-        }
-
-        out.push(SignalPoint {
-            name: row.name.trim().to_string(),
-            signal_type: row.signal_type.into(),
-            address: row.address.trim().to_string(),
-            opc_tag: None,
-        });
-    }
-
-    Ok(out)
-}
-
-fn build_limits_map_for_signals(
-    signals: &[String],
-    rows: &[NumericLimitEditorRow],
-) -> Result<HashMap<String, NumericLimit>, String> {
-    let mut out = HashMap::new();
-
-    for signal in signals {
-        let row = rows.iter().find(|row| row.signal == *signal);
-
-        let (min_raw, max_raw, tag_raw) = if let Some(row) = row {
-            (row.min.trim(), row.max.trim(), row.opc_tag.trim())
-        } else {
-            ("", "", "")
-        };
-
-        let blank = min_raw.is_empty() && max_raw.is_empty() && tag_raw.is_empty();
-        if blank {
-            continue;
-        }
-
-        if min_raw.is_empty() || max_raw.is_empty() {
-            return Err(format!(
-                "Limit für Signal '{}' benötigt Min und Max oder beide leer",
-                signal
-            ));
-        }
-
-        let min = min_raw.parse::<f64>().map_err(|_| {
-            format!(
-                "Limit '{}' Min '{}' ist keine gültige Zahl",
-                signal, min_raw
-            )
-        })?;
-        let max = max_raw.parse::<f64>().map_err(|_| {
-            format!(
-                "Limit '{}' Max '{}' ist keine gültige Zahl",
-                signal, max_raw
-            )
-        })?;
-
-        out.insert(
-            signal.clone(),
-            NumericLimit {
-                min,
-                max,
-                opc_tag: optional_trimmed(tag_raw),
-            },
-        );
-    }
-
-    Ok(out)
 }
 
 fn signal_value_to_test_string(value: SignalValue) -> String {
@@ -2269,29 +2619,22 @@ fn signal_value_to_test_string(value: SignalValue) -> String {
     }
 }
 
-fn parse_test_write_value(signal_type: SignalTypeChoice, raw: &str) -> Result<SignalValue, String> {
-    match signal_type {
-        SignalTypeChoice::F64 => {
-            let value = raw
-                .parse::<f64>()
-                .map_err(|_| format!("test_write: '{}' ist kein gültiger f64-Wert", raw))?;
-            Ok(SignalValue::F64(value))
-        }
-        SignalTypeChoice::Bool => {
-            let normalized = raw.trim().to_ascii_lowercase();
-            let value = match normalized.as_str() {
-                "true" | "1" | "on" | "yes" => true,
-                "false" | "0" | "off" | "no" => false,
-                _ => {
-                    return Err(format!(
-                        "test_write: '{}' ist kein gültiger bool-Wert (true/false/1/0)",
-                        raw
-                    ));
-                }
-            };
-            Ok(SignalValue::Bool(value))
-        }
+async fn read_optional_tag(adapter: &OpcUaClientAdapter, address: &str) -> String {
+    if address.trim().is_empty() {
+        return String::new();
     }
+
+    match adapter.read(address).await {
+        Ok(value) => signal_value_to_test_string(value),
+        Err(err) => format!("ERR: {err}"),
+    }
+}
+
+fn parse_test_write_value(raw: &str) -> Result<SignalValue, String> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| format!("test_write: '{}' ist kein gültiger f64-Wert", raw))?;
+    Ok(SignalValue::F64(value))
 }
 
 fn optional_trimmed(value: &str) -> Option<String> {
@@ -2301,6 +2644,139 @@ fn optional_trimmed(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn build_variable_catalog(
+    mv_rows: &[VariableNameRow],
+    cv_rows: &[VariableNameRow],
+    dv_rows: &[VariableNameRow],
+) -> Result<VariableCatalogConfig, String> {
+    let mut vars = VariableCatalogConfig {
+        mvs: collect_variable_names(mv_rows),
+        cvs: collect_variable_names(cv_rows),
+        dvs: collect_variable_names(dv_rows),
+    };
+
+    vars.validate()
+        .map_err(|err| format!("Variablen ungültig: {err}"))?;
+
+    if !vars.has_any() {
+        return Err("Bitte mindestens eine Variable (MV/CV/DV) definieren".to_string());
+    }
+
+    vars.mvs.sort();
+    vars.cvs.sort();
+    vars.dvs.sort();
+    Ok(vars)
+}
+
+fn build_io_definition(
+    vars: &VariableCatalogConfig,
+    mv_rows: &[MvIoEditorRow],
+    cv_rows: &[CvIoEditorRow],
+    dv_rows: &[DvIoEditorRow],
+) -> Result<crate::project_config::IoDefinitionConfig, String> {
+    let mut mvs = Vec::new();
+    for name in &vars.mvs {
+        let row = mv_rows
+            .iter()
+            .find(|row| row.name == *name)
+            .ok_or_else(|| format!("MV '{}' fehlt in I/O Definition", name))?;
+
+        let mv_write = row.mv_write.trim().to_string();
+        let mv_read = row.mv_read.trim().to_string();
+        let hl = if row.hl.trim().is_empty() {
+            None
+        } else {
+            Some(
+                row.hl
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("MV '{}' HL ist keine gültige Zahl", name))?,
+            )
+        };
+        let ll = if row.ll.trim().is_empty() {
+            None
+        } else {
+            Some(
+                row.ll
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("MV '{}' LL ist keine gültige Zahl", name))?,
+            )
+        };
+        if let (Some(ll), Some(hl)) = (ll, hl) {
+            if ll > hl {
+                return Err(format!("MV '{}' hat LL > HL", name));
+            }
+        }
+
+        mvs.push(MvIoDefinition {
+            name: name.clone(),
+            mv_write,
+            mv_read,
+            hl_opc: optional_trimmed(&row.hl_opc),
+            ll_opc: optional_trimmed(&row.ll_opc),
+            hl,
+            ll,
+            enable: optional_trimmed(&row.enable),
+        });
+    }
+
+    let mut cvs = Vec::new();
+    for name in &vars.cvs {
+        let row = cv_rows
+            .iter()
+            .find(|row| row.name == *name)
+            .ok_or_else(|| format!("CV '{}' fehlt in I/O Definition", name))?;
+
+        let soll = row.soll.trim().to_string();
+        let ist = row.ist.trim().to_string();
+
+        let sollband_value = if row.sollband_value.trim().is_empty() {
+            None
+        } else {
+            Some(
+                row.sollband_value
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("CV '{}' Sollband-Wert ist keine gültige Zahl", name))?,
+            )
+        };
+        let sollband_opc = optional_trimmed(&row.sollband_opc);
+
+        cvs.push(CvIoDefinition {
+            name: name.clone(),
+            soll,
+            ist,
+            sollband_opc,
+            sollband_value,
+            enable: optional_trimmed(&row.enable),
+        });
+    }
+
+    let mut dvs = Vec::new();
+    for name in &vars.dvs {
+        let row = dv_rows
+            .iter()
+            .find(|row| row.name == *name)
+            .ok_or_else(|| format!("DV '{}' fehlt in I/O Definition", name))?;
+        let read = row.read.trim().to_string();
+        dvs.push(DvIoDefinition {
+            name: name.clone(),
+            read,
+            enable: optional_trimmed(&row.enable),
+        });
+    }
+
+    let io_definition = crate::project_config::IoDefinitionConfig { mvs, cvs, dvs };
+    io_definition
+        .validate(vars)
+        .map_err(|err| format!("I/O Definition ungültig: {err}"))?;
+    if !io_definition.is_complete_for(vars) {
+        return Err("I/O Definition ist unvollständig".to_string());
+    }
+    Ok(io_definition)
 }
 
 fn start_web_task(
