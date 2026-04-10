@@ -98,14 +98,7 @@ impl ProjectConfig {
                 "Minima/Maxima für MV/CV festlegen",
                 !self.limits.values.is_empty(),
             ),
-            SidebarTask::new(
-                "model",
-                "Modell hinterlegen",
-                self.model
-                    .as_ref()
-                    .map(|m| !m.kind.is_empty())
-                    .unwrap_or(false),
-            ),
+            SidebarTask::new("model", "Modell hinterlegen (optional)", true),
             SidebarTask::new(
                 "logic",
                 "Regellogik hinterlegen",
@@ -121,7 +114,7 @@ impl ProjectConfig {
                 "Ausführungszeittest konfigurieren",
                 self.runtime.execution_time_test,
             ),
-            SidebarTask::new("simulation", "Reglersimulation", true),
+            SidebarTask::new("simulation", "Reglersimulation (optional)", true),
             SidebarTask::new(
                 "deployment",
                 "Deployment konfigurieren",
@@ -473,5 +466,47 @@ mod tests {
         let encoded = to_toml_string(&cfg).expect("toml encode");
         let decoded = from_toml_str(&encoded).expect("toml decode");
         assert_eq!(decoded.name, "demo");
+    }
+
+    #[test]
+    fn optional_model_and_simulation_do_not_block_sidebar_progress() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.io.inputs.push(SignalPoint {
+            name: "pv".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=PV".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.outputs.push(SignalPoint {
+            name: "mv".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=MV".to_string(),
+            opc_tag: None,
+        });
+        cfg.logic.mapping_rules.push(MappingRule {
+            input: "pv".to_string(),
+            output: "mv".to_string(),
+            gain: 1.0,
+            offset: 0.0,
+            invert_bool: false,
+        });
+
+        assert!(cfg.model.is_none());
+        assert!(cfg.validate().is_ok());
+
+        let tasks = cfg.sidebar_tasks();
+        let model_task = tasks
+            .iter()
+            .find(|task| task.id == "model")
+            .expect("model task present");
+        let simulation_task = tasks
+            .iter()
+            .find(|task| task.id == "simulation")
+            .expect("simulation task present");
+
+        assert!(model_task.label.contains("optional"));
+        assert!(model_task.configured);
+        assert!(simulation_task.label.contains("optional"));
+        assert!(simulation_task.configured);
     }
 }
