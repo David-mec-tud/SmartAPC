@@ -350,13 +350,11 @@ enum Message {
     TestWatchdogPressed,
     WatchdogTested(Result<String, String>),
     AddInputRow,
-    RemoveInputRow(usize),
     InputRowNameChanged(usize, String),
     InputRowTypeChanged(usize, SignalTypeChoice),
     InputRowAddressChanged(usize, String),
     InputRowTestWriteChanged(usize, String),
     AddOutputRow,
-    RemoveOutputRow(usize),
     OutputRowNameChanged(usize, String),
     OutputRowTypeChanged(usize, SignalTypeChoice),
     OutputRowAddressChanged(usize, String),
@@ -767,12 +765,6 @@ impl DesktopApp {
                 self.io_input_rows.push(SignalPointEditorRow::blank());
                 Task::none()
             }
-            Message::RemoveInputRow(index) => {
-                if self.io_input_rows.len() > 1 && index < self.io_input_rows.len() {
-                    self.io_input_rows.remove(index);
-                }
-                Task::none()
-            }
             Message::InputRowNameChanged(index, value) => {
                 if let Some(row) = self.io_input_rows.get_mut(index) {
                     row.name = value;
@@ -802,12 +794,6 @@ impl DesktopApp {
             }
             Message::AddOutputRow => {
                 self.io_output_rows.push(SignalPointEditorRow::blank());
-                Task::none()
-            }
-            Message::RemoveOutputRow(index) => {
-                if self.io_output_rows.len() > 1 && index < self.io_output_rows.len() {
-                    self.io_output_rows.remove(index);
-                }
                 Task::none()
             }
             Message::OutputRowNameChanged(index, value) => {
@@ -1194,7 +1180,7 @@ impl DesktopApp {
             SetupPage::Limits => self.limits_editor_view(runtime_running),
             SetupPage::Model => self.placeholder_page_view(
                 SetupPage::Model,
-                "V1: statisch kompilierte Modulanbindung. Im nächsten Schritt ergänzen wir hier Modell-Auswahl + Model-Config-Felder.",
+                "Optional in V1: Modell hinterlegen kann übersprungen werden. Die restliche Konfiguration und Runtime funktionieren ohne Modell.",
             ),
             SetupPage::Logic => self.placeholder_page_view(
                 SetupPage::Logic,
@@ -1206,7 +1192,7 @@ impl DesktopApp {
             ),
             SetupPage::Simulation => self.placeholder_page_view(
                 SetupPage::Simulation,
-                "Hier folgt die Simulationsoberfläche mit Eingangsprofilen und Ergebnisplots.",
+                "Optional in V1: Reglersimulation kann ausgelassen werden. Umsetzung und UI folgen in einem späteren Schritt.",
             ),
             SetupPage::Deployment => self.placeholder_page_view(
                 SetupPage::Deployment,
@@ -1421,7 +1407,6 @@ impl DesktopApp {
                         .on_input(move |value| Message::InputRowTestWriteChanged(index, value))
                         .width(Length::FillPortion(2)),
                     button("test_write").on_press(Message::TestIoWriteInputPressed(index)),
-                    button("-").on_press(Message::RemoveInputRow(index))
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
@@ -1458,7 +1443,6 @@ impl DesktopApp {
                         .on_input(move |value| Message::OutputRowTestWriteChanged(index, value))
                         .width(Length::FillPortion(2)),
                     button("test_write").on_press(Message::TestIoWriteOutputPressed(index)),
-                    button("-").on_press(Message::RemoveOutputRow(index))
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
