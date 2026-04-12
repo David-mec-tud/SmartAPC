@@ -37,6 +37,7 @@
 - Prefer clear names and small composable functions over dense logic.
 - Add high-signal comments for non-obvious behavior, contracts, and data flow.
 - Generated templates/scaffolds must include usage-oriented comments, not just placeholders.
+- make sure to commit the code you write
 
 ## 6. Commit Conventions
 - Prefer multiple clean commits grouped by subsystem/behavior.
