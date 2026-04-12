@@ -79,6 +79,14 @@ impl Default for ExternalInputs {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PendingManualWrites {
+    u_write: Option<f64>,
+    target: Option<f64>,
+    hl: Option<f64>,
+    ll: Option<f64>,
+}
+
 pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     validate_config(&config)?;
 
@@ -182,6 +190,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     let history = Arc::new(RwLock::new(VecDeque::<TimedSample>::with_capacity(
         history_cap,
     )));
+    let pending_manual_writes = Arc::new(RwLock::new(PendingManualWrites::default()));
 
     println!("Virtual PT1 hardware started");
     println!("Endpoint: {endpoint}");
@@ -203,6 +212,7 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     let sim_history = Arc::clone(&history);
     let sim_node_manager = Arc::clone(&node_manager);
     let subscriptions = Arc::clone(handle.subscriptions());
+    let sim_pending_manual_writes = Arc::clone(&pending_manual_writes);
     let sim_task = tokio::spawn(async move {
         let mut state = Sample {
             y: 0.0,
@@ -220,6 +230,40 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
             tick.tick().await;
             if sim_stop.load(Ordering::SeqCst) {
                 break;
+            }
+
+            let pending = take_pending_manual_writes(&sim_pending_manual_writes);
+            if let Some(value) = pending.u_write {
+                let _ = sim_node_manager.set_value(
+                    subscriptions.as_ref(),
+                    &u_write_id,
+                    None,
+                    DataValue::new_now(value),
+                );
+            }
+            if let Some(value) = pending.target {
+                let _ = sim_node_manager.set_value(
+                    subscriptions.as_ref(),
+                    &y_target_id,
+                    None,
+                    DataValue::new_now(value),
+                );
+            }
+            if let Some(value) = pending.hl {
+                let _ = sim_node_manager.set_value(
+                    subscriptions.as_ref(),
+                    &y_hl_id,
+                    None,
+                    DataValue::new_now(value),
+                );
+            }
+            if let Some(value) = pending.ll {
+                let _ = sim_node_manager.set_value(
+                    subscriptions.as_ref(),
+                    &y_ll_id,
+                    None,
+                    DataValue::new_now(value),
+                );
             }
 
             let external = read_external_inputs_from_nodes(
@@ -281,7 +325,12 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
         signal_stop.store(true, Ordering::SeqCst);
     });
 
-    let plot_result = run_plot_window(endpoint.clone(), Arc::clone(&history), Arc::clone(&stop));
+    let plot_result = run_plot_window(
+        endpoint.clone(),
+        Arc::clone(&history),
+        Arc::clone(&stop),
+        Arc::clone(&pending_manual_writes),
+    );
     stop.store(true, Ordering::SeqCst);
     signal_task.abort();
 
@@ -371,11 +420,32 @@ fn read_node_f64(
     data_value.value.and_then(|v| v.as_f64())
 }
 
+fn take_pending_manual_writes(
+    pending_manual_writes: &RwLock<PendingManualWrites>,
+) -> PendingManualWrites {
+    let mut guard = pending_manual_writes.write();
+    let current = *guard;
+    *guard = PendingManualWrites::default();
+    current
+}
+
+fn parse_manual_input(raw: &str, variable_name: &str) -> Result<f64, String> {
+    raw.trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{variable_name} must be a valid floating-point number"))
+}
+
 #[derive(Clone)]
 struct PlotWindowApp {
     endpoint: String,
     history: Arc<RwLock<VecDeque<TimedSample>>>,
     stop: Arc<AtomicBool>,
+    pending_manual_writes: Arc<RwLock<PendingManualWrites>>,
+    u_write_input: String,
+    target_input: String,
+    hl_input: String,
+    ll_input: String,
+    feedback: Option<(bool, String)>,
 }
 
 impl PlotWindowApp {
@@ -383,12 +453,61 @@ impl PlotWindowApp {
         endpoint: String,
         history: Arc<RwLock<VecDeque<TimedSample>>>,
         stop: Arc<AtomicBool>,
+        pending_manual_writes: Arc<RwLock<PendingManualWrites>>,
     ) -> Self {
         Self {
             endpoint,
             history,
             stop,
+            pending_manual_writes,
+            u_write_input: "0.0".to_string(),
+            target_input: "0.0".to_string(),
+            hl_input: "1.0".to_string(),
+            ll_input: "-1.0".to_string(),
+            feedback: None,
         }
+    }
+
+    fn apply_manual_inputs(&mut self) {
+        let u_write = match parse_manual_input(&self.u_write_input, U_WRITE) {
+            Ok(value) => value,
+            Err(error) => {
+                self.feedback = Some((true, error));
+                return;
+            }
+        };
+        let target = match parse_manual_input(&self.target_input, Y_TARGET) {
+            Ok(value) => value,
+            Err(error) => {
+                self.feedback = Some((true, error));
+                return;
+            }
+        };
+        let hl = match parse_manual_input(&self.hl_input, Y_HL) {
+            Ok(value) => value,
+            Err(error) => {
+                self.feedback = Some((true, error));
+                return;
+            }
+        };
+        let ll = match parse_manual_input(&self.ll_input, Y_LL) {
+            Ok(value) => value,
+            Err(error) => {
+                self.feedback = Some((true, error));
+                return;
+            }
+        };
+
+        *self.pending_manual_writes.write() = PendingManualWrites {
+            u_write: Some(u_write),
+            target: Some(target),
+            hl: Some(hl),
+            ll: Some(ll),
+        };
+        self.feedback = Some((
+            false,
+            "Manual input values queued for the next tick.".to_string(),
+        ));
     }
 }
 
@@ -437,6 +556,32 @@ impl eframe::App for PlotWindowApp {
                 "Current values | y1_value={:.4}  u1={:.4}  y1_target={:.4}  y1_HL={:.4}  y1_LL={:.4}",
                 current.y, current.u, current.target, current.hl, current.ll
             ));
+            ui.separator();
+            ui.label("Manual setpoints (text input):");
+            ui.horizontal(|ui| {
+                ui.label(format!("{U_WRITE}:"));
+                ui.text_edit_singleline(&mut self.u_write_input);
+                ui.label(format!("{Y_TARGET}:"));
+                ui.text_edit_singleline(&mut self.target_input);
+            });
+            ui.horizontal(|ui| {
+                ui.label(format!("{Y_HL}:"));
+                ui.text_edit_singleline(&mut self.hl_input);
+                ui.label(format!("{Y_LL}:"));
+                ui.text_edit_singleline(&mut self.ll_input);
+            });
+            if ui.button("Apply Manual Values").clicked() {
+                self.apply_manual_inputs();
+            }
+            if let Some((is_error, message)) = &self.feedback {
+                let color = if *is_error {
+                    egui::Color32::from_rgb(220, 90, 90)
+                } else {
+                    egui::Color32::from_rgb(100, 180, 100)
+                };
+                ui.colored_label(color, message);
+            }
+            ui.separator();
 
             Plot::new("pt1_y_plot")
                 .height(260.0)
@@ -483,6 +628,7 @@ fn run_plot_window(
     endpoint: String,
     history: Arc<RwLock<VecDeque<TimedSample>>>,
     stop: Arc<AtomicBool>,
+    pending_manual_writes: Arc<RwLock<PendingManualWrites>>,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 760.0]),
@@ -497,6 +643,7 @@ fn run_plot_window(
                 endpoint.clone(),
                 Arc::clone(&history),
                 Arc::clone(&stop),
+                Arc::clone(&pending_manual_writes),
             )))
         }),
     )
@@ -535,5 +682,36 @@ mod tests {
 
         let value = read_node_f64(&address_space, &node_id).expect("read f64 value");
         assert_eq!(value, 1.0);
+    }
+
+    #[test]
+    fn parse_manual_input_rejects_invalid_numbers() {
+        let error = parse_manual_input("not-a-number", U_WRITE).expect_err("must fail");
+        assert_eq!(
+            error,
+            "u1_write must be a valid floating-point number".to_string()
+        );
+    }
+
+    #[test]
+    fn take_pending_manual_writes_returns_and_clears_values() {
+        let pending = RwLock::new(PendingManualWrites {
+            u_write: Some(1.25),
+            target: Some(2.5),
+            hl: Some(3.75),
+            ll: Some(-0.5),
+        });
+
+        let first = take_pending_manual_writes(&pending);
+        assert_eq!(first.u_write, Some(1.25));
+        assert_eq!(first.target, Some(2.5));
+        assert_eq!(first.hl, Some(3.75));
+        assert_eq!(first.ll, Some(-0.5));
+
+        let second = take_pending_manual_writes(&pending);
+        assert_eq!(second.u_write, None);
+        assert_eq!(second.target, None);
+        assert_eq!(second.hl, None);
+        assert_eq!(second.ll, None);
     }
 }
