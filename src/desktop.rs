@@ -1,8 +1,9 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt, fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::Duration,
 };
@@ -15,10 +16,12 @@ use iced::{
 
 use crate::{
     communication::{ProtocolAdapter, opcua::OpcUaClientAdapter},
+    logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
     project::ProjectService,
     project_config::{
-        CommunicationConfig, CvIoDefinition, DvIoDefinition, MvIoDefinition, SidebarTask,
-        VariableCatalogConfig, WatchdogConfig,
+        CommunicationConfig, CvIoDefinition, DvIoDefinition, LogicKind, LogicParamType,
+        LogicParamValue, MvIoDefinition, PControllerPairConfig, SidebarTask, VariableCatalogConfig,
+        WatchdogConfig,
     },
     runtime::{RuntimeManager, RuntimeSnapshot},
     storage::SignalSample,
@@ -294,6 +297,116 @@ impl WatchdogEditorState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogicKindChoice {
+    PController,
+    CustomRust,
+}
+
+impl fmt::Display for LogicKindChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PController => write!(f, "P-Regler"),
+            Self::CustomRust => write!(f, "Eigene Regellogik"),
+        }
+    }
+}
+
+impl From<LogicKind> for LogicKindChoice {
+    fn from(value: LogicKind) -> Self {
+        match value {
+            LogicKind::PController => Self::PController,
+            LogicKind::CustomRust => Self::CustomRust,
+        }
+    }
+}
+
+impl From<LogicKindChoice> for LogicKind {
+    fn from(value: LogicKindChoice) -> Self {
+        match value {
+            LogicKindChoice::PController => Self::PController,
+            LogicKindChoice::CustomRust => Self::CustomRust,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PPairEditorRow {
+    cv: String,
+    mv: String,
+    kp: String,
+    bias: String,
+}
+
+impl PPairEditorRow {
+    fn blank() -> Self {
+        Self {
+            cv: String::new(),
+            mv: String::new(),
+            kp: "1.0".to_string(),
+            bias: "0.0".to_string(),
+        }
+    }
+
+    fn from_pair(pair: &PControllerPairConfig) -> Self {
+        Self {
+            cv: pair.cv.clone(),
+            mv: pair.mv.clone(),
+            kp: pair.kp.to_string(),
+            bias: pair.bias.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LogicEditorState {
+    selected_kind: LogicKindChoice,
+    p_pairs: Vec<PPairEditorRow>,
+    custom_strategy_name: String,
+    custom_source_path: String,
+    custom_artifact_path: String,
+    custom_compatible: bool,
+    custom_status: String,
+}
+
+impl LogicEditorState {
+    fn from_config(
+        cfg: &crate::project_config::LogicConfig,
+        io: &crate::project_config::IoConfig,
+    ) -> Self {
+        let p_pairs = if cfg.p_controller.pairs.is_empty() {
+            vec![PPairEditorRow::blank()]
+        } else {
+            cfg.p_controller
+                .pairs
+                .iter()
+                .map(PPairEditorRow::from_pair)
+                .collect()
+        };
+        Self {
+            selected_kind: cfg.kind.into(),
+            p_pairs,
+            custom_strategy_name: cfg.custom_rust.strategy_name.clone(),
+            custom_source_path: cfg.custom_rust.source_path.clone(),
+            custom_artifact_path: cfg.custom_rust.artifact_path.clone(),
+            custom_compatible: cfg.custom_rust.is_compatible_with(io),
+            custom_status: cfg.custom_rust.last_build_message.clone(),
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            selected_kind: LogicKindChoice::PController,
+            p_pairs: vec![PPairEditorRow::blank()],
+            custom_strategy_name: String::new(),
+            custom_source_path: String::new(),
+            custom_artifact_path: String::new(),
+            custom_compatible: false,
+            custom_status: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum WebStatus {
     Disabled,
@@ -353,7 +466,8 @@ impl SetupPage {
 #[derive(Debug, Clone)]
 struct ProjectPanelData {
     sidebar_tasks: Vec<SidebarTask>,
-    config_params: HashMap<String, f64>,
+    config_params: HashMap<String, LogicParamValue>,
+    logic_editor: LogicEditorState,
     communication: CommunicationEditorState,
     variables: VariableCatalogConfig,
     mv_names: Vec<VariableNameRow>,
@@ -368,13 +482,14 @@ struct ProjectPanelData {
 #[derive(Debug, Clone)]
 struct RefreshData {
     snapshot: Option<RuntimeSnapshot>,
-    params: Option<HashMap<String, f64>>,
+    params: Option<HashMap<String, LogicParamValue>>,
     samples: Vec<SignalSample>,
 }
 
 #[derive(Debug, Clone)]
 struct ParamApplyResult {
-    params: HashMap<String, f64>,
+    key: String,
+    params: HashMap<String, LogicParamValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -426,6 +541,8 @@ enum Message {
     ParamApplied(Result<ParamApplyResult, String>),
     StartWebPressed,
     WebStarted(Result<String, String>),
+    OpenPlotsWebPressed,
+    PlotsWebOpened(Result<String, String>),
     CommunicationEndpointChanged(String),
     CommunicationCycleChanged(String),
     SaveCommunicationPressed,
@@ -469,6 +586,21 @@ enum Message {
     IoWriteTested(Result<String, String>),
     SaveIoDefinitionPressed,
     IoDefinitionSaved(Result<String, String>),
+    LogicKindChanged(LogicKindChoice),
+    AddPControllerPair,
+    PPairCvChanged(usize, String),
+    PPairMvChanged(usize, String),
+    PPairKpChanged(usize, String),
+    PPairBiasChanged(usize, String),
+    CustomStrategyNameChanged(String),
+    CustomSourcePathChanged(String),
+    CustomArtifactPathChanged(String),
+    SaveLogicPressed,
+    LogicSaved(Result<String, String>),
+    GenerateLogicTemplatePressed,
+    LogicTemplateGenerated(Result<String, String>),
+    BuildCustomLogicPressed,
+    CustomLogicBuilt(Result<String, String>),
 }
 
 struct DesktopApp {
@@ -480,13 +612,15 @@ struct DesktopApp {
     projects: Vec<String>,
     selected_project: Option<String>,
     sidebar_tasks: Vec<SidebarTask>,
-    logic_params: HashMap<String, f64>,
+    logic_params: HashMap<String, LogicParamValue>,
     param_inputs: HashMap<String, String>,
+    param_dirty_keys: HashSet<String>,
     samples: Vec<SignalSample>,
     runtime_snapshot: Option<RuntimeSnapshot>,
     selected_page: SetupPage,
     new_project_name: String,
     communication_editor: CommunicationEditorState,
+    logic_editor: LogicEditorState,
     variables: VariableCatalogConfig,
     mv_name_rows: Vec<VariableNameRow>,
     cv_name_rows: Vec<VariableNameRow>,
@@ -519,11 +653,13 @@ impl DesktopApp {
             sidebar_tasks: Vec::new(),
             logic_params: HashMap::new(),
             param_inputs: HashMap::new(),
+            param_dirty_keys: HashSet::new(),
             samples: Vec::new(),
             runtime_snapshot: None,
             selected_page: SetupPage::Communication,
             new_project_name: String::new(),
             communication_editor: CommunicationEditorState::blank(),
+            logic_editor: LogicEditorState::blank(),
             variables: VariableCatalogConfig::default(),
             mv_name_rows: vec![VariableNameRow::blank()],
             cv_name_rows: vec![VariableNameRow::blank()],
@@ -582,6 +718,7 @@ impl DesktopApp {
                 Ok(panel) => {
                     self.sidebar_tasks = panel.sidebar_tasks;
                     self.communication_editor = panel.communication;
+                    self.logic_editor = panel.logic_editor;
                     self.variables = panel.variables;
                     self.mv_name_rows = panel.mv_names;
                     self.cv_name_rows = panel.cv_names;
@@ -590,10 +727,11 @@ impl DesktopApp {
                     self.cv_io_rows = panel.cv_io_rows;
                     self.dv_io_rows = panel.dv_io_rows;
                     self.watchdog_editor = panel.watchdog;
+                    self.param_dirty_keys.clear();
 
                     if self.runtime_snapshot.is_none() {
                         self.logic_params = panel.config_params;
-                        self.refresh_param_inputs();
+                        self.refresh_param_inputs_full();
                     }
                     self.error_message = None;
                     Task::none()
@@ -607,6 +745,126 @@ impl DesktopApp {
                 self.selected_page = page;
                 Task::none()
             }
+            Message::LogicKindChanged(kind) => {
+                self.logic_editor.selected_kind = kind;
+                Task::none()
+            }
+            Message::AddPControllerPair => {
+                self.logic_editor.p_pairs.push(PPairEditorRow::blank());
+                Task::none()
+            }
+            Message::PPairCvChanged(index, value) => {
+                if let Some(row) = self.logic_editor.p_pairs.get_mut(index) {
+                    row.cv = value;
+                }
+                Task::none()
+            }
+            Message::PPairMvChanged(index, value) => {
+                if let Some(row) = self.logic_editor.p_pairs.get_mut(index) {
+                    row.mv = value;
+                }
+                Task::none()
+            }
+            Message::PPairKpChanged(index, value) => {
+                if let Some(row) = self.logic_editor.p_pairs.get_mut(index) {
+                    row.kp = value;
+                }
+                Task::none()
+            }
+            Message::PPairBiasChanged(index, value) => {
+                if let Some(row) = self.logic_editor.p_pairs.get_mut(index) {
+                    row.bias = value;
+                }
+                Task::none()
+            }
+            Message::CustomStrategyNameChanged(value) => {
+                self.logic_editor.custom_strategy_name = value;
+                Task::none()
+            }
+            Message::CustomSourcePathChanged(value) => {
+                self.logic_editor.custom_source_path = value;
+                Task::none()
+            }
+            Message::CustomArtifactPathChanged(value) => {
+                self.logic_editor.custom_artifact_path = value;
+                Task::none()
+            }
+            Message::SaveLogicPressed => {
+                if self.runtime_snapshot.is_some() {
+                    self.error_message =
+                        Some("Runtime läuft. Für Logik-Änderungen bitte erst stoppen.".to_string());
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                save_logic_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.logic_editor.clone(),
+                    self.logic_params.clone(),
+                )
+            }
+            Message::LogicSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::GenerateLogicTemplatePressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                generate_logic_template_task(self.project_service.clone(), project_name)
+            }
+            Message::LogicTemplateGenerated(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::BuildCustomLogicPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                build_custom_logic_task(self.project_service.clone(), project_name)
+            }
+            Message::CustomLogicBuilt(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
             Message::NewProjectNameChanged(value) => {
                 self.new_project_name = value;
                 Task::none()
@@ -665,7 +923,7 @@ impl DesktopApp {
                     self.samples = data.samples;
                     if let Some(params) = data.params {
                         self.logic_params = params;
-                        self.refresh_param_inputs();
+                        self.refresh_param_inputs_preserving_dirty();
                     }
                     self.error_message = None;
                     Task::none()
@@ -676,6 +934,7 @@ impl DesktopApp {
                 }
             },
             Message::ParamInputChanged(key, value) => {
+                self.param_dirty_keys.insert(key.clone());
                 self.param_inputs.insert(key, value);
                 Task::none()
             }
@@ -684,12 +943,16 @@ impl DesktopApp {
                     self.error_message = Some(format!("Kein Eingabewert für Parameter '{}'", key));
                     return Task::none();
                 };
-                let parsed = match raw_value.parse::<f64>() {
+                let Some(current) = self.logic_params.get(&key) else {
+                    self.error_message = Some(format!("Unbekannter Parameter '{}'", key));
+                    return Task::none();
+                };
+                let parsed = match parse_logic_param_input(current, &raw_value) {
                     Ok(value) => value,
-                    Err(_) => {
+                    Err(err) => {
                         self.error_message = Some(format!(
-                            "Ungültiger Zahlenwert '{}' für Parameter '{}'",
-                            raw_value, key
+                            "Ungültiger Wert '{}' für Parameter '{}': {}",
+                            raw_value, key, err
                         ));
                         return Task::none();
                     }
@@ -703,8 +966,9 @@ impl DesktopApp {
             }
             Message::ParamApplied(result) => match result {
                 Ok(updated) => {
+                    self.param_dirty_keys.remove(&updated.key);
                     self.logic_params = updated.params;
-                    self.refresh_param_inputs();
+                    self.refresh_param_inputs_preserving_dirty();
                     self.status_message = "Parameter übernommen und persistiert".to_string();
                     self.error_message = None;
                     Task::none()
@@ -742,6 +1006,25 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::OpenPlotsWebPressed => {
+                let Some(url) = self.plots_web_url() else {
+                    self.error_message =
+                        Some("Web API ist deaktiviert. Desktop ohne --no-web starten.".to_string());
+                    return Task::none();
+                };
+                open_url_task(url)
+            }
+            Message::PlotsWebOpened(result) => match result {
+                Ok(msg) => {
+                    self.status_message = msg;
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
             Message::CommunicationEndpointChanged(value) => {
                 self.communication_editor.endpoint_url = value;
                 Task::none()
@@ -1328,10 +1611,7 @@ impl DesktopApp {
                 SetupPage::Model,
                 "Optional in V1: Modell hinterlegen kann übersprungen werden. Die restliche Konfiguration und Runtime funktionieren ohne Modell.",
             ),
-            SetupPage::Logic => self.placeholder_page_view(
-                SetupPage::Logic,
-                "V1: Mapping-Logik ist aktiv. Als nächstes können wir hier Logik-Typ-Auswahl und dazugehörige Konfigurationsfelder ergänzen.",
-            ),
+            SetupPage::Logic => self.logic_editor_view(runtime_running),
             SetupPage::Timing => self.placeholder_page_view(
                 SetupPage::Timing,
                 "Hier folgt ein Wizard für Zykluszeit-/Jitter-Checks mit sichtbaren Metriken.",
@@ -1858,6 +2138,161 @@ impl DesktopApp {
         .into()
     }
 
+    fn logic_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
+        let can_save = self.selected_project.is_some() && !runtime_running;
+        let can_run_custom_actions = self.selected_project.is_some() && !runtime_running;
+
+        let mut available = vec![LogicKindChoice::PController];
+        if self.logic_editor.custom_compatible {
+            available.push(LogicKindChoice::CustomRust);
+        }
+        let selected_kind = if available.contains(&self.logic_editor.selected_kind) {
+            self.logic_editor.selected_kind
+        } else {
+            LogicKindChoice::PController
+        };
+
+        let kind_pick = pick_list(
+            available.clone(),
+            Some(selected_kind),
+            Message::LogicKindChanged,
+        )
+        .width(Length::Fixed(260.0));
+
+        let mut content = column![
+            text("Regelstrategie").size(20),
+            row![text("Auswahl").width(Length::Fixed(90.0)), kind_pick]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            text("Nur kompatible Strategien für die aktuelle I/O-Definition erscheinen in der Auswahl.")
+                .size(13),
+        ]
+        .spacing(10);
+
+        if selected_kind == LogicKindChoice::PController {
+            content = content.push(
+                row![
+                    text("P-Regler CV->MV Zuordnung").size(16),
+                    button("+ Paar").on_press(Message::AddPControllerPair)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            );
+
+            let header = row![
+                text("CV").width(Length::FillPortion(2)),
+                text("MV").width(Length::FillPortion(2)),
+                text("kp").width(Length::FillPortion(1)),
+                text("bias").width(Length::FillPortion(1)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+            content = content.push(header);
+
+            for (index, row_data) in self.logic_editor.p_pairs.iter().enumerate() {
+                content = content.push(
+                    row![
+                        text_input("cv name", &row_data.cv)
+                            .on_input(move |value| Message::PPairCvChanged(index, value))
+                            .width(Length::FillPortion(2)),
+                        text_input("mv name", &row_data.mv)
+                            .on_input(move |value| Message::PPairMvChanged(index, value))
+                            .width(Length::FillPortion(2)),
+                        text_input("kp", &row_data.kp)
+                            .on_input(move |value| Message::PPairKpChanged(index, value))
+                            .width(Length::FillPortion(1)),
+                        text_input("bias", &row_data.bias)
+                            .on_input(move |value| Message::PPairBiasChanged(index, value))
+                            .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+        } else {
+            content = content.push(text("Eigene Regellogik ist aktiv.").size(14));
+        }
+
+        let template_button = if can_run_custom_actions {
+            button("Template generieren").on_press(Message::GenerateLogicTemplatePressed)
+        } else {
+            button("Template generieren")
+        };
+        let build_button = if can_run_custom_actions {
+            button("Strategie prüfen/builden").on_press(Message::BuildCustomLogicPressed)
+        } else {
+            button("Strategie prüfen/builden")
+        };
+
+        content = content.push(text("Custom Rust (cdylib)").size(16)).push(
+            column![
+                row![
+                    text("Name").width(Length::Fixed(90.0)),
+                    text_input("strategy name", &self.logic_editor.custom_strategy_name)
+                        .on_input(Message::CustomStrategyNameChanged)
+                        .width(Length::Fill)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Source").width(Length::Fixed(90.0)),
+                    text_input(
+                        "logic/custom_strategy/src/lib.rs",
+                        &self.logic_editor.custom_source_path
+                    )
+                    .on_input(Message::CustomSourcePathChanged)
+                    .width(Length::Fill)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Artifact").width(Length::Fixed(90.0)),
+                    text_input(
+                        "logic/custom_strategy/target/release/<name>.dll",
+                        &self.logic_editor.custom_artifact_path
+                    )
+                    .on_input(Message::CustomArtifactPathChanged)
+                    .width(Length::Fill)
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![template_button, build_button].spacing(10),
+                text(format!(
+                    "Status: {}{}",
+                    if self.logic_editor.custom_compatible {
+                        "kompatibel"
+                    } else {
+                        "nicht kompatibel"
+                    },
+                    if self.logic_editor.custom_status.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" | {}", self.logic_editor.custom_status)
+                    }
+                ))
+                .size(13),
+            ]
+            .spacing(8),
+        );
+
+        if !self.logic_editor.custom_compatible {
+            content = content.push(text(
+                "Hinweis: 'Eigene Regellogik' wird erst nach erfolgreichem Build+Kompatibilitätscheck auswählbar.",
+            ));
+        }
+
+        let save_button = if can_save {
+            button("Regellogik speichern").on_press(Message::SaveLogicPressed)
+        } else {
+            button("Regellogik speichern")
+        };
+
+        container(column![scrollable(content).height(Length::Fill), save_button].spacing(10))
+            .padding(10)
+            .height(Length::Fill)
+            .into()
+    }
+
     fn params_view(&self) -> Element<'_, Message> {
         let runtime_running = self.runtime_snapshot.is_some();
         let mut content = column![text("Online Parameter").size(20)].spacing(10);
@@ -1878,12 +2313,16 @@ impl DesktopApp {
             keys.sort();
 
             for key in keys {
-                let current = self.logic_params.get(&key).copied().unwrap_or_default();
+                let current = self
+                    .logic_params
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(LogicParamValue::F64(0.0));
                 let input_value = self
                     .param_inputs
                     .get(&key)
                     .cloned()
-                    .unwrap_or_else(|| format!("{current:.4}"));
+                    .unwrap_or_else(|| format_logic_param_value(&current));
                 let key_clone = key.clone();
 
                 let apply_button = if runtime_running {
@@ -1895,7 +2334,7 @@ impl DesktopApp {
                 content = content.push(
                     row![
                         text(key.clone()).width(Length::FillPortion(2)),
-                        text(format!("{current:.4}")).width(Length::FillPortion(1)),
+                        text(format_logic_param_value(&current)).width(Length::FillPortion(1)),
                         text_input("Neuer Wert", &input_value)
                             .on_input(move |value| Message::ParamInputChanged(key.clone(), value))
                             .width(Length::FillPortion(2)),
@@ -1914,7 +2353,25 @@ impl DesktopApp {
     }
 
     fn plots_view(&self) -> Element<'_, Message> {
-        let mut content = column![text("Plots (SQLite)").size(20)].spacing(8);
+        let open_web_button = if self.web_bind.is_some() {
+            button("Interaktive Web-Plots öffnen").on_press(Message::OpenPlotsWebPressed)
+        } else {
+            button("Interaktive Web-Plots öffnen")
+        };
+
+        let web_hint = if self.web_bind.is_some() {
+            "Öffnet /plots der lokalen Web-API im Browser."
+        } else {
+            "Web API deaktiviert. Für interaktive Plots Desktop ohne --no-web starten."
+        };
+
+        let mut content = column![
+            text("Plots (SQLite)").size(20),
+            row![open_web_button, text(web_hint).size(13)]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+        ]
+        .spacing(8);
         let plot_lines = build_plot_lines(&self.samples, 48);
 
         if plot_lines.is_empty() {
@@ -1932,6 +2389,16 @@ impl DesktopApp {
             .into()
     }
 
+    fn plots_web_url(&self) -> Option<String> {
+        self.web_bind.map(|bind| {
+            if let Some(project_name) = &self.selected_project {
+                format!("http://{bind}/plots?project={project_name}")
+            } else {
+                format!("http://{bind}/plots")
+            }
+        })
+    }
+
     fn status_view(&self) -> Element<'_, Message> {
         let mut line = self.status_message.clone();
         if let Some(err) = &self.error_message {
@@ -1940,12 +2407,30 @@ impl DesktopApp {
         container(text(line).size(14)).padding(8).into()
     }
 
-    fn refresh_param_inputs(&mut self) {
+    fn refresh_param_inputs_full(&mut self) {
+        self.param_dirty_keys.clear();
         let mut next = HashMap::new();
         for (key, value) in &self.logic_params {
-            next.insert(key.clone(), format!("{value:.4}"));
+            next.insert(key.clone(), format_logic_param_value(value));
         }
         self.param_inputs = next;
+    }
+
+    fn refresh_param_inputs_preserving_dirty(&mut self) {
+        self.param_inputs
+            .retain(|key, _| self.logic_params.contains_key(key));
+        self.param_dirty_keys
+            .retain(|key| self.logic_params.contains_key(key));
+
+        for (key, value) in &self.logic_params {
+            if !self.param_dirty_keys.contains(key) {
+                self.param_inputs
+                    .insert(key.clone(), format_logic_param_value(value));
+            } else if !self.param_inputs.contains_key(key) {
+                self.param_inputs
+                    .insert(key.clone(), format_logic_param_value(value));
+            }
+        }
     }
 
     fn sync_io_rows_from_name_rows(&mut self) {
@@ -1992,6 +2477,37 @@ impl DesktopApp {
             || !collect_variable_names(&self.mv_name_rows).is_empty()
             || !collect_variable_names(&self.cv_name_rows).is_empty()
             || !collect_variable_names(&self.dv_name_rows).is_empty()
+    }
+}
+
+fn format_logic_param_value(value: &LogicParamValue) -> String {
+    match value {
+        LogicParamValue::F64(v) => format!("{v:.4}"),
+        LogicParamValue::Bool(v) => v.to_string(),
+    }
+}
+
+fn parse_logic_param_input(
+    current: &LogicParamValue,
+    raw: &str,
+) -> Result<LogicParamValue, String> {
+    match current {
+        LogicParamValue::F64(_) => raw
+            .trim()
+            .parse::<f64>()
+            .map(LogicParamValue::F64)
+            .map_err(|_| "erwarte Zahl (f64)".to_string()),
+        LogicParamValue::Bool(_) => parse_bool(raw)
+            .map(LogicParamValue::Bool)
+            .ok_or_else(|| "erwarte bool: true/false/1/0".to_string()),
+    }
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -2075,6 +2591,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
             let communication = CommunicationEditorState::from_config(&cfg.communication);
+            let logic_editor = LogicEditorState::from_config(&cfg.logic, &cfg.io);
 
             let mv_names = if cfg.variables.mvs.is_empty() {
                 vec![VariableNameRow::blank()]
@@ -2130,6 +2647,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             Ok(ProjectPanelData {
                 sidebar_tasks,
                 config_params: cfg.logic.params.clone(),
+                logic_editor,
                 communication,
                 variables: cfg.variables.clone(),
                 mv_names,
@@ -2187,6 +2705,43 @@ fn stop_runtime_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
     )
 }
 
+fn open_url_task(url: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            open_url_in_browser(&url)?;
+            Ok(format!("Browser geöffnet: {}", url))
+        },
+        Message::PlotsWebOpened,
+    )
+}
+
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Browser konnte nicht geöffnet werden: {err}"))
+}
+
 fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
     Task::perform(
         async move {
@@ -2226,12 +2781,12 @@ fn set_param_task(
     runtime: Arc<RuntimeManager>,
     project_service: ProjectService,
     key: String,
-    value: f64,
+    value: LogicParamValue,
 ) -> Task<Message> {
     Task::perform(
         async move {
             let mut updates = HashMap::new();
-            updates.insert(key, value);
+            updates.insert(key.clone(), value);
 
             let params = runtime
                 .set_params(updates.clone())
@@ -2244,7 +2799,7 @@ fn set_param_task(
                     .map_err(|err| format!("Parameterpersistenz fehlgeschlagen: {err}"))?;
             }
 
-            Ok(ParamApplyResult { params })
+            Ok(ParamApplyResult { key, params })
         },
         Message::ParamApplied,
     )
@@ -2601,6 +3156,7 @@ fn save_io_definition_task(
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
             cfg.rebuild_runtime_io_from_definition()
                 .map_err(|err| format!("I/O-Ableitung fehlgeschlagen: {err}"))?;
+            sync_io_initial_value_online_params(&mut cfg);
 
             project_service
                 .save_config(&project_name, &cfg)
@@ -2609,6 +3165,735 @@ fn save_io_definition_task(
             Ok(format!("I/O Definition für '{}' gespeichert", project_name))
         },
         Message::IoDefinitionSaved,
+    )
+}
+
+fn save_logic_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: LogicEditorState,
+    existing_params: HashMap<String, LogicParamValue>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+
+            cfg.logic.kind = editor.selected_kind.into();
+            cfg.logic.custom_rust.strategy_name = editor.custom_strategy_name.trim().to_string();
+            cfg.logic.custom_rust.source_path = editor.custom_source_path.trim().to_string();
+            cfg.logic.custom_rust.artifact_path = editor.custom_artifact_path.trim().to_string();
+
+            let mut pairs = Vec::new();
+            for row in editor.p_pairs {
+                let cv = row.cv.trim().to_string();
+                let mv = row.mv.trim().to_string();
+                if cv.is_empty() && mv.is_empty() {
+                    continue;
+                }
+                if cv.is_empty() || mv.is_empty() {
+                    return Err("Jedes P-Paar braucht CV und MV".to_string());
+                }
+                let kp = row
+                    .kp
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("Ungültiges kp für Paar {} -> {}", cv, mv))?;
+                let bias = row
+                    .bias
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("Ungültiges bias für Paar {} -> {}", cv, mv))?;
+                pairs.push(PControllerPairConfig { cv, mv, kp, bias });
+            }
+            if cfg.logic.kind == LogicKind::PController && pairs.is_empty() {
+                return Err("Für P-Regler bitte mindestens ein CV->MV Paar anlegen".to_string());
+            }
+            cfg.logic.p_controller.pairs = pairs.clone();
+            cfg.logic.params = existing_params;
+            for pair in &pairs {
+                cfg.logic.params.insert(
+                    format!("p.{}.{}.kp", pair.cv, pair.mv),
+                    LogicParamValue::F64(pair.kp),
+                );
+                cfg.logic.params.insert(
+                    format!("p.{}.{}.bias", pair.cv, pair.mv),
+                    LogicParamValue::F64(pair.bias),
+                );
+            }
+            cfg.sync_active_online_params();
+
+            if cfg.logic.kind == LogicKind::CustomRust
+                && !cfg.logic.custom_rust.is_compatible_with(&cfg.io)
+            {
+                return Err(
+                    "Eigene Regellogik ist aktuell nicht kompatibel mit der I/O-Definition"
+                        .to_string(),
+                );
+            }
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Regellogik konnte nicht gespeichert werden: {err}"))?;
+            Ok(format!("Regellogik für '{}' gespeichert", project_name))
+        },
+        Message::LogicSaved,
+    )
+}
+
+fn generate_logic_template_task(
+    project_service: ProjectService,
+    project_name: String,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            if cfg.io.outputs.is_empty() {
+                return Err("I/O ist leer. Bitte zuerst 'I/O definieren' abschließen.".to_string());
+            }
+
+            let project_dir = project_service.project_dir(&project_name);
+            let strategy_name = format!("{}_custom_logic", sanitize_crate_name(&project_name));
+            let strategy_root = project_dir.join("logic").join("custom_strategy");
+            let src_dir = strategy_root.join("src");
+            fs::create_dir_all(&src_dir)
+                .map_err(|err| format!("Template-Ordner konnte nicht erstellt werden: {err}"))?;
+
+            let cargo_toml = render_custom_cargo_toml(&strategy_name);
+            fs::write(strategy_root.join("Cargo.toml"), cargo_toml)
+                .map_err(|err| format!("Cargo.toml konnte nicht geschrieben werden: {err}"))?;
+
+            let required_inputs: Vec<String> = cfg
+                .io
+                .inputs
+                .iter()
+                .map(|point| point.name.clone())
+                .collect();
+            let required_outputs: Vec<String> = cfg
+                .io
+                .outputs
+                .iter()
+                .map(|point| point.name.clone())
+                .collect();
+            fs::write(
+                src_dir.join("lib.rs"),
+                render_custom_template(&required_inputs, &required_outputs),
+            )
+            .map_err(|err| format!("Template lib.rs konnte nicht geschrieben werden: {err}"))?;
+
+            fs::write(
+                src_dir.join("generated_dispatch.rs"),
+                render_generated_dispatch(&[]),
+            )
+            .map_err(|err| {
+                format!("generated_dispatch.rs konnte nicht geschrieben werden: {err}")
+            })?;
+
+            let artifact_name = format!("{}{}{}", dylib_prefix(), strategy_name, dylib_extension());
+            let source_rel = "logic/custom_strategy/src/lib.rs".to_string();
+            let artifact_rel = format!("logic/custom_strategy/target/release/{}", artifact_name);
+
+            cfg.logic.custom_rust.strategy_name = strategy_name;
+            cfg.logic.custom_rust.source_path = source_rel;
+            cfg.logic.custom_rust.artifact_path = artifact_rel;
+            cfg.logic.custom_rust.parameter_schema.clear();
+            cfg.logic.custom_rust.required_inputs = required_inputs;
+            cfg.logic.custom_rust.required_outputs = required_outputs;
+            cfg.logic.custom_rust.compatible = false;
+            cfg.logic.custom_rust.last_build_message =
+                "Template erzeugt. Bitte 'Strategie prüfen/builden' ausführen.".to_string();
+            if cfg.logic.kind == LogicKind::CustomRust {
+                cfg.logic.kind = LogicKind::PController;
+            }
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| {
+                    format!("Template-Konfiguration konnte nicht gespeichert werden: {err}")
+                })?;
+
+            Ok(format!(
+                "Template für '{}' erzeugt unter {}",
+                project_name,
+                strategy_root.display()
+            ))
+        },
+        Message::LogicTemplateGenerated,
+    )
+}
+
+fn build_custom_logic_task(project_service: ProjectService, project_name: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            let project_dir = project_service.project_dir(&project_name);
+            let strategy_root = project_dir.join("logic").join("custom_strategy");
+            let source_rel = if cfg.logic.custom_rust.source_path.trim().is_empty() {
+                "logic/custom_strategy/src/lib.rs".to_string()
+            } else {
+                cfg.logic.custom_rust.source_path.clone()
+            };
+            let source_path = project_dir.join(&source_rel);
+            if !source_path.exists() {
+                return Err(format!(
+                    "Custom source nicht gefunden: {}",
+                    source_path.display()
+                ));
+            }
+
+            let source = fs::read_to_string(&source_path)
+                .map_err(|err| format!("Custom source konnte nicht gelesen werden: {err}"))?;
+            let schema = parse_custom_parameter_schema_from_source(&source)
+                .map_err(|err| format!("Signatur ungültig: {err}"))?;
+
+            let generated_dispatch_path = source_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("generated_dispatch.rs");
+            fs::write(&generated_dispatch_path, render_generated_dispatch(&schema)).map_err(
+                |err| format!("generated_dispatch.rs konnte nicht geschrieben werden: {err}"),
+            )?;
+
+            let output = Command::new("cargo")
+                .arg("build")
+                .arg("--release")
+                .arg("--manifest-path")
+                .arg(strategy_root.join("Cargo.toml"))
+                .output()
+                .map_err(|err| format!("cargo build konnte nicht gestartet werden: {err}"))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                cfg.logic.custom_rust.compatible = false;
+                cfg.logic.custom_rust.last_build_message =
+                    first_line_or(&stderr, "Build fehlgeschlagen");
+                project_service
+                    .save_config(&project_name, &cfg)
+                    .map_err(|err| {
+                        format!(
+                            "Konfiguration konnte nach Build-Fehler nicht gespeichert werden: {err}"
+                        )
+                    })?;
+                return Err(format!(
+                    "Build fehlgeschlagen: {}",
+                    first_line_or(&stderr, "Unbekannter Fehler")
+                ));
+            }
+
+            let strategy_name = if cfg.logic.custom_rust.strategy_name.trim().is_empty() {
+                format!("{}_custom_logic", sanitize_crate_name(&project_name))
+            } else {
+                cfg.logic.custom_rust.strategy_name.clone()
+            };
+            let artifact_name = format!("{}{}{}", dylib_prefix(), strategy_name, dylib_extension());
+            let artifact_rel = if cfg.logic.custom_rust.artifact_path.trim().is_empty() {
+                format!("logic/custom_strategy/target/release/{}", artifact_name)
+            } else {
+                cfg.logic.custom_rust.artifact_path.clone()
+            };
+            let artifact_path = project_dir.join(&artifact_rel);
+            if !artifact_path.exists() {
+                return Err(format!(
+                    "Build erfolgreich, aber Artefakt fehlt: {}",
+                    artifact_path.display()
+                ));
+            }
+
+            let contract = inspect_custom_library_contract(&artifact_path).map_err(|err| {
+                format!("Build ok, aber Metadaten aus cdylib konnten nicht gelesen werden: {err}")
+            })?;
+
+            if schema_signature(&schema) != schema_signature(&contract.parameter_schema) {
+                cfg.logic.custom_rust.compatible = false;
+                cfg.logic.custom_rust.last_build_message =
+                    "Build erfolgreich, aber Parameter-Schema in cdylib passt nicht zur control-Signatur".to_string();
+                project_service
+                    .save_config(&project_name, &cfg)
+                    .map_err(|err| {
+                        format!(
+                            "Konfiguration konnte nach Schema-Fehler nicht gespeichert werden: {err}"
+                        )
+                    })?;
+                return Err(
+                    "Build erfolgreich, aber Parameter-Schema in cdylib passt nicht zur control-Signatur".to_string(),
+                );
+            }
+
+            let expected_inputs: Vec<String> = cfg
+                .io
+                .inputs
+                .iter()
+                .map(|point| point.name.clone())
+                .collect();
+            let expected_outputs: Vec<String> = cfg
+                .io
+                .outputs
+                .iter()
+                .map(|point| point.name.clone())
+                .collect();
+            let strict_io_match = io_signature(&expected_inputs)
+                == io_signature(&contract.required_inputs)
+                && io_signature(&expected_outputs) == io_signature(&contract.required_outputs);
+
+            cfg.logic.custom_rust.strategy_name = strategy_name;
+            cfg.logic.custom_rust.source_path = source_rel;
+            cfg.logic.custom_rust.artifact_path = artifact_rel;
+            cfg.logic.custom_rust.parameter_schema = contract.parameter_schema.clone();
+            cfg.logic.custom_rust.required_inputs = contract.required_inputs.clone();
+            cfg.logic.custom_rust.required_outputs = contract.required_outputs.clone();
+            cfg.logic.custom_rust.compatible = strict_io_match;
+            cfg.logic.custom_rust.last_build_message = if strict_io_match {
+                "Build erfolgreich".to_string()
+            } else {
+                format!(
+                    "Build erfolgreich, aber I/O-Mismatch: {}",
+                    summarize_io_mismatch(
+                        &expected_inputs,
+                        &expected_outputs,
+                        &contract.required_inputs,
+                        &contract.required_outputs
+                    )
+                )
+            };
+
+            cfg.sync_active_online_params();
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Custom-Logik konnte nicht gespeichert werden: {err}"))?;
+
+            if strict_io_match {
+                Ok(format!(
+                    "Custom-Strategie gebaut und kompatibel für '{}'",
+                    project_name
+                ))
+            } else {
+                Ok(format!(
+                    "Custom-Strategie gebaut, aber I/O-Mismatch für '{}'",
+                    project_name,
+                ))
+            }
+        },
+        Message::CustomLogicBuilt,
+    )
+}
+
+fn sanitize_crate_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "smartapc_custom_logic".to_string()
+    } else {
+        out
+    }
+}
+
+fn dylib_extension() -> &'static str {
+    if cfg!(target_os = "windows") {
+        ".dll"
+    } else if cfg!(target_os = "macos") {
+        ".dylib"
+    } else {
+        ".so"
+    }
+}
+
+fn dylib_prefix() -> &'static str {
+    if cfg!(target_os = "windows") {
+        ""
+    } else {
+        "lib"
+    }
+}
+
+fn first_line_or(input: &str, fallback: &str) -> String {
+    input
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn io_signature(values: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = values.iter().map(|v| v.trim().to_string()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn schema_signature(values: &[crate::project_config::CustomParameterSchemaEntry]) -> Vec<String> {
+    let mut out = values
+        .iter()
+        .map(|entry| format!("{}:{:?}", entry.name.trim(), entry.param_type))
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn summarize_io_mismatch(
+    expected_inputs: &[String],
+    expected_outputs: &[String],
+    actual_inputs: &[String],
+    actual_outputs: &[String],
+) -> String {
+    let exp_in = io_signature(expected_inputs);
+    let exp_out = io_signature(expected_outputs);
+    let act_in = io_signature(actual_inputs);
+    let act_out = io_signature(actual_outputs);
+
+    let missing_in: Vec<_> = exp_in
+        .iter()
+        .filter(|name| !act_in.contains(name))
+        .cloned()
+        .collect();
+    let extra_in: Vec<_> = act_in
+        .iter()
+        .filter(|name| !exp_in.contains(name))
+        .cloned()
+        .collect();
+    let missing_out: Vec<_> = exp_out
+        .iter()
+        .filter(|name| !act_out.contains(name))
+        .cloned()
+        .collect();
+    let extra_out: Vec<_> = act_out
+        .iter()
+        .filter(|name| !exp_out.contains(name))
+        .cloned()
+        .collect();
+
+    let mut parts = Vec::new();
+    if !missing_in.is_empty() {
+        parts.push(format!("fehlende inputs [{}]", missing_in.join(", ")));
+    }
+    if !extra_in.is_empty() {
+        parts.push(format!("zusätzliche inputs [{}]", extra_in.join(", ")));
+    }
+    if !missing_out.is_empty() {
+        parts.push(format!("fehlende outputs [{}]", missing_out.join(", ")));
+    }
+    if !extra_out.is_empty() {
+        parts.push(format!("zusätzliche outputs [{}]", extra_out.join(", ")));
+    }
+
+    if parts.is_empty() {
+        "unbekannte Abweichung".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+fn render_custom_cargo_toml(crate_name: &str) -> String {
+    format!(
+        r#"[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1.0"
+"#
+    )
+}
+
+fn render_custom_template(required_inputs: &[String], required_outputs: &[String]) -> String {
+    let required_inputs_json =
+        serde_json::to_string_pretty(required_inputs).unwrap_or_else(|_| "[]".to_string());
+    let required_outputs_json =
+        serde_json::to_string_pretty(required_outputs).unwrap_or_else(|_| "[]".to_string());
+
+    format!(
+        r#"use std::collections::HashMap;
+use std::ffi::{{c_char, CStr, CString}};
+
+use serde::{{Deserialize, Serialize}};
+
+mod generated_dispatch;
+use generated_dispatch::{{call_control, parameter_schema}};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeState {{
+    Running,
+    Hold,
+    Alarm,
+    Off,
+}}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SignalValue {{
+    F64(f64),
+    Bool(bool),
+}}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ParamValue {{
+    F64(f64),
+    Bool(bool),
+}}
+
+impl ParamValue {{
+    pub fn as_f64(&self) -> Option<f64> {{
+        match self {{
+            ParamValue::F64(v) => Some(*v),
+            _ => None,
+        }}
+    }}
+
+    pub fn as_bool(&self) -> Option<bool> {{
+        match self {{
+            ParamValue::Bool(v) => Some(*v),
+            _ => None,
+        }}
+    }}
+}}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartApcContext {{
+    // Aktueller Runtime-State.
+    pub state: RuntimeState,
+    // Aktueller Input-Snapshot (alle verfügbaren Eingänge).
+    pub inputs: HashMap<String, SignalValue>,
+    // Aktuelle Online-Parameter.
+    pub params: HashMap<String, ParamValue>,
+    // Historie der Inputs (ältest -> neuest).
+    #[serde(default)]
+    pub input_history: HashMap<String, Vec<SignalValue>>,
+    // Historie der Outputs (ältest -> neuest).
+    #[serde(default)]
+    pub output_history: HashMap<String, Vec<SignalValue>>,
+    // Historie der Online-Parameter (ältest -> neuest).
+    #[serde(default)]
+    pub param_history: HashMap<String, Vec<ParamValue>>,
+}}
+
+#[derive(Debug, Clone, Default)]
+pub struct SmartApcOutputs {{
+    pub values: HashMap<String, SignalValue>,
+    // Zusätzliche User-Logs aus der Regelstrategie.
+    pub logs: Vec<UserLogEntry>,
+}}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLogEntry {{
+    pub message: String,
+    #[serde(default)]
+    pub values: HashMap<String, SignalValue>,
+}}
+
+impl SmartApcOutputs {{
+    pub fn set_f64(&mut self, key: &str, value: f64) {{
+        self.values.insert(key.to_string(), SignalValue::F64(value));
+    }}
+
+    pub fn set_bool(&mut self, key: &str, value: bool) {{
+        self.values.insert(key.to_string(), SignalValue::Bool(value));
+    }}
+
+    pub fn log(&mut self, message: impl Into<String>) {{
+        self.logs.push(UserLogEntry {{
+            message: message.into(),
+            values: HashMap::new(),
+        }});
+    }}
+
+    pub fn log_value(&mut self, message: impl Into<String>, key: &str, value: SignalValue) {{
+        let mut values = HashMap::new();
+        values.insert(key.to_string(), value);
+        self.logs.push(UserLogEntry {{
+            message: message.into(),
+            values,
+        }});
+    }}
+
+    pub fn log_values(&mut self, message: impl Into<String>, values: HashMap<String, SignalValue>) {{
+        self.logs.push(UserLogEntry {{
+            message: message.into(),
+            values,
+        }});
+    }}
+}}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParameterSchemaEntry {{
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: String,
+    pub description: String,
+    pub default: ParamValue,
+}}
+
+#[derive(Debug, Serialize)]
+struct Metadata {{
+    required_inputs: Vec<String>,
+    required_outputs: Vec<String>,
+    parameter_schema: Vec<ParameterSchemaEntry>,
+}}
+
+#[derive(Debug, Deserialize)]
+struct CallRequest {{
+    state: RuntimeState,
+    inputs: HashMap<String, SignalValue>,
+    params: HashMap<String, ParamValue>,
+    #[serde(default)]
+    input_history: HashMap<String, Vec<SignalValue>>,
+    #[serde(default)]
+    output_history: HashMap<String, Vec<SignalValue>>,
+    #[serde(default)]
+    param_history: HashMap<String, Vec<ParamValue>>,
+}}
+
+#[derive(Debug, Serialize)]
+struct CallResponse {{
+    outputs: HashMap<String, SignalValue>,
+    logs: Vec<UserLogEntry>,
+}}
+
+const REQUIRED_INPUTS: &[&str] = &{required_inputs_json};
+const REQUIRED_OUTPUTS: &[&str] = &{required_outputs_json};
+
+pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
+    // -----------------------------------------------------------------------------------------
+    // TEMPLATE HINWEISE
+    // 1) ctx.inputs enthält den aktuellen Zykluswert je Signal.
+    // 2) ctx.input_history/output_history/param_history enthalten Verlaufswerte (ältest -> neuest).
+    // 3) Zusätzliche Parameter können als weitere Funktionsargumente ergänzt werden:
+    //    z. B. `pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64)`.
+    //    Diese werden automatisch als Online-Parameter geführt.
+    // 4) Alle benötigten `mv.*.write` Outputs setzen.
+    // 5) Eigene Logs können über out.log(...), out.log_value(...), out.log_values(...) erzeugt werden.
+    // -----------------------------------------------------------------------------------------
+    let _ = ctx;
+    // Template default: set every required MV.write output.
+    for output_name in REQUIRED_OUTPUTS {{
+        out.set_f64(output_name, 0.0);
+    }}
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn smartapc_metadata_json() -> *mut c_char {{
+    let metadata = Metadata {{
+        required_inputs: REQUIRED_INPUTS.iter().map(|s| (*s).to_string()).collect(),
+        required_outputs: REQUIRED_OUTPUTS.iter().map(|s| (*s).to_string()).collect(),
+        parameter_schema: parameter_schema(),
+    }};
+
+    match serde_json::to_string(&metadata) {{
+        Ok(json) => CString::new(json).map(CString::into_raw).unwrap_or(std::ptr::null_mut()),
+        Err(_) => std::ptr::null_mut(),
+    }}
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn smartapc_control_json(input: *const c_char) -> *mut c_char {{
+    if input.is_null() {{
+        return std::ptr::null_mut();
+    }}
+
+    let input_str = unsafe {{ CStr::from_ptr(input) }}.to_string_lossy();
+    let req: CallRequest = match serde_json::from_str(&input_str) {{
+        Ok(v) => v,
+        Err(_) => return std::ptr::null_mut(),
+    }};
+
+    let ctx = SmartApcContext {{
+        state: req.state,
+        inputs: req.inputs,
+        params: req.params,
+        input_history: req.input_history,
+        output_history: req.output_history,
+        param_history: req.param_history,
+    }};
+    let mut out = SmartApcOutputs::default();
+    call_control(&ctx, &mut out);
+
+    let resp = CallResponse {{
+        outputs: out.values,
+        logs: out.logs,
+    }};
+    match serde_json::to_string(&resp) {{
+        Ok(json) => CString::new(json).map(CString::into_raw).unwrap_or(std::ptr::null_mut()),
+        Err(_) => std::ptr::null_mut(),
+    }}
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn smartapc_string_free(ptr: *mut c_char) {{
+    if ptr.is_null() {{
+        return;
+    }}
+    unsafe {{
+        drop(CString::from_raw(ptr));
+    }}
+}}
+"#
+    )
+}
+
+fn render_generated_dispatch(
+    schema: &[crate::project_config::CustomParameterSchemaEntry],
+) -> String {
+    let mut call_args = String::new();
+    let mut schema_entries = String::new();
+
+    for entry in schema {
+        let (extract, type_name, default_expr) = match entry.param_type {
+            LogicParamType::F64 => (
+                format!(
+                    "ctx.params.get(\"{}\").and_then(crate::ParamValue::as_f64).unwrap_or(0.0)",
+                    entry.name
+                ),
+                "f64",
+                "crate::ParamValue::F64(0.0)",
+            ),
+            LogicParamType::Bool => (
+                format!(
+                    "ctx.params.get(\"{}\").and_then(crate::ParamValue::as_bool).unwrap_or(false)",
+                    entry.name
+                ),
+                "bool",
+                "crate::ParamValue::Bool(false)",
+            ),
+        };
+        call_args.push_str(", ");
+        call_args.push_str(&extract);
+        schema_entries.push_str(&format!(
+            "    out.push(crate::ParameterSchemaEntry {{ name: \"{name}\".to_string(), param_type: \"{type_name}\".to_string(), description: \"Custom user parameter '{name}'\".to_string(), default: {default_expr}, }});\n",
+            name = entry.name,
+            type_name = type_name,
+            default_expr = default_expr
+        ));
+    }
+
+    format!(
+        r#"pub fn call_control(ctx: &crate::SmartApcContext, out: &mut crate::SmartApcOutputs) {{
+    crate::control(ctx, out{call_args});
+}}
+
+pub fn parameter_schema() -> Vec<crate::ParameterSchemaEntry> {{
+    let mut out = Vec::new();
+{schema_entries}    out
+}}
+"#
     )
 }
 
@@ -2779,6 +4064,12 @@ fn build_io_definition(
     Ok(io_definition)
 }
 
+fn sync_io_initial_value_online_params(cfg: &mut crate::project_config::ProjectConfig) {
+    // Keep only parameters that are relevant for the currently active logic.
+    // Static I/O initial values (without OPC address) are included by sync_active_online_params.
+    cfg.sync_active_online_params();
+}
+
 fn start_web_task(
     project_service: ProjectService,
     runtime: Arc<RuntimeManager>,
@@ -2881,4 +4172,78 @@ fn bool_plot(values: &[bool], width: usize) -> String {
         out.push(if value { '1' } else { '0' });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::project_config::{
+        CvIoDefinition, LogicParamValue, MvIoDefinition, ProjectConfig, WatchdogConfig,
+    };
+
+    use super::sync_io_initial_value_online_params;
+
+    #[test]
+    fn syncs_static_io_initial_values_into_online_params() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.watchdog = WatchdogConfig::None;
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=u1_write".to_string(),
+            mv_read: "ns=2;s=u1_read".to_string(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: "ns=2;s=y1_target".to_string(),
+            ist: "ns=2;s=y1_value".to_string(),
+            sollband_opc: None,
+            sollband_value: Some(0.5),
+            enable: None,
+        });
+
+        sync_io_initial_value_online_params(&mut cfg);
+
+        assert_eq!(
+            cfg.logic.params.get("io.mv.u1.hl"),
+            Some(&LogicParamValue::F64(10.0))
+        );
+        assert_eq!(
+            cfg.logic.params.get("io.mv.u1.ll"),
+            Some(&LogicParamValue::F64(-10.0))
+        );
+        assert_eq!(
+            cfg.logic.params.get("io.cv.y1.sollband"),
+            Some(&LogicParamValue::F64(0.5))
+        );
+    }
+
+    #[test]
+    fn removes_static_online_param_when_opc_address_exists() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.logic
+            .params
+            .insert("io.mv.u1.hl".to_string(), LogicParamValue::F64(10.0));
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=u1_write".to_string(),
+            mv_read: "ns=2;s=u1_read".to_string(),
+            hl_opc: Some("ns=2;s=u1_hl".to_string()),
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+
+        sync_io_initial_value_online_params(&mut cfg);
+
+        assert!(!cfg.logic.params.contains_key("io.mv.u1.hl"));
+        assert_eq!(
+            cfg.logic.params.get("io.mv.u1.ll"),
+            Some(&LogicParamValue::F64(-10.0))
+        );
+    }
 }

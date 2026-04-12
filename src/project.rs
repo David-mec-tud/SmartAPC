@@ -5,7 +5,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::project_config::{ProjectConfig, SidebarTask, from_toml_str, to_toml_string};
+use crate::project_config::{
+    LogicParamValue, PlotConfig, ProjectConfig, SidebarTask, from_toml_str, to_toml_string,
+};
 
 const PROJECT_FILE: &str = "project.toml";
 
@@ -76,12 +78,14 @@ impl ProjectService {
     }
 
     pub fn save_config(&self, project_name: &str, cfg: &ProjectConfig) -> Result<()> {
-        cfg.validate()?;
+        let mut normalized = cfg.clone();
+        normalized.normalize_plot_config();
+        normalized.validate()?;
 
         let dir = self.project_dir(project_name);
         fs::create_dir_all(&dir)?;
 
-        let encoded = to_toml_string(cfg)?;
+        let encoded = to_toml_string(&normalized)?;
         fs::write(self.config_path(project_name), encoded)?;
         Ok(())
     }
@@ -94,13 +98,50 @@ impl ProjectService {
     pub fn update_logic_params(
         &self,
         project_name: &str,
-        updates: std::collections::HashMap<String, f64>,
+        updates: std::collections::HashMap<String, LogicParamValue>,
     ) -> Result<ProjectConfig> {
         let mut cfg = self.load_config(project_name)?;
-        cfg.logic.params.extend(updates);
+        cfg.sync_active_online_params();
+        for (key, value) in updates {
+            let existing = cfg
+                .logic
+                .params
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("unknown online parameter '{}'", key))?;
+            if !existing.matches_type(value.param_type()) {
+                bail!(
+                    "online parameter '{}' type mismatch (expected {:?})",
+                    key,
+                    existing.param_type()
+                );
+            }
+            cfg.logic.params.insert(key, value);
+        }
         cfg.validate()?;
         self.save_config(project_name, &cfg)?;
         Ok(cfg)
+    }
+
+    pub fn get_plot_config(&self, project_name: &str) -> Result<PlotConfig> {
+        let mut cfg = self.load_config(project_name)?;
+        cfg.normalize_plot_config();
+        Ok(cfg.plots)
+    }
+
+    pub fn update_plot_config(
+        &self,
+        project_name: &str,
+        mut plots: PlotConfig,
+    ) -> Result<PlotConfig> {
+        let mut cfg = self.load_config(project_name)?;
+        plots.window_sec = plots.window_sec.clamp(
+            crate::project_config::MIN_PLOT_WINDOW_SEC,
+            crate::project_config::MAX_PLOT_WINDOW_SEC,
+        );
+        cfg.plots = plots;
+        cfg.normalize_plot_config();
+        self.save_config(project_name, &cfg)?;
+        Ok(cfg.plots)
     }
 }
 

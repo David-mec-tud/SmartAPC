@@ -1,11 +1,15 @@
 use std::{
     collections::HashMap,
+    fs::{File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
+use serde_json::json;
 use tokio::{
     sync::{Mutex, oneshot},
     task::JoinHandle,
@@ -13,11 +17,11 @@ use tokio::{
 
 use crate::{
     communication::{HealthStatus, ProtocolAdapter, opcua::OpcUaClientAdapter},
-    logic::{ControlLogic, MappingLogic},
+    logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
     model::{ModelModule, NoopModel},
     project::ProjectService,
-    project_config::{MappingRule, ProjectConfig, WatchdogConfig},
-    storage::{CycleMetric, SignalSample, SqliteStorage},
+    project_config::{LogicKind, LogicParamValue, ProjectConfig, WatchdogConfig},
+    storage::{CycleMetric, SeriesCatalogEntry, SignalSample, SqliteStorage},
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
         CounterMirrorWatchdog, NoneWatchdog, WatchdogModule, WatchdogStatus,
@@ -50,6 +54,7 @@ struct RuntimeCore {
     logic: Box<dyn ControlLogic>,
     model: Option<Box<dyn ModelModule>>,
     storage: SqliteStorage,
+    log_file: File,
     state: RuntimeState,
     watchdog_status: WatchdogStatus,
     fault_started_at: Option<Instant>,
@@ -71,6 +76,7 @@ impl RuntimeCore {
         mut logic: Box<dyn ControlLogic>,
         model: Option<Box<dyn ModelModule>>,
         storage: SqliteStorage,
+        log_file: File,
     ) -> Result<Self> {
         protocol.connect().await?;
         watchdog.init(protocol.as_ref()).await?;
@@ -86,6 +92,7 @@ impl RuntimeCore {
             logic,
             model,
             storage,
+            log_file,
             state: RuntimeState::Running,
             watchdog_status: WatchdogStatus::Ok,
             fault_started_at: None,
@@ -116,16 +123,49 @@ impl RuntimeCore {
         }
     }
 
-    fn current_params(&self) -> HashMap<String, f64> {
+    fn current_params(&self) -> HashMap<String, LogicParamValue> {
         self.logic.current_params()
     }
 
-    fn set_params(&mut self, updates: HashMap<String, f64>) {
-        self.logic.set_params(updates);
+    fn set_params(&mut self, updates: HashMap<String, LogicParamValue>) -> Result<()> {
+        let current = self.logic.current_params();
+        for (key, value) in &updates {
+            let existing = current
+                .get(key)
+                .ok_or_else(|| anyhow!("unknown online parameter '{}'", key))?;
+            if !existing.matches_type(value.param_type()) {
+                bail!(
+                    "online parameter '{}' type mismatch (expected {:?})",
+                    key,
+                    existing.param_type()
+                );
+            }
+        }
+
+        self.logic.set_params(updates.clone());
+        if let Err(err) = self.append_log_record(json!({
+            "timestamp_ms": now_ms(),
+            "event": "online_params_update",
+            "state": self.state,
+            "updates": updates,
+            "params": self.logic.current_params(),
+        })) {
+            tracing::warn!(error = %err, "failed to write parameter update log");
+        }
+        Ok(())
     }
 
     fn read_plot_samples(&self, limit: usize) -> Result<Vec<SignalSample>> {
         self.storage.read_recent_samples(limit)
+    }
+
+    fn read_plot_samples_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
+        let since = now_ms().saturating_sub(window_ms as i64);
+        self.storage.read_samples_since(since)
+    }
+
+    fn read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
+        self.storage.read_series_catalog()
     }
 
     async fn simulate_step(
@@ -172,11 +212,16 @@ impl RuntimeCore {
         let healthy_watchdog = !matches!(&watchdog_status, WatchdogStatus::Fault { .. });
         self.state = self.compute_next_state(healthy_protocol && healthy_watchdog);
 
+        let mut cycle_outputs: Option<HashMap<String, SignalValue>> = None;
+        let mut user_logs: Vec<LogicUserLog> = Vec::new();
+
         match self.state {
             RuntimeState::Running => {
                 let mut outputs = self.logic.step(&inputs, self.state)?;
+                user_logs = self.logic.drain_user_logs();
                 apply_output_limits(&self.config, &mut outputs);
                 self.last_outputs = outputs.clone();
+                cycle_outputs = Some(outputs.clone());
                 if should_exchange_io {
                     self.write_outputs(&outputs).await?;
                     self.storage.store_signal_map("output", &outputs)?;
@@ -187,6 +232,7 @@ impl RuntimeCore {
                     self.write_outputs(&self.last_outputs).await?;
                     self.storage
                         .store_signal_map("output", &self.last_outputs)?;
+                    cycle_outputs = Some(self.last_outputs.clone());
                 }
             }
             RuntimeState::Off => {
@@ -195,7 +241,10 @@ impl RuntimeCore {
         }
 
         if should_exchange_io {
+            self.store_online_param_samples()?;
+            self.store_user_log_samples(&user_logs)?;
             self.last_io_exchange = Some(cycle_start);
+            self.append_cycle_log(&inputs, cycle_outputs.as_ref(), &user_logs)?;
         }
 
         let duration = cycle_start.elapsed();
@@ -292,6 +341,52 @@ impl RuntimeCore {
 
         Ok(())
     }
+
+    fn append_cycle_log(
+        &mut self,
+        inputs: &HashMap<String, SignalValue>,
+        outputs: Option<&HashMap<String, SignalValue>>,
+        user_logs: &[LogicUserLog],
+    ) -> Result<()> {
+        let record = json!({
+            "timestamp_ms": now_ms(),
+            "event": "runtime_cycle",
+            "state": self.state,
+            "watchdog_status": self.watchdog_status,
+            "inputs": inputs,
+            "outputs": outputs,
+            "online_params": self.logic.current_params(),
+            "user_logs": user_logs,
+        });
+        self.append_log_record(record)
+    }
+
+    fn store_online_param_samples(&self) -> Result<()> {
+        let params = self.logic.current_params();
+        let mut values = HashMap::new();
+        for (key, value) in params {
+            values.insert(key, SignalValue::from(value));
+        }
+        self.storage.store_signal_map("online_param", &values)
+    }
+
+    fn store_user_log_samples(&self, user_logs: &[LogicUserLog]) -> Result<()> {
+        for entry in user_logs {
+            for (signal, value) in &entry.values {
+                self.storage.store_signal("user_log", signal, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_log_record(&mut self, record: serde_json::Value) -> Result<()> {
+        let encoded = serde_json::to_string(&record).context("failed to encode runtime log")?;
+        writeln!(self.log_file, "{encoded}").context("failed writing runtime log line")?;
+        self.log_file
+            .flush()
+            .context("failed flushing runtime log")?;
+        Ok(())
+    }
 }
 
 fn apply_output_limits(config: &ProjectConfig, outputs: &mut HashMap<String, SignalValue>) {
@@ -343,17 +438,30 @@ impl RuntimeManager {
         seed_protocol_nodes(adapter.as_ref(), &config)?;
 
         let watchdog = build_watchdog(&config.watchdog)?;
-        let logic = build_logic(&config.logic.mapping_rules, config.logic.params.clone());
+        let project_dir = service.project_dir(project_name);
+        let logic = build_logic(&config, &project_dir)?;
         let model = build_model(config.model.is_some());
 
-        let db_path = service
-            .project_dir(project_name)
-            .join("data")
-            .join("runtime.sqlite");
+        let db_path = project_dir.join("data").join("runtime.sqlite");
         let storage = SqliteStorage::new(db_path)?;
+        let log_path = project_dir.join("data").join("runtime.log");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open runtime log '{}'", log_path.display()))?;
 
         let core = Arc::new(Mutex::new(
-            RuntimeCore::new(config.clone(), adapter, watchdog, logic, model, storage).await?,
+            RuntimeCore::new(
+                config.clone(),
+                adapter,
+                watchdog,
+                logic,
+                model,
+                storage,
+                log_file,
+            )
+            .await?,
         ));
 
         let (tx, mut rx) = oneshot::channel();
@@ -413,18 +521,21 @@ impl RuntimeManager {
         guard.as_ref().map(|h| h.project_name.clone())
     }
 
-    pub async fn set_params(&self, updates: HashMap<String, f64>) -> Result<HashMap<String, f64>> {
+    pub async fn set_params(
+        &self,
+        updates: HashMap<String, LogicParamValue>,
+    ) -> Result<HashMap<String, LogicParamValue>> {
         let guard = self.handle.lock().await;
         let handle = guard
             .as_ref()
             .ok_or_else(|| anyhow!("runtime not running"))?;
 
         let mut core = handle.core.lock().await;
-        core.set_params(updates);
+        core.set_params(updates)?;
         Ok(core.current_params())
     }
 
-    pub async fn get_params(&self) -> Result<HashMap<String, f64>> {
+    pub async fn get_params(&self) -> Result<HashMap<String, LogicParamValue>> {
         let guard = self.handle.lock().await;
         let handle = guard
             .as_ref()
@@ -442,6 +553,26 @@ impl RuntimeManager {
 
         let core = handle.core.lock().await;
         core.read_plot_samples(limit)
+    }
+
+    pub async fn read_plots_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
+        let guard = self.handle.lock().await;
+        let handle = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("runtime not running"))?;
+
+        let core = handle.core.lock().await;
+        core.read_plot_samples_window(window_ms)
+    }
+
+    pub async fn read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
+        let guard = self.handle.lock().await;
+        let handle = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("runtime not running"))?;
+
+        let core = handle.core.lock().await;
+        core.read_plot_catalog()
     }
 
     pub async fn simulate_step(
@@ -475,8 +606,32 @@ fn build_watchdog(cfg: &WatchdogConfig) -> Result<Box<dyn WatchdogModule>> {
     }
 }
 
-fn build_logic(rules: &[MappingRule], params: HashMap<String, f64>) -> Box<dyn ControlLogic> {
-    Box::new(MappingLogic::new(rules.to_vec(), params))
+fn build_logic(config: &ProjectConfig, project_dir: &Path) -> Result<Box<dyn ControlLogic>> {
+    match config.logic.kind {
+        LogicKind::PController => {
+            let logic = PControllerLogic::new(
+                config.logic.p_controller.pairs.clone(),
+                config.logic.params.clone(),
+            );
+            if !logic.is_configured() {
+                bail!("p_controller has no CV->MV pairs configured");
+            }
+            Ok(Box::new(logic))
+        }
+        LogicKind::CustomRust => {
+            if !config.logic.custom_rust.is_compatible_with(&config.io) {
+                bail!("custom_rust strategy is not compatible with current I/O definition");
+            }
+            let artifact_path = if Path::new(&config.logic.custom_rust.artifact_path).is_absolute()
+            {
+                PathBuf::from(&config.logic.custom_rust.artifact_path)
+            } else {
+                project_dir.join(&config.logic.custom_rust.artifact_path)
+            };
+            let logic = CustomRustLogic::load(artifact_path, config.logic.params.clone())?;
+            Ok(Box::new(logic))
+        }
+    }
 }
 
 fn build_model(has_model_config: bool) -> Option<Box<dyn ModelModule>> {
@@ -526,13 +681,17 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::HashMap, fs, time::Duration};
 
     use tempfile::tempdir;
 
     use crate::{
         communication::opcua::OpcUaClientAdapter,
-        project_config::{AlarmConfig, LogicConfig, MappingRule, SignalPoint, WatchdogConfig},
+        logic::{ControlLogic, LogicMetadata, ParameterSchemaEntry},
+        project_config::{
+            AlarmConfig, LogicConfig, LogicKind, LogicParamValue, PControllerLogicConfig,
+            PControllerPairConfig, SignalPoint, WatchdogConfig,
+        },
     };
 
     use super::*;
@@ -540,27 +699,37 @@ mod tests {
     fn base_config() -> ProjectConfig {
         let mut cfg = ProjectConfig::new("test_project");
         cfg.communication.endpoint_url = "mock://runtime-tests".to_string();
-        cfg.io.inputs = vec![SignalPoint {
-            name: "pv".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=PV".to_string(),
-            opc_tag: None,
-        }];
+        cfg.io.inputs = vec![
+            SignalPoint {
+                name: "cv.y1.soll".to_string(),
+                signal_type: SignalType::F64,
+                address: "ns=2;s=Y1_SOLL".to_string(),
+                opc_tag: None,
+            },
+            SignalPoint {
+                name: "cv.y1.ist".to_string(),
+                signal_type: SignalType::F64,
+                address: "ns=2;s=Y1_IST".to_string(),
+                opc_tag: None,
+            },
+        ];
         cfg.io.outputs = vec![SignalPoint {
-            name: "mv".to_string(),
+            name: "mv.u1.write".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=MV".to_string(),
+            address: "ns=2;s=U1_WRITE".to_string(),
             opc_tag: None,
         }];
         cfg.logic = LogicConfig {
-            kind: "mapping".to_string(),
-            mapping_rules: vec![MappingRule {
-                input: "pv".to_string(),
-                output: "mv".to_string(),
-                gain: 2.0,
-                offset: 0.0,
-                invert_bool: false,
-            }],
+            kind: LogicKind::PController,
+            p_controller: PControllerLogicConfig {
+                pairs: vec![PControllerPairConfig {
+                    cv: "y1".to_string(),
+                    mv: "u1".to_string(),
+                    kp: 2.0,
+                    bias: 0.0,
+                }],
+            },
+            custom_rust: Default::default(),
             params: HashMap::new(),
             initial_values: HashMap::new(),
         };
@@ -573,11 +742,65 @@ mod tests {
         cfg
     }
 
+    #[derive(Default)]
+    struct LoggingTestLogic {
+        params: HashMap<String, LogicParamValue>,
+        pending_logs: Vec<LogicUserLog>,
+    }
+
+    impl ControlLogic for LoggingTestLogic {
+        fn metadata(&self) -> LogicMetadata {
+            LogicMetadata {
+                kind: "test_logging".to_string(),
+                description: "test logic".to_string(),
+            }
+        }
+
+        fn init(
+            &mut self,
+            _initial_values: HashMap<String, SignalValue>,
+            params: HashMap<String, LogicParamValue>,
+        ) {
+            self.params = params;
+        }
+
+        fn step(
+            &mut self,
+            _inputs: &HashMap<String, SignalValue>,
+            _state: RuntimeState,
+        ) -> Result<HashMap<String, SignalValue>> {
+            self.pending_logs = vec![LogicUserLog {
+                message: "runtime log values".to_string(),
+                values: HashMap::from([("ff.signal".to_string(), SignalValue::F64(7.0))]),
+            }];
+            Ok(HashMap::from([(
+                "mv.u1.write".to_string(),
+                SignalValue::F64(3.0),
+            )]))
+        }
+
+        fn parameter_schema(&self) -> Vec<ParameterSchemaEntry> {
+            Vec::new()
+        }
+
+        fn set_params(&mut self, params: HashMap<String, LogicParamValue>) {
+            self.params = params;
+        }
+
+        fn current_params(&self) -> HashMap<String, LogicParamValue> {
+            self.params.clone()
+        }
+
+        fn drain_user_logs(&mut self) -> Vec<LogicUserLog> {
+            std::mem::take(&mut self.pending_logs)
+        }
+    }
+
     #[tokio::test]
     async fn limits_are_applied() {
         let mut cfg = base_config();
         cfg.limits.values.insert(
-            "mv".to_string(),
+            "mv.u1.write".to_string(),
             crate::project_config::NumericLimit {
                 min: -1.0,
                 max: 1.0,
@@ -587,33 +810,31 @@ mod tests {
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-limits"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed nodes");
-        adapter.seed_node("ns=2;s=PV", SignalValue::F64(10.0));
+        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(10.0));
+        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(0.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(storage_dir.path().join("runtime.log"))
+            .expect("log");
         let mut core = RuntimeCore::new(
             cfg,
             adapter.clone(),
             Box::new(NoneWatchdog),
-            build_logic(
-                &[MappingRule {
-                    input: "pv".to_string(),
-                    output: "mv".to_string(),
-                    gain: 2.0,
-                    offset: 0.0,
-                    invert_bool: false,
-                }],
-                HashMap::new(),
-            ),
+            build_logic(&base_config(), storage_dir.path()).expect("build logic"),
             None,
             storage,
+            log_file,
         )
         .await
         .expect("runtime core");
 
         core.tick_once().await.expect("tick");
 
-        let written = adapter.read("ns=2;s=MV").await.expect("read output");
+        let written = adapter.read("ns=2;s=U1_WRITE").await.expect("read output");
         assert_eq!(written, SignalValue::F64(1.0));
     }
 
@@ -625,26 +846,24 @@ mod tests {
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-fault"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
-        adapter.seed_node("ns=2;s=PV", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(0.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(storage_dir.path().join("runtime.log"))
+            .expect("log");
         let mut core = RuntimeCore::new(
             cfg,
             adapter.clone(),
             Box::new(NoneWatchdog),
-            build_logic(
-                &[MappingRule {
-                    input: "pv".to_string(),
-                    output: "mv".to_string(),
-                    gain: 1.0,
-                    offset: 0.0,
-                    invert_bool: false,
-                }],
-                HashMap::new(),
-            ),
+            build_logic(&base_config(), storage_dir.path()).expect("build logic"),
             None,
             storage,
+            log_file,
         )
         .await
         .expect("runtime core");
@@ -661,5 +880,91 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(45)).await;
         core.tick_once().await.expect("off");
         assert_eq!(core.state, RuntimeState::Off);
+    }
+
+    #[tokio::test]
+    async fn runtime_writes_cycle_and_param_logs_to_file() {
+        let cfg = base_config();
+
+        let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-logging"));
+        seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
+        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(2.0));
+        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(1.0));
+
+        let storage_dir = tempdir().expect("tmp");
+        let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
+        let log_path = storage_dir.path().join("runtime.log");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("log");
+
+        let mut core = RuntimeCore::new(
+            cfg,
+            adapter.clone(),
+            Box::new(NoneWatchdog),
+            build_logic(&base_config(), storage_dir.path()).expect("logic"),
+            None,
+            storage,
+            log_file,
+        )
+        .await
+        .expect("runtime");
+
+        core.tick_once().await.expect("tick");
+        let mut updates = HashMap::new();
+        updates.insert("p.y1.u1.kp".to_string(), LogicParamValue::F64(3.0));
+        core.set_params(updates).expect("set params");
+
+        let content = fs::read_to_string(&log_path).expect("read log");
+        assert!(content.contains("\"event\":\"runtime_cycle\""));
+        assert!(content.contains("\"event\":\"online_params_update\""));
+        assert!(content.contains("cv.y1.soll"));
+        assert!(content.contains("mv.u1.write"));
+    }
+
+    #[tokio::test]
+    async fn runtime_stores_online_params_and_user_log_values_as_plot_samples() {
+        let mut cfg = base_config();
+        cfg.logic
+            .params
+            .insert("custom_gain".to_string(), LogicParamValue::F64(1.5));
+        let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-plot-extra"));
+        seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
+        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(2.0));
+        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(1.0));
+
+        let storage_dir = tempdir().expect("tmp");
+        let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(storage_dir.path().join("runtime.log"))
+            .expect("log");
+
+        let mut core = RuntimeCore::new(
+            cfg,
+            adapter,
+            Box::new(NoneWatchdog),
+            Box::new(LoggingTestLogic::default()),
+            None,
+            storage,
+            log_file,
+        )
+        .await
+        .expect("runtime core");
+
+        core.tick_once().await.expect("tick");
+
+        let rows = core.read_plot_samples(200).expect("samples");
+        assert!(
+            rows.iter()
+                .any(|s| s.direction == "online_param" && s.signal == "custom_gain")
+        );
+        assert!(
+            rows.iter()
+                .any(|s| s.direction == "user_log" && s.signal == "ff.signal")
+        );
     }
 }

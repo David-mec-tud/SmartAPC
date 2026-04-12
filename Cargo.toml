@@ -17,6 +17,8 @@ parking_lot = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+libloading = "0.8"
+syn = { version = "2.0", features = ["full"] }
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["full"] }
 toml = "0.8"

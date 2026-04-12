@@ -21,6 +21,8 @@ pub struct ProjectConfig {
     pub runtime: RuntimeConfig,
     pub alarms: AlarmConfig,
     pub deployment: DeploymentConfig,
+    #[serde(default)]
+    pub plots: PlotConfig,
 }
 
 impl ProjectConfig {
@@ -39,6 +41,7 @@ impl ProjectConfig {
             model: None,
             runtime: RuntimeConfig::default(),
             alarms: AlarmConfig::default(),
+            plots: PlotConfig::default(),
         }
     }
 
@@ -49,6 +52,7 @@ impl ProjectConfig {
         self.io.validate()?;
         self.limits.validate()?;
         self.logic.validate(&self.io)?;
+        self.plots.validate()?;
 
         if self.runtime.cycle_ms < 1_000 {
             bail!("runtime.cycle_ms must be >= 1000 ms for V1");
@@ -83,6 +87,33 @@ impl ProjectConfig {
         Ok(())
     }
 
+    pub fn normalize_plot_config(&mut self) {
+        self.plots.window_sec = self
+            .plots
+            .window_sec
+            .clamp(MIN_PLOT_WINDOW_SEC, MAX_PLOT_WINDOW_SEC);
+        self.plots.mv_order = normalize_named_order(&self.plots.mv_order, &self.variables.mvs);
+        self.plots.cv_order = normalize_named_order(&self.plots.cv_order, &self.variables.cvs);
+        self.plots.dv_order = normalize_named_order(&self.plots.dv_order, &self.variables.dvs);
+
+        let mut next_custom = Vec::new();
+        for (index, plot) in self.plots.custom_plots.iter().enumerate() {
+            let title = if plot.title.trim().is_empty() {
+                format!("Custom Plot {}", index + 1)
+            } else {
+                plot.title.trim().to_string()
+            };
+
+            let traces = normalize_custom_traces(&plot.traces);
+            if traces.is_empty() {
+                continue;
+            }
+
+            next_custom.push(CustomPlotConfig { title, traces });
+        }
+        self.plots.custom_plots = next_custom;
+    }
+
     pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
         let (io, limits) = self
             .io_definition
@@ -90,6 +121,79 @@ impl ProjectConfig {
         self.io = io;
         self.limits = limits;
         Ok(())
+    }
+
+    pub fn sync_active_online_params(&mut self) {
+        let defaults = self.active_online_param_defaults();
+        let mut next = HashMap::new();
+
+        for (key, default_value) in defaults {
+            if let Some(existing) = self.logic.params.get(&key) {
+                if existing.matches_type(default_value.param_type()) {
+                    next.insert(key, existing.clone());
+                    continue;
+                }
+            }
+            next.insert(key, default_value);
+        }
+
+        self.logic.params = next;
+    }
+
+    fn active_online_param_defaults(&self) -> HashMap<String, LogicParamValue> {
+        let mut defaults = HashMap::new();
+
+        match self.logic.kind {
+            LogicKind::PController => {
+                for pair in &self.logic.p_controller.pairs {
+                    defaults.insert(
+                        format!("p.{}.{}.kp", pair.cv, pair.mv),
+                        LogicParamValue::F64(pair.kp),
+                    );
+                    defaults.insert(
+                        format!("p.{}.{}.bias", pair.cv, pair.mv),
+                        LogicParamValue::F64(pair.bias),
+                    );
+                }
+            }
+            LogicKind::CustomRust => {
+                for entry in &self.logic.custom_rust.parameter_schema {
+                    defaults.insert(
+                        entry.name.clone(),
+                        entry
+                            .default
+                            .clone()
+                            .unwrap_or_else(|| default_logic_param_value(entry.param_type)),
+                    );
+                }
+            }
+        }
+
+        for mv in &self.io_definition.mvs {
+            if mv.hl_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = mv.hl {
+                    defaults.insert(format!("io.mv.{}.hl", mv.name), LogicParamValue::F64(value));
+                }
+            }
+            if mv.ll_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = mv.ll {
+                    defaults.insert(format!("io.mv.{}.ll", mv.name), LogicParamValue::F64(value));
+                }
+            }
+        }
+
+        for cv in &self.io_definition.cvs {
+            if cv.sollband_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = cv.sollband_value {
+                    defaults.insert(
+                        format!("io.cv.{}.sollband", cv.name),
+                        LogicParamValue::F64(value),
+                    );
+                }
+            }
+        }
+
+        defaults
     }
 
     pub fn sidebar_tasks(&self) -> Vec<SidebarTask> {
@@ -119,7 +223,7 @@ impl ProjectConfig {
             SidebarTask::new(
                 "logic",
                 "Regellogik hinterlegen",
-                !self.logic.mapping_rules.is_empty(),
+                self.logic.is_configured_for(&self.io),
             ),
             SidebarTask::new(
                 "timing",
@@ -151,6 +255,103 @@ impl SidebarTask {
             configured,
         }
     }
+}
+
+pub const MIN_PLOT_WINDOW_SEC: u32 = 10;
+pub const MAX_PLOT_WINDOW_SEC: u32 = 3_600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlotConfig {
+    #[serde(default = "default_plot_window_sec")]
+    pub window_sec: u32,
+    #[serde(default)]
+    pub mv_order: Vec<String>,
+    #[serde(default)]
+    pub cv_order: Vec<String>,
+    #[serde(default)]
+    pub dv_order: Vec<String>,
+    #[serde(default)]
+    pub custom_plots: Vec<CustomPlotConfig>,
+}
+
+impl Default for PlotConfig {
+    fn default() -> Self {
+        Self {
+            window_sec: default_plot_window_sec(),
+            mv_order: Vec::new(),
+            cv_order: Vec::new(),
+            dv_order: Vec::new(),
+            custom_plots: Vec::new(),
+        }
+    }
+}
+
+impl PlotConfig {
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPlotConfig {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub traces: Vec<CustomPlotTraceConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CustomPlotTraceConfig {
+    pub direction: String,
+    pub signal: String,
+}
+
+const fn default_plot_window_sec() -> u32 {
+    180
+}
+
+fn normalize_named_order(order: &[String], defaults: &[String]) -> Vec<String> {
+    let allowed: HashSet<&str> = defaults.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for raw in order {
+        let name = raw.trim();
+        if name.is_empty() || !allowed.contains(name) {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    }
+
+    for name in defaults {
+        if seen.insert(name.clone()) {
+            out.push(name.clone());
+        }
+    }
+
+    out
+}
+
+fn normalize_custom_traces(traces: &[CustomPlotTraceConfig]) -> Vec<CustomPlotTraceConfig> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for trace in traces {
+        let direction = trace.direction.trim();
+        let signal = trace.signal.trim();
+        if direction.is_empty() || signal.is_empty() {
+            continue;
+        }
+        let key = format!("{direction}::{signal}");
+        if seen.insert(key) {
+            out.push(CustomPlotTraceConfig {
+                direction: direction.to_string(),
+                signal: signal.to_string(),
+            });
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -613,11 +814,14 @@ pub struct NumericLimit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogicConfig {
-    pub kind: String,
     #[serde(default)]
-    pub mapping_rules: Vec<MappingRule>,
+    pub kind: LogicKind,
     #[serde(default)]
-    pub params: HashMap<String, f64>,
+    pub p_controller: PControllerLogicConfig,
+    #[serde(default)]
+    pub custom_rust: CustomRustLogicConfig,
+    #[serde(default)]
+    pub params: HashMap<String, LogicParamValue>,
     #[serde(default)]
     pub initial_values: HashMap<String, SignalValue>,
 }
@@ -625,8 +829,9 @@ pub struct LogicConfig {
 impl Default for LogicConfig {
     fn default() -> Self {
         Self {
-            kind: "mapping".to_string(),
-            mapping_rules: Vec::new(),
+            kind: LogicKind::PController,
+            p_controller: PControllerLogicConfig::default(),
+            custom_rust: CustomRustLogicConfig::default(),
             params: HashMap::new(),
             initial_values: HashMap::new(),
         }
@@ -635,40 +840,288 @@ impl Default for LogicConfig {
 
 impl LogicConfig {
     fn validate(&self, io: &IoConfig) -> Result<()> {
-        if self.kind.trim().is_empty() {
-            bail!("logic.kind must not be empty");
-        }
-
         let input_set: HashSet<_> = io.inputs.iter().map(|s| s.name.as_str()).collect();
         let output_set: HashSet<_> = io.outputs.iter().map(|s| s.name.as_str()).collect();
 
-        for rule in &self.mapping_rules {
-            if !input_set.contains(rule.input.as_str()) {
-                bail!("logic rule references unknown input '{}'", rule.input);
+        self.p_controller.validate(io, &input_set, &output_set)?;
+        self.custom_rust.validate(io, &input_set, &output_set)?;
+
+        if self.kind == LogicKind::CustomRust {
+            let mut schema_by_name = HashMap::new();
+            for entry in &self.custom_rust.parameter_schema {
+                if schema_by_name
+                    .insert(entry.name.as_str(), entry.param_type)
+                    .is_some()
+                {
+                    bail!("duplicate custom parameter schema entry '{}'", entry.name);
+                }
             }
-            if !output_set.contains(rule.output.as_str()) {
-                bail!("logic rule references unknown output '{}'", rule.output);
+
+            for (key, value) in &self.params {
+                if let Some(param_type) = schema_by_name.get(key.as_str()) {
+                    if !value.matches_type(*param_type) {
+                        bail!(
+                            "logic.params['{}'] has wrong type (expected {:?})",
+                            key,
+                            param_type
+                        );
+                    }
+                }
             }
         }
 
         Ok(())
     }
+
+    pub fn is_configured_for(&self, io: &IoConfig) -> bool {
+        match self.kind {
+            LogicKind::PController => self.p_controller.is_configured_for(io),
+            LogicKind::CustomRust => self.custom_rust.is_compatible_with(io),
+        }
+    }
+}
+
+fn default_logic_param_value(param_type: LogicParamType) -> LogicParamValue {
+    match param_type {
+        LogicParamType::F64 => LogicParamValue::F64(0.0),
+        LogicParamType::Bool => LogicParamValue::Bool(false),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicKind {
+    PController,
+    CustomRust,
+}
+
+impl Default for LogicKind {
+    fn default() -> Self {
+        Self::PController
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicParamType {
+    F64,
+    Bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LogicParamValue {
+    F64(f64),
+    Bool(bool),
+}
+
+impl LogicParamValue {
+    pub fn param_type(&self) -> LogicParamType {
+        match self {
+            Self::F64(_) => LogicParamType::F64,
+            Self::Bool(_) => LogicParamType::Bool,
+        }
+    }
+
+    pub fn matches_type(&self, param_type: LogicParamType) -> bool {
+        self.param_type() == param_type
+    }
+}
+
+impl From<SignalValue> for LogicParamValue {
+    fn from(value: SignalValue) -> Self {
+        match value {
+            SignalValue::F64(v) => Self::F64(v),
+            SignalValue::Bool(v) => Self::Bool(v),
+        }
+    }
+}
+
+impl From<LogicParamValue> for SignalValue {
+    fn from(value: LogicParamValue) -> Self {
+        match value {
+            LogicParamValue::F64(v) => Self::F64(v),
+            LogicParamValue::Bool(v) => Self::Bool(v),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PControllerLogicConfig {
+    #[serde(default)]
+    pub pairs: Vec<PControllerPairConfig>,
+}
+
+impl PControllerLogicConfig {
+    fn validate(
+        &self,
+        io: &IoConfig,
+        input_set: &HashSet<&str>,
+        output_set: &HashSet<&str>,
+    ) -> Result<()> {
+        let mut seen = HashSet::new();
+        for pair in &self.pairs {
+            if pair.cv.trim().is_empty() || pair.mv.trim().is_empty() {
+                bail!("p_controller pair requires non-empty cv and mv");
+            }
+            let key = format!("{}->{}", pair.cv.trim(), pair.mv.trim());
+            if !seen.insert(key) {
+                bail!("duplicate p_controller pair '{}->{}'", pair.cv, pair.mv);
+            }
+            if !pair.kp.is_finite() || !pair.bias.is_finite() {
+                bail!(
+                    "p_controller pair '{}->{}' has non-finite kp/bias",
+                    pair.cv,
+                    pair.mv
+                );
+            }
+
+            if !io.inputs.is_empty() || !io.outputs.is_empty() {
+                let soll = format!("cv.{}.soll", pair.cv);
+                let ist = format!("cv.{}.ist", pair.cv);
+                let mv_write = format!("mv.{}.write", pair.mv);
+                if !input_set.contains(soll.as_str()) {
+                    bail!("p_controller pair references missing input '{}'", soll);
+                }
+                if !input_set.contains(ist.as_str()) {
+                    bail!("p_controller pair references missing input '{}'", ist);
+                }
+                if !output_set.contains(mv_write.as_str()) {
+                    bail!("p_controller pair references missing output '{}'", mv_write);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_configured_for(&self, io: &IoConfig) -> bool {
+        if self.pairs.is_empty() {
+            return false;
+        }
+        let inputs: HashSet<_> = io.inputs.iter().map(|s| s.name.as_str()).collect();
+        let outputs: HashSet<_> = io.outputs.iter().map(|s| s.name.as_str()).collect();
+        self.pairs.iter().all(|pair| {
+            let soll = format!("cv.{}.soll", pair.cv);
+            let ist = format!("cv.{}.ist", pair.cv);
+            let mv_write = format!("mv.{}.write", pair.mv);
+            inputs.contains(soll.as_str())
+                && inputs.contains(ist.as_str())
+                && outputs.contains(mv_write.as_str())
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MappingRule {
-    pub input: String,
-    pub output: String,
-    #[serde(default = "default_gain")]
-    pub gain: f64,
+pub struct PControllerPairConfig {
+    pub cv: String,
+    pub mv: String,
+    #[serde(default = "default_p_kp")]
+    pub kp: f64,
     #[serde(default)]
-    pub offset: f64,
-    #[serde(default)]
-    pub invert_bool: bool,
+    pub bias: f64,
 }
 
-const fn default_gain() -> f64 {
+const fn default_p_kp() -> f64 {
     1.0
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CustomRustLogicConfig {
+    #[serde(default)]
+    pub strategy_name: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub artifact_path: String,
+    #[serde(default)]
+    pub parameter_schema: Vec<CustomParameterSchemaEntry>,
+    #[serde(default)]
+    pub required_inputs: Vec<String>,
+    #[serde(default)]
+    pub required_outputs: Vec<String>,
+    #[serde(default)]
+    pub compatible: bool,
+    #[serde(default)]
+    pub last_build_message: String,
+}
+
+impl CustomRustLogicConfig {
+    fn validate(
+        &self,
+        io: &IoConfig,
+        input_set: &HashSet<&str>,
+        output_set: &HashSet<&str>,
+    ) -> Result<()> {
+        let mut names = HashSet::new();
+        for entry in &self.parameter_schema {
+            if entry.name.trim().is_empty() {
+                bail!("custom parameter schema name must not be empty");
+            }
+            if !names.insert(entry.name.clone()) {
+                bail!("duplicate custom parameter schema '{}'", entry.name);
+            }
+            if let Some(default) = &entry.default {
+                if !default.matches_type(entry.param_type) {
+                    bail!("custom parameter '{}' default has wrong type", entry.name);
+                }
+            }
+        }
+
+        if self.compatible {
+            for required in &self.required_inputs {
+                if !input_set.contains(required.as_str()) {
+                    bail!("custom logic requires unknown input '{}'", required);
+                }
+            }
+            for required in &self.required_outputs {
+                if !output_set.contains(required.as_str()) {
+                    bail!("custom logic requires unknown output '{}'", required);
+                }
+            }
+        }
+
+        if self.compatible {
+            if self.artifact_path.trim().is_empty() {
+                bail!("custom_rust.artifact_path must not be empty when compatible=true");
+            }
+            if self.source_path.trim().is_empty() {
+                bail!("custom_rust.source_path must not be empty when compatible=true");
+            }
+            if io.outputs.is_empty() {
+                bail!("custom logic cannot be compatible without runtime outputs");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn is_compatible_with(&self, io: &IoConfig) -> bool {
+        if !self.compatible
+            || self.source_path.trim().is_empty()
+            || self.artifact_path.trim().is_empty()
+            || self.required_outputs.is_empty()
+        {
+            return false;
+        }
+
+        let expected_inputs: HashSet<_> = io.inputs.iter().map(|s| s.name.as_str()).collect();
+        let expected_outputs: HashSet<_> = io.outputs.iter().map(|s| s.name.as_str()).collect();
+        let actual_inputs: HashSet<_> = self.required_inputs.iter().map(|s| s.as_str()).collect();
+        let actual_outputs: HashSet<_> = self.required_outputs.iter().map(|s| s.as_str()).collect();
+
+        actual_inputs == expected_inputs && actual_outputs == expected_outputs
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomParameterSchemaEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: LogicParamType,
+    #[serde(default)]
+    pub default: Option<LogicParamValue>,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -760,23 +1213,28 @@ mod tests {
     fn default_config_is_valid() {
         let mut cfg = ProjectConfig::new("demo");
         cfg.io.inputs.push(SignalPoint {
-            name: "pv".to_string(),
+            name: "cv.y1.soll".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=PV".to_string(),
+            address: "ns=2;s=Y1_SOL".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {
-            name: "mv".to_string(),
+            name: "mv.u1.write".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=MV".to_string(),
+            address: "ns=2;s=U1_WRITE".to_string(),
             opc_tag: None,
         });
-        cfg.logic.mapping_rules.push(MappingRule {
-            input: "pv".to_string(),
-            output: "mv".to_string(),
-            gain: 1.0,
-            offset: 0.0,
-            invert_bool: false,
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.ist".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_IST".to_string(),
+            opc_tag: None,
+        });
+        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
+            cv: "y1".to_string(),
+            mv: "u1".to_string(),
+            kp: 1.0,
+            bias: 0.0,
         });
 
         assert!(cfg.validate().is_ok());
@@ -794,24 +1252,32 @@ mod tests {
     fn toml_roundtrip() {
         let mut cfg = ProjectConfig::new("demo");
         cfg.io.inputs.push(SignalPoint {
-            name: "in".to_string(),
-            signal_type: SignalType::Bool,
-            address: "ns=2;s=In".to_string(),
+            name: "cv.y1.soll".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_SOL".to_string(),
             opc_tag: Some("TAG_IN".to_string()),
         });
-        cfg.io.outputs.push(SignalPoint {
-            name: "out".to_string(),
-            signal_type: SignalType::Bool,
-            address: "ns=2;s=Out".to_string(),
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.ist".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_IST".to_string(),
             opc_tag: None,
         });
-        cfg.logic.mapping_rules.push(MappingRule {
-            input: "in".to_string(),
-            output: "out".to_string(),
-            gain: 1.0,
-            offset: 0.0,
-            invert_bool: false,
+        cfg.io.outputs.push(SignalPoint {
+            name: "mv.u1.write".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=U1_WRITE".to_string(),
+            opc_tag: None,
         });
+        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
+            cv: "y1".to_string(),
+            mv: "u1".to_string(),
+            kp: 2.0,
+            bias: 0.5,
+        });
+        cfg.logic
+            .params
+            .insert("gain_override".to_string(), LogicParamValue::F64(2.5));
 
         let encoded = to_toml_string(&cfg).expect("toml encode");
         let decoded = from_toml_str(&encoded).expect("toml decode");
@@ -822,23 +1288,28 @@ mod tests {
     fn optional_model_and_simulation_do_not_block_sidebar_progress() {
         let mut cfg = ProjectConfig::new("demo");
         cfg.io.inputs.push(SignalPoint {
-            name: "pv".to_string(),
+            name: "cv.y1.soll".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=PV".to_string(),
+            address: "ns=2;s=Y1_SOL".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.ist".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_IST".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {
-            name: "mv".to_string(),
+            name: "mv.u1.write".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=MV".to_string(),
+            address: "ns=2;s=U1_WRITE".to_string(),
             opc_tag: None,
         });
-        cfg.logic.mapping_rules.push(MappingRule {
-            input: "pv".to_string(),
-            output: "mv".to_string(),
-            gain: 1.0,
-            offset: 0.0,
-            invert_bool: false,
+        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
+            cv: "y1".to_string(),
+            mv: "u1".to_string(),
+            kp: 1.0,
+            bias: 0.0,
         });
 
         assert!(cfg.model.is_none());
@@ -876,5 +1347,131 @@ mod tests {
                 .any(|task| task.id == "limits" && task.label == "I/O definieren")
         );
         assert!(!tasks.iter().any(|task| task.id == "params"));
+    }
+
+    #[test]
+    fn custom_logic_compatibility_requires_exact_io_match() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.soll".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_SOLL".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.ist".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_IST".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.outputs.push(SignalPoint {
+            name: "mv.u1.write".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=U1_WRITE".to_string(),
+            opc_tag: None,
+        });
+
+        cfg.logic.kind = LogicKind::CustomRust;
+        cfg.logic.custom_rust.source_path = "logic/custom_strategy/src/lib.rs".to_string();
+        cfg.logic.custom_rust.artifact_path =
+            "logic/custom_strategy/target/release/demo.dll".to_string();
+        cfg.logic.custom_rust.required_inputs = vec!["cv.y1.soll".to_string()];
+        cfg.logic.custom_rust.required_outputs = vec!["mv.u1.write".to_string()];
+        cfg.logic.custom_rust.compatible = true;
+
+        assert!(!cfg.logic.custom_rust.is_compatible_with(&cfg.io));
+
+        cfg.logic.custom_rust.required_inputs =
+            vec!["cv.y1.soll".to_string(), "cv.y1.ist".to_string()];
+        assert!(cfg.logic.custom_rust.is_compatible_with(&cfg.io));
+    }
+
+    #[test]
+    fn sync_active_online_params_prunes_unused_logic_params() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.logic.kind = LogicKind::PController;
+        cfg.logic.p_controller.pairs = vec![PControllerPairConfig {
+            cv: "y1".to_string(),
+            mv: "u1".to_string(),
+            kp: 2.0,
+            bias: 1.0,
+        }];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: String::new(),
+            mv_read: String::new(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: None,
+            enable: None,
+        });
+
+        cfg.logic
+            .params
+            .insert("p.y1.u1.kp".to_string(), LogicParamValue::F64(3.0));
+        cfg.logic
+            .params
+            .insert("custom_gain".to_string(), LogicParamValue::F64(5.0));
+        cfg.logic
+            .params
+            .insert("io.mv.u1.hl".to_string(), LogicParamValue::F64(12.0));
+
+        cfg.sync_active_online_params();
+
+        assert!(cfg.logic.params.contains_key("p.y1.u1.kp"));
+        assert!(cfg.logic.params.contains_key("p.y1.u1.bias"));
+        assert!(cfg.logic.params.contains_key("io.mv.u1.hl"));
+        assert!(!cfg.logic.params.contains_key("custom_gain"));
+    }
+
+    #[test]
+    fn normalize_plot_config_clamps_window_and_orders() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string(), "u2".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.variables.dvs = vec!["d1".to_string(), "d2".to_string()];
+
+        cfg.plots.window_sec = 8;
+        cfg.plots.mv_order = vec![
+            "u2".to_string(),
+            "u2".to_string(),
+            "unknown".to_string(),
+            "u1".to_string(),
+        ];
+        cfg.plots.cv_order = vec![];
+        cfg.plots.dv_order = vec!["d2".to_string()];
+        cfg.plots.custom_plots = vec![
+            CustomPlotConfig {
+                title: " ".to_string(),
+                traces: vec![
+                    CustomPlotTraceConfig {
+                        direction: "input".to_string(),
+                        signal: "cv.y1.ist".to_string(),
+                    },
+                    CustomPlotTraceConfig {
+                        direction: "input".to_string(),
+                        signal: "cv.y1.ist".to_string(),
+                    },
+                ],
+            },
+            CustomPlotConfig {
+                title: "Empty".to_string(),
+                traces: vec![CustomPlotTraceConfig {
+                    direction: " ".to_string(),
+                    signal: "".to_string(),
+                }],
+            },
+        ];
+
+        cfg.normalize_plot_config();
+
+        assert_eq!(cfg.plots.window_sec, MIN_PLOT_WINDOW_SEC);
+        assert_eq!(cfg.plots.mv_order, vec!["u2", "u1"]);
+        assert_eq!(cfg.plots.cv_order, vec!["y1"]);
+        assert_eq!(cfg.plots.dv_order, vec!["d2", "d1"]);
+        assert_eq!(cfg.plots.custom_plots.len(), 1);
+        assert_eq!(cfg.plots.custom_plots[0].title, "Custom Plot 1");
+        assert_eq!(cfg.plots.custom_plots[0].traces.len(), 1);
     }
 }

@@ -2,126 +2,80 @@
 
 SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgebungen.
 
-## V1 Features
+## Aktueller Status (Stand April 2026)
 
-- Modulares Runtime-Design mit klaren Interfaces:
-  - `ProtocolAdapter` (V1: `OpcUaClientAdapter`)
+### Bereits umgesetzt
+
+- Modulare Runtime mit klaren Interfaces:
+  - `ProtocolAdapter` (V1: OPC-UA Client Adapter)
   - `WatchdogModule` (`none`, `counter_mirror`)
-  - `ControlLogic` (V1: statisch kompilierte Mapping-Logik)
-  - `ModelModule` (optional, V1: `NoopModel`)
-- Runtime-State-Machine: `Running -> Hold -> Alarm -> Off`
-- Fault-Verhalten:
-  - Hold Last Value
-  - Alarm nach konfigurierbarem Timeout
-  - Off-State nach zweitem Timeout (keine Output-Schreibzugriffe)
-- Projektkonfiguration als `TOML + Ordnerstruktur`
-- Lokaler Webserver mit API für:
-  - Projekt anlegen/laden/speichern
-  - Sidebar-Aufgabenstatus
+  - `ControlLogic`:
+    - `p_controller` (produktiv nutzbar)
+    - `custom_rust` (projektlokale `cdylib`)
+  - `ModelModule` (optional; V1 aktuell `NoopModel`)
+- Runtime-State-Machine:
+  - `Running -> Hold -> Alarm -> Off`
+  - Fault-Verhalten: Hold Last Value -> Alarm -> Off
+  - Im `Off`-State werden keine Outputs geschrieben.
+- Laufzeit-Logging in `projects/<projekt>/data/runtime.log` (JSONL):
+  - Inputs/Outputs je Zyklus
+  - Online-Parameter je Zyklus
+  - Online-Parameter-Änderungen
+  - User-definierte Logs aus `custom_rust`-Strategien
+- Native Desktop-App (`iced`) mit Setup-Workflow:
+  - OPC-UA Kommunikation
+  - Watchdog
+  - Ein-/Ausgangsnamen
+  - I/O-Definition inkl. OPC Read/Write Test
+  - Regellogik-Reiter mit Strategiewahl
+  - Online-Parameter (f64/bool), Runtime-Update + Persistenz
+  - Statische I/O-Initialwerte (ohne OPC-Adresse) als Online-Parameter editierbar
+  - Plotansicht aus lokaler SQLite
+- Lokale Web-API:
+  - Projekte laden/speichern
+  - Plot-Konfiguration pro Projekt (Window, Reihenfolge, Custom Plots)
   - Runtime Start/Stop/State
-  - Runtime-Parameter lesen/schreiben (inkl. Persistenz in TOML)
+  - Runtime-Parameter lesen/schreiben
   - Simulation Step
-  - Plot-Daten aus SQLite
-  - Windows Service Deployment-Kommandos (`sc.exe`)
-- Ausführungszeittest-Basismetriken:
-  - Zyklusdauer
-  - Jitter
-  - Deadline-Miss-Zähler
-- Native Desktop-Setup-App mit `iced`:
-  - Projektanlage/-auswahl
-  - Sidebar-Setup-Aufgaben
-  - Runtime Start/Stop
-  - Online-Parameter (ändern + persistieren)
-  - Lokale Plotansicht aus SQLite
-  - Optional eingebettete Web-API parallel zur Desktop-App
+  - Plotdaten (Limit + Sliding Window + Series-Katalog)
+  - Deployment-Kommandos (Windows Service via `sc.exe`)
+- Interaktive Web-Plotansicht:
+  - `GET /plots`
+  - Plotly.js lokal gebündelt (kein CDN notwendig)
+  - Sliding-Window-Zeitfenster als User-Parameter
+  - MV/CV/DV Panels per Drag-and-Drop sortierbar
+  - Eigene Multi-Trace-Plots aus Online-Parametern und geloggten Variablen
+- Virtuelle Hardware:
+  - Separater lokaler OPC-UA PT1-Server
+  - Popup-Liveplot mit 3-Minuten-Fenster
 
-## Build & Test
+### Noch als Platzhalter (UI-seitig)
+
+- Modell-Setup-Seite (optional)
+- Ausführungszeittest-Setup-Seite (Metriken in Runtime bereits vorhanden)
+- Regler-Simulation-Setup-Seite (optional)
+- Deployment-Setup-Seite (API-Kommandos vorhanden)
+
+## Build, Test, Start
 
 ```bash
 cargo test
-cargo run -- serve
 cargo run -- desktop
+cargo run -- serve
 cargo run -- virtual-hardware
 ```
 
-## Schnellstart
-
-1. Projekt anlegen:
+Typischer Start der Desktop-App:
 
 ```bash
-cargo run -- init-project --name demo --project-root ./projects
+cargo run -- desktop --project-root ./projects
 ```
 
-2. `./projects/demo/project.toml` bearbeiten (I/O, Limits, Mapping-Regeln).
-   Als Vorlage kannst du [`examples/demo_project.toml`](examples/demo_project.toml) nutzen.
-
-3. Runtime + Webserver starten:
-
-```bash
-cargo run -- serve --project-root ./projects --project demo --host 127.0.0.1 --port 8080
-```
-
-Alternative: Native Desktop-App (inkl. optional eingebettetem Webserver):
-
-```bash
-cargo run -- desktop --project-root ./projects --host 127.0.0.1 --port 8080
-```
-
-Webserver im Desktop-Modus deaktivieren:
+Desktop ohne eingebettete Web-API:
 
 ```bash
 cargo run -- desktop --project-root ./projects --no-web
 ```
-
-4. API nutzen:
-
-- `GET /api/runtime/state`
-- `GET /api/runtime/params`
-- `PUT /api/runtime/params`
-- `GET /api/plots?limit=250`
-
-## Virtuelle Hardware (separater OPC-UA PT1 Server)
-
-Für unabhängige End-to-End-Tests kannst du eine lokale, separate PT1-Hardware-Simulation starten:
-
-```bash
-cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120
-```
-
-Die virtuelle Hardware stellt diese OPC-UA-Tags bereit:
-
-- `ns=2;s=y1_value`
-- `ns=2;s=y1_target`
-- `ns=2;s=y1_HL`
-- `ns=2;s=y1_LL`
-- `ns=2;s=u1_write`
-- `ns=2;s=u1_read`
-
-Zusätzliche Watchdog-Testtags:
-
-- `ns=2;s=wd_counter_read` (läuft hoch)
-- `ns=2;s=wd_counter_mirror` (Schreibziel)
-
-Beim Start öffnet sich außerdem ein Plot-Fenster (Popup):
-
-- y-Plot: `y1_value`, `y1_target`, `y1_HL`, `y1_LL`
-- u-Plot: `u1_write/u1_read`
-- Zeitfenster: immer die letzten `3 Minuten` (fix)
-
-Beispielprojekt für diese Hardware:
-
-- [`examples/virtual_pt1_project.toml`](examples/virtual_pt1_project.toml)
-
-Watchdog-Test gegen die virtuelle Hardware:
-
-1. Virtuelle Hardware in Terminal A starten (`cargo run -- virtual-hardware ...`).
-2. In Terminal B SmartAPC starten (`cargo run -- desktop` oder `cargo run -- serve --project ...`).
-3. Endpoint auf `opc.tcp://127.0.0.1:4855/` setzen.
-4. Watchdog konfigurieren:
-   - `read_node = ns=2;s=wd_counter_read`
-   - `write_node = ns=2;s=wd_counter_mirror`
-   - z. B. `mirror_cycle_ms = 1000`, `stale_timeout_ms = 5000`
-5. In der Desktop-App auf der Watchdog-Seite `Test` ausführen und dann Runtime starten.
 
 ## Projektlayout
 
@@ -131,28 +85,188 @@ projects/
     project.toml
     data/
       runtime.sqlite
+      runtime.log
+    logic/
+      custom_strategy/   # wird bei Template-Generierung angelegt
 ```
 
-## Hinweise
+## Schnellstart mit virtueller Hardware
 
-- V1 enthält eine trait-basierte OPC-UA-Adapterstruktur mit einer austauschbaren Client-Implementierung.
-- Für produktive Feldintegration kann der Adapter intern gegen einen vollständigen OPC-UA-Transport ausgetauscht werden, ohne Runtime-/Web-API-Brüche.
-- Watchdog `counter_mirror` nutzt:
-  - `read_node` (OPC-UA Tagname Quelle)
-  - `write_node` (OPC-UA Tagname Spiegelziel)
-  - `mirror_cycle_ms` (Intervall für Read -> Write)
-  - `stale_timeout_ms` (Fault, wenn Read-Wert nicht mehr wechselt)
-- Kommunikationsbasis (`[communication]`):
-  - `endpoint_url` (OPC-UA Serveradresse)
-  - `io_cycle_ms` (Read/Write Intervall für I/O-Kommunikation)
+1. Virtuelle Hardware starten:
 
-## OPC-UA Integrationstest
+```bash
+cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120
+```
 
-Der OPC-UA Adapter besitzt einen echten Client-Pfad (`opc.tcp://...`) und einen Mock-Pfad (`mock://...`) für Offline-Tests.
+2. Desktop-App in zweitem Terminal starten:
 
-Der Test `real_opcua_connects_to_fake_plc_server` startet eine fiktive Steuerung als lokalen OPC-UA-Server und prüft:
+```bash
+cargo run -- desktop --project-root ./projects
+```
 
-- Aufbau der OPC-UA Verbindung
-- Lesen periodisch aktualisierter Werte (z. B. Watchdog Counter / PV)
-- Schreiben und Rücklesen von Stellgrößen (MV, Bool-Signal)
-- Watchdog-Mirror-Write
+3. In der App:
+- Endpoint auf `opc.tcp://127.0.0.1:4855/` setzen.
+- Watchdog konfigurieren:
+  - `read_node = ns=2;s=wd_counter_read`
+  - `write_node = ns=2;s=wd_counter_mirror`
+- Variablen und I/O definieren (z. B. `cv.y1.*`, `mv.u1.*`).
+- Regellogik auswählen und Runtime starten.
+
+Virtuelle Hardware OPC-UA Tags:
+
+- `ns=2;s=y1_value`
+- `ns=2;s=y1_target`
+- `ns=2;s=y1_HL`
+- `ns=2;s=y1_LL`
+- `ns=2;s=u1_write`
+- `ns=2;s=u1_read`
+- `ns=2;s=wd_counter_read`
+- `ns=2;s=wd_counter_mirror`
+
+## Regelstrategie in V1
+
+Im Reiter **Regellogik** gibt es oben eine Strategiewahl.
+
+- Basis: `P-Regler` (`p_controller`)
+- Alternative: `Eigene Regellogik` (`custom_rust`)
+
+Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition kompatibel sind.  
+`Eigene Regellogik` erscheint erst nach erfolgreichem Build/Check als kompatibel.
+
+### P-Regler
+
+- Explizite CV->MV Paarung
+- Pro Paar:
+  - `kp`
+  - `bias`
+- Formel: `u = kp * (soll - ist) + bias`
+- Enable-Verhalten:
+  - Falls `cv.<name>.enable == false` oder `mv.<name>.enable == false`, wird für dieses Paar kein Output geschrieben.
+
+## Guide: Eigene Rust-Regellogik (`custom_rust`)
+
+### Voraussetzungen
+
+- Rust Toolchain lokal installiert (`cargo` verfügbar)
+- Projekt-I/O bereits definiert
+- Runtime gestoppt (für Konfig-Änderungen)
+
+### Schritt-für-Schritt
+
+1. In der Desktop-App zum Reiter **Regellogik**.
+2. Button **Template generieren** klicken.
+   - Erzeugt unter `projects/<projekt>/logic/custom_strategy/` ein Rust-`cdylib`-Template.
+   - Das Template ist ausführlich kommentiert (Context, History, Output-Pflicht, Logging-Helfer).
+3. Datei `projects/<projekt>/logic/custom_strategy/src/lib.rs` bearbeiten.
+4. Die Funktion `control(...)` implementieren.
+5. Optional zusätzliche Parameter als Funktionsargumente hinter `ctx` und `out` ergänzen:
+   - erlaubt: `f64`, `bool`
+6. Button **Strategie prüfen/builden** klicken.
+   - Führt `cargo build --release` für die Custom-Strategie aus.
+   - Extrahiert zusätzliche Parameter aus der Signatur.
+   - Liest den Contract aus der gebauten `cdylib` (`required_inputs`, `required_outputs`).
+   - Markiert Strategie nur dann als kompatibel, wenn Contract und aktuelle I/O-Definition exakt übereinstimmen.
+7. Jetzt kann im Auswahlmenü **Eigene Regellogik** gewählt und gespeichert werden.
+8. Zusätzliche Parameter erscheinen unter **Online Parameter** und sind zur Laufzeit änderbar.
+
+### Erwartete Signatur
+
+Pflicht:
+
+```rust
+pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs)
+```
+
+Mit zusätzlichen User-Parametern:
+
+```rust
+pub fn control(
+    ctx: &SmartApcContext,
+    out: &mut SmartApcOutputs,
+    gain: f64,
+    enable_ff: bool,
+)
+```
+
+Alle zusätzlichen Parameter werden als Online-Parameter registriert:
+
+- `f64` -> numerischer Parameter
+- `bool` -> boolescher Parameter
+
+### Inputs/Outputs in Custom-Logik
+
+- `ctx.inputs` enthält die aktuellen Runtime-Eingänge (aus I/O-Definition).
+- `ctx.input_history` enthält Input-Verlauf je Signal (ältest -> neuest).
+- `ctx.output_history` enthält Output-Verlauf je Signal (ältest -> neuest).
+- `ctx.param_history` enthält Verlauf der Online-Parameter (ältest -> neuest).
+- Über `out` müssen die benötigten `mv.<name>.write` Outputs gesetzt werden.
+- Wenn ein erforderlicher Output nicht gesetzt wird, gilt die Strategie als fehlerhaft.
+
+### Eigene Logs aus `control(...)`
+
+Im Template stehen flexible Log-Helfer zur Verfügung:
+
+- `out.log("text")`
+- `out.log_value("text", "key", SignalValue::F64(...))`
+- `out.log_values("text", values_map)`
+
+Diese Einträge landen im Runtime-Logfile (`data/runtime.log`) im Feld `user_logs`.
+
+### Minimalbeispiel
+
+```rust
+pub fn control(
+    ctx: &SmartApcContext,
+    out: &mut SmartApcOutputs,
+    kp: f64,
+) {
+    // Optional: Beispiel für User-Log
+    out.log("control tick");
+
+    let soll = match ctx.inputs.get("cv.y1.soll") {
+        Some(SignalValue::F64(v)) => *v,
+        _ => 0.0,
+    };
+    let ist = match ctx.inputs.get("cv.y1.ist") {
+        Some(SignalValue::F64(v)) => *v,
+        _ => 0.0,
+    };
+    out.set_f64("mv.u1.write", kp * (soll - ist));
+}
+```
+
+### Online-Parameter aus statischen I/O-Werten
+
+Wenn in der I/O-Definition ein Wert **ohne OPC-Adresse** konfiguriert ist, aber einen Initialwert hat,
+wird er automatisch als Online-Parameter gespiegelt:
+
+- `io.mv.<name>.hl`
+- `io.mv.<name>.ll`
+- `io.cv.<name>.sollband`
+
+Damit können diese Werte auch zur Laufzeit über **Online Parameter** angepasst werden.
+
+## Wichtige Hinweise
+
+- V1 ist lokal/OT-fokussiert, ohne Cloud-Zwang.
+- `runtime.cycle_ms` muss in V1 `>= 1000 ms` sein.
+- Kommunikation:
+  - `communication.endpoint_url`
+  - `communication.io_cycle_ms`
+- Watchdog `counter_mirror`:
+  - `read_node`
+  - `write_node`
+  - `mirror_cycle_ms`
+  - `stale_timeout_ms`
+
+## API Kurzreferenz
+
+- `GET /api/runtime/state`
+- `GET /api/runtime/params`
+- `PUT /api/runtime/params`
+- `GET /api/plots?limit=250`
+- `GET /api/runtime/plots/window?window_ms=180000`
+- `GET /api/runtime/plots/catalog`
+- `GET /api/projects/{name}/plots/config`
+- `PUT /api/projects/{name}/plots/config`
+- `POST /api/simulate/step`

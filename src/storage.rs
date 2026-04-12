@@ -20,6 +20,20 @@ pub struct SignalSample {
     pub value: SignalValue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleValueKind {
+    F64,
+    Bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SeriesCatalogEntry {
+    pub direction: String,
+    pub signal: String,
+    pub value_kind: SampleValueKind,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CycleMetric {
     pub timestamp_ms: i64,
@@ -49,6 +63,10 @@ impl SqliteStorage {
                 value_f64 REAL,
                 value_bool INTEGER
             );
+            CREATE INDEX IF NOT EXISTS idx_signal_samples_timestamp
+                ON signal_samples(timestamp_ms);
+            CREATE INDEX IF NOT EXISTS idx_signal_samples_direction_signal_timestamp
+                ON signal_samples(direction, signal, timestamp_ms);
 
             CREATE TABLE IF NOT EXISTS cycle_metrics (
                 id INTEGER PRIMARY KEY,
@@ -132,6 +150,70 @@ impl SqliteStorage {
         Ok(out)
     }
 
+    pub fn read_samples_since(&self, since_timestamp_ms: i64) -> Result<Vec<SignalSample>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT timestamp_ms, direction, signal, value_f64, value_bool
+             FROM signal_samples
+             WHERE timestamp_ms >= ?1
+             ORDER BY timestamp_ms ASC, id ASC",
+        )?;
+
+        let rows = stmt.query_map([since_timestamp_ms], |row| {
+            let timestamp_ms: i64 = row.get(0)?;
+            let direction: String = row.get(1)?;
+            let signal: String = row.get(2)?;
+            let value_f64: Option<f64> = row.get(3)?;
+            let value_bool: Option<i64> = row.get(4)?;
+            let value = match (value_f64, value_bool) {
+                (Some(v), _) => SignalValue::F64(v),
+                (None, Some(v)) => SignalValue::Bool(v != 0),
+                (None, None) => SignalValue::F64(0.0),
+            };
+            Ok(SignalSample {
+                timestamp_ms,
+                direction,
+                signal,
+                value,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn read_series_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT direction, signal,
+                    CASE WHEN value_f64 IS NOT NULL THEN 'f64' ELSE 'bool' END AS value_kind
+             FROM signal_samples
+             GROUP BY direction, signal, value_kind
+             ORDER BY direction ASC, signal ASC, value_kind ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let value_kind = match row.get::<_, String>(2)?.as_str() {
+                "f64" => SampleValueKind::F64,
+                _ => SampleValueKind::Bool,
+            };
+            Ok(SeriesCatalogEntry {
+                direction: row.get(0)?,
+                signal: row.get(1)?,
+                value_kind,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn store_cycle_metric(&self, metric: &CycleMetric) -> Result<()> {
         self.conn.lock().execute(
             "INSERT INTO cycle_metrics(timestamp_ms, duration_us, jitter_us, deadline_miss)
@@ -200,5 +282,54 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].signal, "pv");
         assert_eq!(rows[1].signal, "mv");
+    }
+
+    #[test]
+    fn reads_samples_since_timestamp() {
+        let dir = tempdir().expect("tmp dir");
+        let db = SqliteStorage::new(dir.path().join("samples.sqlite")).expect("create db");
+
+        db.store_signal("input", "cv.y1.soll", &SignalValue::F64(1.0))
+            .expect("store first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let cutoff = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.store_signal("output", "mv.u1.write", &SignalValue::F64(2.0))
+            .expect("store second");
+
+        let rows = db.read_samples_since(cutoff).expect("read window");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].direction, "output");
+        assert_eq!(rows[0].signal, "mv.u1.write");
+    }
+
+    #[test]
+    fn reads_series_catalog() {
+        let dir = tempdir().expect("tmp dir");
+        let db = SqliteStorage::new(dir.path().join("samples.sqlite")).expect("create db");
+
+        db.store_signal("input", "cv.y1.ist", &SignalValue::F64(1.0))
+            .expect("store input");
+        db.store_signal("online_param", "p.y1.u1.kp", &SignalValue::F64(2.0))
+            .expect("store param");
+        db.store_signal("user_log", "ff.enable", &SignalValue::Bool(true))
+            .expect("store log");
+
+        let catalog = db.read_series_catalog().expect("catalog");
+        assert!(catalog.contains(&SeriesCatalogEntry {
+            direction: "input".to_string(),
+            signal: "cv.y1.ist".to_string(),
+            value_kind: SampleValueKind::F64,
+        }));
+        assert!(catalog.contains(&SeriesCatalogEntry {
+            direction: "online_param".to_string(),
+            signal: "p.y1.u1.kp".to_string(),
+            value_kind: SampleValueKind::F64,
+        }));
+        assert!(catalog.contains(&SeriesCatalogEntry {
+            direction: "user_log".to_string(),
+            signal: "ff.enable".to_string(),
+            value_kind: SampleValueKind::Bool,
+        }));
     }
 }
