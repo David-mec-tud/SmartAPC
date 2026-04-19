@@ -11,17 +11,24 @@ use std::{
 use anyhow::anyhow;
 use iced::{
     Element, Length, Subscription, Task, Theme, application, time,
-    widget::{button, column, container, pick_list, row, scrollable, text, text_input},
+    widget::{
+        button, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
+        text_input,
+    },
 };
 
 use crate::{
     communication::{ProtocolAdapter, opcua::OpcUaClientAdapter},
+    control_function_tests::{
+        ControlFunctionTestReport, DefaultSweepDimension, NumericSweepConfig, SweepExecutionMode,
+        SweepSelection, SweepValueKind, default_sweep_dimensions, run_control_function_tests,
+    },
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
     project::ProjectService,
     project_config::{
-        CommunicationConfig, CvIoDefinition, DvIoDefinition, LogicKind, LogicParamType,
-        LogicParamValue, MvIoDefinition, PControllerPairConfig, SidebarTask, VariableCatalogConfig,
-        WatchdogConfig,
+        CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
+        LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
+        PControllerPairConfig, SidebarTask, VariableCatalogConfig, WatchdogConfig,
     },
     runtime::{RuntimeManager, RuntimeSnapshot},
     storage::SignalSample,
@@ -298,6 +305,149 @@ impl WatchdogEditorState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatrixKey {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl MatrixKey {
+    fn label(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelKindChoice {
+    None,
+    LinearStateSpace,
+}
+
+const MODEL_KIND_OPTIONS: [ModelKindChoice; 2] =
+    [ModelKindChoice::None, ModelKindChoice::LinearStateSpace];
+
+impl fmt::Display for ModelKindChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "No model"),
+            Self::LinearStateSpace => write!(f, "Linear state-space"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelEditorState {
+    selected_kind: ModelKindChoice,
+    state_count: String,
+    a_cells: Vec<Vec<String>>,
+    b_cells: Vec<Vec<String>>,
+    c_cells: Vec<Vec<String>>,
+    d_cells: Vec<Vec<String>>,
+    a_import: text_editor::Content,
+    b_import: text_editor::Content,
+    c_import: text_editor::Content,
+    d_import: text_editor::Content,
+}
+
+impl ModelEditorState {
+    fn from_config(model: Option<&ModelConfig>, vars: &VariableCatalogConfig) -> Self {
+        let mut state = Self::blank(vars);
+
+        if let Some(model) = model.and_then(ModelConfig::linear_state_space) {
+            state.selected_kind = ModelKindChoice::LinearStateSpace;
+            state.state_count = model.state_count.to_string();
+            state.a_cells = matrix_to_string_cells(&model.a);
+            state.b_cells = matrix_to_string_cells(&model.b);
+            state.c_cells = matrix_to_string_cells(&model.c);
+            state.d_cells = matrix_to_string_cells(&model.d);
+            state.resize_matrices_for(vars);
+        }
+
+        state
+    }
+
+    fn blank(vars: &VariableCatalogConfig) -> Self {
+        let mut state = Self {
+            selected_kind: ModelKindChoice::None,
+            state_count: "1".to_string(),
+            a_cells: Vec::new(),
+            b_cells: Vec::new(),
+            c_cells: Vec::new(),
+            d_cells: Vec::new(),
+            a_import: text_editor::Content::new(),
+            b_import: text_editor::Content::new(),
+            c_import: text_editor::Content::new(),
+            d_import: text_editor::Content::new(),
+        };
+        state.resize_matrices_for(vars);
+        state
+    }
+
+    fn state_count_value(&self) -> Option<usize> {
+        parse_state_count_value(&self.state_count).ok()
+    }
+
+    fn resize_matrices_for(&mut self, vars: &VariableCatalogConfig) {
+        let Some(state_count) = self.state_count_value() else {
+            return;
+        };
+
+        let u_count = model_input_order(vars).len();
+        let y_count = vars.cvs.len();
+
+        self.a_cells =
+            resize_string_matrix(std::mem::take(&mut self.a_cells), state_count, state_count);
+        self.b_cells =
+            resize_string_matrix(std::mem::take(&mut self.b_cells), state_count, u_count);
+        self.c_cells =
+            resize_string_matrix(std::mem::take(&mut self.c_cells), y_count, state_count);
+        self.d_cells = resize_string_matrix(std::mem::take(&mut self.d_cells), y_count, u_count);
+    }
+
+    fn cells_mut(&mut self, matrix: MatrixKey) -> &mut Vec<Vec<String>> {
+        match matrix {
+            MatrixKey::A => &mut self.a_cells,
+            MatrixKey::B => &mut self.b_cells,
+            MatrixKey::C => &mut self.c_cells,
+            MatrixKey::D => &mut self.d_cells,
+        }
+    }
+
+    fn cells(&self, matrix: MatrixKey) -> &[Vec<String>] {
+        match matrix {
+            MatrixKey::A => &self.a_cells,
+            MatrixKey::B => &self.b_cells,
+            MatrixKey::C => &self.c_cells,
+            MatrixKey::D => &self.d_cells,
+        }
+    }
+
+    fn import_content(&self, matrix: MatrixKey) -> &text_editor::Content {
+        match matrix {
+            MatrixKey::A => &self.a_import,
+            MatrixKey::B => &self.b_import,
+            MatrixKey::C => &self.c_import,
+            MatrixKey::D => &self.d_import,
+        }
+    }
+
+    fn import_content_mut(&mut self, matrix: MatrixKey) -> &mut text_editor::Content {
+        match matrix {
+            MatrixKey::A => &mut self.a_import,
+            MatrixKey::B => &mut self.b_import,
+            MatrixKey::C => &mut self.c_import,
+            MatrixKey::D => &mut self.d_import,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogicKindChoice {
     PController,
     CustomRust,
@@ -408,6 +558,75 @@ impl LogicEditorState {
 }
 
 #[derive(Debug, Clone)]
+struct ControlFunctionSweepRowState {
+    name: String,
+    value_kind: SweepValueKind,
+    enabled: bool,
+    baseline_label: String,
+    min: String,
+    max: String,
+    samples: String,
+}
+
+impl ControlFunctionSweepRowState {
+    fn from_dimension(dimension: &DefaultSweepDimension) -> Self {
+        Self {
+            name: dimension.name.clone(),
+            value_kind: dimension.value_kind,
+            enabled: true,
+            baseline_label: dimension.baseline_label.clone(),
+            min: dimension
+                .default_min
+                .map(format_test_numeric)
+                .unwrap_or_default(),
+            max: dimension
+                .default_max
+                .map(format_test_numeric)
+                .unwrap_or_default(),
+            samples: dimension.default_samples.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ControlFunctionTestState {
+    input_rows: Vec<ControlFunctionSweepRowState>,
+    param_rows: Vec<ControlFunctionSweepRowState>,
+    last_report: Option<ControlFunctionTestReport>,
+}
+
+impl ControlFunctionTestState {
+    fn from_dimensions(dimensions: &[DefaultSweepDimension]) -> Self {
+        let mut input_rows = Vec::new();
+        let mut param_rows = Vec::new();
+
+        for dimension in dimensions {
+            let row = ControlFunctionSweepRowState::from_dimension(dimension);
+            match dimension.kind {
+                crate::control_function_tests::SweepDimensionKind::Input => input_rows.push(row),
+                crate::control_function_tests::SweepDimensionKind::Parameter => {
+                    param_rows.push(row)
+                }
+            }
+        }
+
+        Self {
+            input_rows,
+            param_rows,
+            last_report: None,
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            input_rows: Vec::new(),
+            param_rows: Vec::new(),
+            last_report: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum WebStatus {
     Disabled,
     Starting(String),
@@ -452,9 +671,9 @@ impl SetupPage {
             Self::Watchdog => "Watchdog",
             Self::Io => "Ein- und Ausgänge",
             Self::Limits => "I/O definieren",
-            Self::Model => "Modell",
+            Self::Model => "Define Model",
             Self::Logic => "Regellogik",
-            Self::Timing => "Ausführungszeittest",
+            Self::Timing => "Control Function Tests",
             Self::Simulation => "Reglersimulation",
             Self::Deployment => "Deployment",
             Self::Params => "Online Parameter",
@@ -468,6 +687,8 @@ struct ProjectPanelData {
     sidebar_tasks: Vec<SidebarTask>,
     config_params: HashMap<String, LogicParamValue>,
     logic_editor: LogicEditorState,
+    model_editor: ModelEditorState,
+    control_function_tests: ControlFunctionTestState,
     communication: CommunicationEditorState,
     variables: VariableCatalogConfig,
     mv_names: Vec<VariableNameRow>,
@@ -586,6 +807,13 @@ enum Message {
     IoWriteTested(Result<String, String>),
     SaveIoDefinitionPressed,
     IoDefinitionSaved(Result<String, String>),
+    ModelKindChanged(ModelKindChoice),
+    ModelStateCountChanged(String),
+    ModelCellChanged(MatrixKey, usize, usize, String),
+    ModelImportEdited(MatrixKey, text_editor::Action),
+    ApplyModelImportPressed(MatrixKey),
+    SaveModelPressed,
+    ModelSaved(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     AddPControllerPair,
     PPairCvChanged(usize, String),
@@ -601,6 +829,16 @@ enum Message {
     LogicTemplateGenerated(Result<String, String>),
     BuildCustomLogicPressed,
     CustomLogicBuilt(Result<String, String>),
+    ControlTestInputEnabledToggled(usize, bool),
+    ControlTestInputMinChanged(usize, String),
+    ControlTestInputMaxChanged(usize, String),
+    ControlTestInputSamplesChanged(usize, String),
+    ControlTestParamEnabledToggled(usize, bool),
+    ControlTestParamMinChanged(usize, String),
+    ControlTestParamMaxChanged(usize, String),
+    ControlTestParamSamplesChanged(usize, String),
+    RunControlFunctionTestsPressed,
+    ControlFunctionTestsFinished(Result<ControlFunctionTestReport, String>),
 }
 
 struct DesktopApp {
@@ -620,7 +858,9 @@ struct DesktopApp {
     selected_page: SetupPage,
     new_project_name: String,
     communication_editor: CommunicationEditorState,
+    model_editor: ModelEditorState,
     logic_editor: LogicEditorState,
+    control_function_tests: ControlFunctionTestState,
     variables: VariableCatalogConfig,
     mv_name_rows: Vec<VariableNameRow>,
     cv_name_rows: Vec<VariableNameRow>,
@@ -659,7 +899,9 @@ impl DesktopApp {
             selected_page: SetupPage::Communication,
             new_project_name: String::new(),
             communication_editor: CommunicationEditorState::blank(),
+            model_editor: ModelEditorState::blank(&VariableCatalogConfig::default()),
             logic_editor: LogicEditorState::blank(),
+            control_function_tests: ControlFunctionTestState::blank(),
             variables: VariableCatalogConfig::default(),
             mv_name_rows: vec![VariableNameRow::blank()],
             cv_name_rows: vec![VariableNameRow::blank()],
@@ -718,7 +960,9 @@ impl DesktopApp {
                 Ok(panel) => {
                     self.sidebar_tasks = panel.sidebar_tasks;
                     self.communication_editor = panel.communication;
+                    self.model_editor = panel.model_editor;
                     self.logic_editor = panel.logic_editor;
+                    self.control_function_tests = panel.control_function_tests;
                     self.variables = panel.variables;
                     self.mv_name_rows = panel.mv_names;
                     self.cv_name_rows = panel.cv_names;
@@ -859,6 +1103,87 @@ impl DesktopApp {
                     } else {
                         Task::none()
                     }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::ControlTestInputEnabledToggled(index, enabled) => {
+                if let Some(row) = self.control_function_tests.input_rows.get_mut(index) {
+                    row.enabled = enabled;
+                }
+                Task::none()
+            }
+            Message::ControlTestInputMinChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.input_rows.get_mut(index) {
+                    row.min = value;
+                }
+                Task::none()
+            }
+            Message::ControlTestInputMaxChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.input_rows.get_mut(index) {
+                    row.max = value;
+                }
+                Task::none()
+            }
+            Message::ControlTestInputSamplesChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.input_rows.get_mut(index) {
+                    row.samples = value;
+                }
+                Task::none()
+            }
+            Message::ControlTestParamEnabledToggled(index, enabled) => {
+                if let Some(row) = self.control_function_tests.param_rows.get_mut(index) {
+                    row.enabled = enabled;
+                }
+                Task::none()
+            }
+            Message::ControlTestParamMinChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.param_rows.get_mut(index) {
+                    row.min = value;
+                }
+                Task::none()
+            }
+            Message::ControlTestParamMaxChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.param_rows.get_mut(index) {
+                    row.max = value;
+                }
+                Task::none()
+            }
+            Message::ControlTestParamSamplesChanged(index, value) => {
+                if let Some(row) = self.control_function_tests.param_rows.get_mut(index) {
+                    row.samples = value;
+                }
+                Task::none()
+            }
+            Message::RunControlFunctionTestsPressed => {
+                if self.runtime_snapshot.is_some() {
+                    self.error_message = Some(
+                        "Runtime läuft. Für Control Function Tests bitte erst stoppen.".to_string(),
+                    );
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                self.error_message = None;
+                run_control_function_tests_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.control_function_tests.clone(),
+                )
+            }
+            Message::ControlFunctionTestsFinished(result) => match result {
+                Ok(report) => {
+                    self.status_message = format!(
+                        "Control Function Tests abgeschlossen: {} Fälle",
+                        report.execution.executed_case_count
+                    );
+                    self.control_function_tests.last_report = Some(report);
+                    self.error_message = None;
+                    Task::none()
                 }
                 Err(err) => {
                     self.error_message = Some(err);
@@ -1436,6 +1761,85 @@ impl DesktopApp {
                     Task::none()
                 }
             },
+            Message::ModelKindChanged(kind) => {
+                self.model_editor.selected_kind = kind;
+                if kind == ModelKindChoice::LinearStateSpace
+                    && self.model_editor.state_count_value().is_none()
+                {
+                    self.model_editor.state_count = "1".to_string();
+                }
+                self.model_editor.resize_matrices_for(&self.variables);
+                Task::none()
+            }
+            Message::ModelStateCountChanged(value) => {
+                self.model_editor.state_count = value;
+                self.model_editor.resize_matrices_for(&self.variables);
+                Task::none()
+            }
+            Message::ModelCellChanged(matrix, row_index, col_index, value) => {
+                if let Some(row) = self.model_editor.cells_mut(matrix).get_mut(row_index) {
+                    if let Some(cell) = row.get_mut(col_index) {
+                        *cell = value;
+                    }
+                }
+                Task::none()
+            }
+            Message::ModelImportEdited(matrix, action) => {
+                self.model_editor.import_content_mut(matrix).perform(action);
+                Task::none()
+            }
+            Message::ApplyModelImportPressed(matrix) => {
+                let rows = self.model_editor.cells(matrix).len();
+                let cols = self.model_editor.cells(matrix).first().map_or(0, Vec::len);
+                let raw = self.model_editor.import_content(matrix).text();
+                match parse_matrix_import_text(&raw, rows, cols) {
+                    Ok(parsed) => {
+                        *self.model_editor.cells_mut(matrix) = parsed;
+                        *self.model_editor.import_content_mut(matrix) = text_editor::Content::new();
+                        self.status_message = format!("{} matrix import applied", matrix.label());
+                        self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message =
+                            Some(format!("{} matrix import failed: {}", matrix.label(), err));
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveModelPressed => {
+                if self.runtime_snapshot.is_some() {
+                    self.error_message = Some(
+                        "Runtime läuft. Für Modell-Änderungen bitte erst stoppen.".to_string(),
+                    );
+                    return Task::none();
+                }
+
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+
+                save_model_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.model_editor.clone(),
+                )
+            }
+            Message::ModelSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
         }
     }
 
@@ -1607,15 +2011,9 @@ impl DesktopApp {
             SetupPage::Watchdog => self.watchdog_editor_view(runtime_running),
             SetupPage::Io => self.io_editor_view(runtime_running),
             SetupPage::Limits => self.limits_editor_view(runtime_running),
-            SetupPage::Model => self.placeholder_page_view(
-                SetupPage::Model,
-                "Optional in V1: Modell hinterlegen kann übersprungen werden. Die restliche Konfiguration und Runtime funktionieren ohne Modell.",
-            ),
+            SetupPage::Model => self.model_editor_view(runtime_running),
             SetupPage::Logic => self.logic_editor_view(runtime_running),
-            SetupPage::Timing => self.placeholder_page_view(
-                SetupPage::Timing,
-                "Hier folgt ein Wizard für Zykluszeit-/Jitter-Checks mit sichtbaren Metriken.",
-            ),
+            SetupPage::Timing => self.control_function_tests_view(runtime_running),
             SetupPage::Simulation => self.placeholder_page_view(
                 SetupPage::Simulation,
                 "Optional in V1: Reglersimulation kann ausgelassen werden. Umsetzung und UI folgen in einem späteren Schritt.",
@@ -1644,6 +2042,429 @@ impl DesktopApp {
         )
         .padding(12)
         .into()
+    }
+
+    fn model_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
+        let has_variables = self.variables.has_any();
+        let can_save = self.selected_project.is_some()
+            && !runtime_running
+            && (self.model_editor.selected_kind == ModelKindChoice::None || has_variables);
+        let input_order = model_input_order(&self.variables);
+        let output_order = self.variables.cvs.clone();
+        let state_count = self.model_editor.state_count_value().unwrap_or(1);
+        let dimensions = format!(
+            "nx = {} | nu = {} | ny = {}",
+            state_count,
+            input_order.len(),
+            output_order.len()
+        );
+        let state_count_input = if self.model_editor.selected_kind
+            == ModelKindChoice::LinearStateSpace
+            && has_variables
+        {
+            text_input("Number of states", &self.model_editor.state_count)
+                .on_input(Message::ModelStateCountChanged)
+                .width(Length::Fixed(180.0))
+        } else {
+            text_input("Number of states", &self.model_editor.state_count)
+                .width(Length::Fixed(180.0))
+        };
+
+        let mut content = column![
+            text("Define Model").size(24),
+            text("Optional continuous-time state-space setup. The configured model is stored in project.toml and is not executed by runtime or simulation in this iteration.")
+                .size(14),
+            row![
+                text("Model type").width(Length::Fixed(120.0)),
+                pick_list(
+                    MODEL_KIND_OPTIONS,
+                    Some(self.model_editor.selected_kind),
+                    Message::ModelKindChanged,
+                )
+                .width(Length::Fixed(220.0))
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+        ]
+        .spacing(12);
+
+        if runtime_running {
+            content = content.push(
+                text("Runtime is running: stop it before changing the stored model.").size(13),
+            );
+        }
+
+        if self.model_editor.selected_kind == ModelKindChoice::None {
+            content = content.push(
+                container(
+                    text("No model is stored for this project. Switch to \"Linear state-space\" to configure A, B, C, and D.")
+                        .size(14),
+                )
+                .padding(12),
+            );
+        } else if !has_variables {
+            content = content.push(
+                container(
+                    column![
+                        text("Define MV/CV/DV names before configuring the model.").size(16),
+                        text("The state-space editor needs the current MV, DV, and CV order to size B, C, and D correctly.")
+                            .size(14)
+                    ]
+                    .spacing(8),
+                )
+                .padding(12),
+            );
+        } else {
+            let explanation = container(
+                column![
+                    text("Dynamics").size(18),
+                    text("x_dot = A x + B u").size(16),
+                    text("y = C x + D u").size(16),
+                    text(format!("x = [{}]^T", format_state_vector(state_count))).size(14),
+                    text(format!("u = [{}]^T", format_named_vector(&input_order))).size(14),
+                    text(format!("y = [{}]^T", format_named_vector(&output_order))).size(14),
+                    text(dimensions.clone()).size(13),
+                ]
+                .spacing(6),
+            )
+            .padding(12);
+
+            content = content
+                .push(
+                    row![
+                        text("Number of states").width(Length::Fixed(120.0)),
+                        state_count_input,
+                        text(dimensions.clone()).size(13),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                )
+                .push(explanation)
+                .push(self.matrix_editor_card_view(
+                    MatrixKey::A,
+                    build_state_labels(state_count),
+                    build_state_labels(state_count),
+                ))
+                .push(self.matrix_editor_card_view(
+                    MatrixKey::B,
+                    build_state_labels(state_count),
+                    input_order.clone(),
+                ))
+                .push(self.matrix_editor_card_view(
+                    MatrixKey::C,
+                    output_order.clone(),
+                    build_state_labels(state_count),
+                ))
+                .push(self.matrix_editor_card_view(MatrixKey::D, output_order, input_order));
+        }
+
+        let save_button = if can_save {
+            button("Save Model").on_press(Message::SaveModelPressed)
+        } else {
+            button("Save Model")
+        };
+
+        container(
+            column![
+                scrollable(content)
+                    .direction(iced::widget::scrollable::Direction::Both {
+                        vertical: iced::widget::scrollable::Scrollbar::new(),
+                        horizontal: iced::widget::scrollable::Scrollbar::new(),
+                    })
+                    .height(Length::Fill),
+                save_button
+            ]
+            .spacing(12),
+        )
+        .padding(12)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn matrix_editor_card_view(
+        &self,
+        matrix: MatrixKey,
+        row_labels: Vec<String>,
+        col_labels: Vec<String>,
+    ) -> Element<'_, Message> {
+        let cells = self.model_editor.cells(matrix);
+        let mut grid = column![].spacing(6);
+        let mut header = row![text("").width(Length::Fixed(100.0))].spacing(6);
+
+        for label in &col_labels {
+            header = header.push(text(label.clone()).width(Length::Fixed(90.0)));
+        }
+
+        grid = grid.push(header);
+
+        if row_labels.is_empty() {
+            grid = grid.push(text("No rows in this matrix.").size(13));
+        } else {
+            for (row_index, row_label) in row_labels.iter().enumerate() {
+                let mut row_view =
+                    row![text(row_label.clone()).width(Length::Fixed(100.0))].spacing(6);
+
+                if let Some(row_cells) = cells.get(row_index) {
+                    for (col_index, value) in row_cells.iter().enumerate() {
+                        row_view = row_view.push(
+                            text_input("0.0", value)
+                                .on_input(move |next| {
+                                    Message::ModelCellChanged(matrix, row_index, col_index, next)
+                                })
+                                .width(Length::Fixed(90.0)),
+                        );
+                    }
+                }
+
+                grid = grid.push(row_view);
+            }
+        }
+
+        let import_hint = format!(
+            "Paste {} as tab/newline data from Excel, or use comma/semicolon separated rows.",
+            matrix.label()
+        );
+        let import_button = if !row_labels.is_empty() || !col_labels.is_empty() {
+            button("Apply import").on_press(Message::ApplyModelImportPressed(matrix))
+        } else {
+            button("Apply import")
+        };
+
+        container(
+            column![
+                text(format!(
+                    "{} matrix ({} x {})",
+                    matrix.label(),
+                    row_labels.len(),
+                    col_labels.len()
+                ))
+                .size(18),
+                scrollable(grid)
+                    .direction(iced::widget::scrollable::Direction::Both {
+                        vertical: iced::widget::scrollable::Scrollbar::new(),
+                        horizontal: iced::widget::scrollable::Scrollbar::new(),
+                    })
+                    .height(Length::Shrink),
+                text(import_hint).size(13),
+                text_editor(self.model_editor.import_content(matrix))
+                    .height(Length::Fixed(100.0))
+                    .on_action(move |action| Message::ModelImportEdited(matrix, action)),
+                import_button,
+            ]
+            .spacing(10),
+        )
+        .padding(12)
+        .into()
+    }
+
+    fn control_function_tests_view(&self, runtime_running: bool) -> Element<'_, Message> {
+        let can_run = self.selected_project.is_some() && !runtime_running;
+        let run_button = if can_run {
+            button("Tests ausführen").on_press(Message::RunControlFunctionTestsPressed)
+        } else {
+            button("Tests ausführen")
+        };
+
+        let runtime_hint = if runtime_running {
+            "Runtime läuft: Offline-Tests sind erst nach Stop verfügbar."
+        } else {
+            "Die aktive Regellogik wird offline geprüft. Bei großen Räumen wird automatisch auf Einzel-Sweeps pro Dimension zurückgefallen."
+        };
+
+        let mut content = column![
+            text("Control Function Tests").size(24),
+            text("Sweep-Tests prüfen die Funktion über Eingänge und Online-Parameter, erfassen Fehlerfälle und messen Ausführungszeiten.").size(15),
+            row![run_button, text(runtime_hint).size(13)]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            text(self.control_function_case_estimate_label()).size(13),
+        ]
+        .spacing(10);
+
+        content = content.push(text("Input Sweeps").size(18));
+        if self.control_function_tests.input_rows.is_empty() {
+            content = content.push(text("Keine Eingänge konfiguriert."));
+        } else {
+            for (index, row_data) in self.control_function_tests.input_rows.iter().enumerate() {
+                content = content.push(self.control_function_sweep_row_view(
+                    index,
+                    row_data,
+                    Message::ControlTestInputEnabledToggled,
+                    Message::ControlTestInputMinChanged,
+                    Message::ControlTestInputMaxChanged,
+                    Message::ControlTestInputSamplesChanged,
+                ));
+            }
+        }
+
+        content = content.push(text("Online Parameter Sweeps").size(18));
+        if self.control_function_tests.param_rows.is_empty() {
+            content = content.push(text("Keine Online-Parameter aktiv."));
+        } else {
+            for (index, row_data) in self.control_function_tests.param_rows.iter().enumerate() {
+                content = content.push(self.control_function_sweep_row_view(
+                    index,
+                    row_data,
+                    Message::ControlTestParamEnabledToggled,
+                    Message::ControlTestParamMinChanged,
+                    Message::ControlTestParamMaxChanged,
+                    Message::ControlTestParamSamplesChanged,
+                ));
+            }
+        }
+
+        if let Some(report) = &self.control_function_tests.last_report {
+            let summary = container(
+                column![
+                    row![
+                        text("Modus").width(Length::Fixed(160.0)),
+                        text(format_sweep_mode(report.execution.mode)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Fälle").width(Length::Fixed(160.0)),
+                        text(report.execution.executed_case_count.to_string()),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Suite gesamt").width(Length::Fixed(160.0)),
+                        text(format!("{:.1} ms", report.execution.total_wall_time_ms)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    text("Runtime").size(15),
+                    row![
+                        text("min").width(Length::Fixed(160.0)),
+                        text(format!("{} us", report.execution.duration_min_us)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("avg").width(Length::Fixed(160.0)),
+                        text(format!("{:.1} us", report.execution.duration_avg_us)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("p95").width(Length::Fixed(160.0)),
+                        text(format!("{} us", report.execution.duration_p95_us)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("max").width(Length::Fixed(160.0)),
+                        text(format!("{} us", report.execution.duration_max_us)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    text("Validierung").size(15),
+                    row![
+                        text("Status").width(Length::Fixed(160.0)),
+                        text(format!(
+                            "{} ok | {} warnings | {} errors",
+                            report.counts.ok_cases,
+                            report.counts.warning_cases,
+                            report.counts.error_cases
+                        )),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Output-Prüfung").width(Length::Fixed(160.0)),
+                        text(format!(
+                            "{} invalid | {} außerhalb Limits | {} unerwartet",
+                            report.outputs.invalid_output_cases,
+                            report.outputs.out_of_limit_cases,
+                            report.outputs.unexpected_output_cases
+                        )),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(6),
+            )
+            .padding(10);
+
+            content = content.push(text("Letzter Lauf").size(18)).push(summary);
+
+            if !report.issue_cases.is_empty() {
+                content = content.push(text("Auffällige Fälle").size(16));
+                for case in &report.issue_cases {
+                    content = content.push(text(format_case_preview(case)).size(14));
+                    for detail in &case.details {
+                        content = content.push(text(format!("  - {}", detail)).size(13));
+                    }
+                }
+            }
+
+            if !report.slowest_cases.is_empty() {
+                content = content.push(text("Langsamste Fälle").size(16));
+                for case in &report.slowest_cases {
+                    content = content.push(text(format_case_preview(case)).size(14));
+                }
+            }
+        }
+
+        container(scrollable(content).height(Length::Fill))
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn control_function_sweep_row_view<FEnabled, FMin, FMax, FSamples>(
+        &self,
+        index: usize,
+        row_data: &ControlFunctionSweepRowState,
+        enabled_message: FEnabled,
+        min_message: FMin,
+        max_message: FMax,
+        samples_message: FSamples,
+    ) -> Element<'_, Message>
+    where
+        FEnabled: Fn(usize, bool) -> Message + Copy + 'static,
+        FMin: Fn(usize, String) -> Message + Copy + 'static,
+        FMax: Fn(usize, String) -> Message + Copy + 'static,
+        FSamples: Fn(usize, String) -> Message + Copy + 'static,
+    {
+        let toggle = checkbox(row_data.enabled)
+            .label(row_data.name.clone())
+            .on_toggle(move |checked| enabled_message(index, checked))
+            .width(Length::FillPortion(3));
+        let baseline = text(format!("Basis: {}", row_data.baseline_label))
+            .width(Length::FillPortion(2))
+            .size(13);
+
+        let row = match row_data.value_kind {
+            SweepValueKind::Bool => row![
+                toggle,
+                baseline,
+                text("Sweep: false/true")
+                    .width(Length::FillPortion(2))
+                    .size(13),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+            SweepValueKind::F64 => row![
+                toggle,
+                baseline,
+                text_input("min", &row_data.min)
+                    .on_input(move |value| min_message(index, value))
+                    .width(Length::FillPortion(1)),
+                text_input("max", &row_data.max)
+                    .on_input(move |value| max_message(index, value))
+                    .width(Length::FillPortion(1)),
+                text_input("samples", &row_data.samples)
+                    .on_input(move |value| samples_message(index, value))
+                    .width(Length::FillPortion(1)),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        };
+
+        container(row).padding(6).into()
     }
 
     fn communication_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
@@ -2399,6 +3220,45 @@ impl DesktopApp {
         })
     }
 
+    fn control_function_case_estimate_label(&self) -> String {
+        match build_control_function_sweep_selections(&self.control_function_tests) {
+            Ok(selections) => {
+                let mut full_factorial_cases = 1usize;
+                let mut single_axis_cases = 1usize;
+                let mut active_dimensions = 0usize;
+
+                for selection in &selections {
+                    if !selection.enabled {
+                        continue;
+                    }
+                    active_dimensions += 1;
+                    let count = match &selection.numeric {
+                        Some(numeric) => numeric.samples.max(1),
+                        None => 2,
+                    };
+                    full_factorial_cases = full_factorial_cases.saturating_mul(count);
+                    single_axis_cases = single_axis_cases.saturating_add(count);
+                }
+
+                if active_dimensions == 0 {
+                    "Fallraum: nur Basisfall".to_string()
+                } else if full_factorial_cases <= 4_096 {
+                    format!(
+                        "Fallraum: Vollfaktoriell {} + 1 Basisfall",
+                        full_factorial_cases
+                    )
+                } else {
+                    format!(
+                        "Fallraum: Vollfaktoriell {} zu groß, Fallback auf {} Einzel-Sweeps + Basisfall",
+                        full_factorial_cases,
+                        single_axis_cases - 1
+                    )
+                }
+            }
+            Err(err) => format!("Sweep-Konfiguration prüfen: {err}"),
+        }
+    }
+
     fn status_view(&self) -> Element<'_, Message> {
         let mut line = self.status_message.clone();
         if let Some(err) = &self.error_message {
@@ -2591,7 +3451,10 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
             let communication = CommunicationEditorState::from_config(&cfg.communication);
+            let model_editor = ModelEditorState::from_config(cfg.model.as_ref(), &cfg.variables);
             let logic_editor = LogicEditorState::from_config(&cfg.logic, &cfg.io);
+            let control_function_tests =
+                ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
 
             let mv_names = if cfg.variables.mvs.is_empty() {
                 vec![VariableNameRow::blank()]
@@ -2648,6 +3511,8 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 sidebar_tasks,
                 config_params: cfg.logic.params.clone(),
                 logic_editor,
+                model_editor,
+                control_function_tests,
                 communication,
                 variables: cfg.variables.clone(),
                 mv_names,
@@ -3168,6 +4033,132 @@ fn save_io_definition_task(
     )
 }
 
+fn save_model_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: ModelEditorState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+
+            cfg.model = build_model_config_from_editor(&editor, &cfg.variables)?;
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Model konnte nicht gespeichert werden: {err}"))?;
+
+            Ok(format!("Model for '{}' saved", project_name))
+        },
+        Message::ModelSaved,
+    )
+}
+
+fn build_model_config_from_editor(
+    editor: &ModelEditorState,
+    vars: &VariableCatalogConfig,
+) -> Result<Option<ModelConfig>, String> {
+    match editor.selected_kind {
+        ModelKindChoice::None => Ok(None),
+        ModelKindChoice::LinearStateSpace => {
+            if !vars.has_any() {
+                return Err(
+                    "Define MV/CV/DV names before saving a linear state-space model".to_string(),
+                );
+            }
+
+            let state_count = parse_state_count_value(&editor.state_count)?;
+            let u_order = model_input_order(vars);
+            let y_order = vars.cvs.clone();
+
+            let a = parse_numeric_matrix("A", &editor.a_cells, state_count, state_count)?;
+            let b = parse_numeric_matrix("B", &editor.b_cells, state_count, u_order.len())?;
+            let c = parse_numeric_matrix("C", &editor.c_cells, y_order.len(), state_count)?;
+            let d = parse_numeric_matrix("D", &editor.d_cells, y_order.len(), u_order.len())?;
+
+            Ok(Some(ModelConfig::LinearStateSpace {
+                model: LinearStateSpaceModelConfig {
+                    state_count,
+                    u_order,
+                    y_order,
+                    a,
+                    b,
+                    c,
+                    d,
+                },
+            }))
+        }
+    }
+}
+
+fn parse_numeric_matrix(
+    name: &str,
+    cells: &[Vec<String>],
+    expected_rows: usize,
+    expected_cols: usize,
+) -> Result<Vec<Vec<f64>>, String> {
+    if cells.len() != expected_rows {
+        return Err(format!(
+            "{} matrix has {} rows, expected {}",
+            name,
+            cells.len(),
+            expected_rows
+        ));
+    }
+
+    let mut out = Vec::with_capacity(expected_rows);
+    for (row_index, row) in cells.iter().enumerate() {
+        if row.len() != expected_cols {
+            return Err(format!(
+                "{} matrix row {} has {} columns, expected {}",
+                name,
+                row_index + 1,
+                row.len(),
+                expected_cols
+            ));
+        }
+
+        let mut numeric_row = Vec::with_capacity(expected_cols);
+        for (col_index, value) in row.iter().enumerate() {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!(
+                    "{}[{}, {}] requires a numeric value",
+                    name,
+                    row_index + 1,
+                    col_index + 1
+                ));
+            }
+
+            let parsed = trimmed.parse::<f64>().map_err(|_| {
+                format!(
+                    "{}[{}, {}] is not a valid number: '{}'",
+                    name,
+                    row_index + 1,
+                    col_index + 1,
+                    trimmed
+                )
+            })?;
+
+            if !parsed.is_finite() {
+                return Err(format!(
+                    "{}[{}, {}] must be finite",
+                    name,
+                    row_index + 1,
+                    col_index + 1
+                ));
+            }
+
+            numeric_row.push(parsed);
+        }
+        out.push(numeric_row);
+    }
+
+    Ok(out)
+}
+
 fn save_logic_task(
     project_service: ProjectService,
     project_name: String,
@@ -3480,6 +4471,25 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
             }
         },
         Message::CustomLogicBuilt,
+    )
+}
+
+fn run_control_function_tests_task(
+    project_service: ProjectService,
+    project_name: String,
+    test_state: ControlFunctionTestState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            let selections = build_control_function_sweep_selections(&test_state)?;
+            let project_dir = project_service.project_dir(&project_name);
+            run_control_function_tests(&cfg, &project_dir, &selections)
+                .map_err(|err| format!("Control Function Tests fehlgeschlagen: {err}"))
+        },
+        Message::ControlFunctionTestsFinished,
     )
 }
 
@@ -4174,13 +5184,237 @@ fn bool_plot(values: &[bool], width: usize) -> String {
     out
 }
 
+fn build_control_function_sweep_selections(
+    state: &ControlFunctionTestState,
+) -> Result<Vec<SweepSelection>, String> {
+    let mut selections = Vec::new();
+
+    for row in &state.input_rows {
+        selections.push(build_control_function_selection(
+            crate::control_function_tests::SweepDimensionKind::Input,
+            row,
+        )?);
+    }
+    for row in &state.param_rows {
+        selections.push(build_control_function_selection(
+            crate::control_function_tests::SweepDimensionKind::Parameter,
+            row,
+        )?);
+    }
+
+    Ok(selections)
+}
+
+fn build_control_function_selection(
+    kind: crate::control_function_tests::SweepDimensionKind,
+    row: &ControlFunctionSweepRowState,
+) -> Result<SweepSelection, String> {
+    let numeric = if row.value_kind == SweepValueKind::F64 && row.enabled {
+        let min = row
+            .min
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("Sweep '{}' min ist keine gültige Zahl", row.name))?;
+        let max = row
+            .max
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("Sweep '{}' max ist keine gültige Zahl", row.name))?;
+        let samples = row
+            .samples
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("Sweep '{}' samples ist keine gültige Ganzzahl", row.name))?;
+        if samples == 0 {
+            return Err(format!("Sweep '{}' braucht mindestens 1 Sample", row.name));
+        }
+
+        let (min, max) = if min <= max { (min, max) } else { (max, min) };
+        Some(NumericSweepConfig { min, max, samples })
+    } else {
+        None
+    };
+
+    Ok(SweepSelection {
+        kind,
+        name: row.name.clone(),
+        enabled: row.enabled,
+        numeric,
+    })
+}
+
+fn format_sweep_mode(mode: SweepExecutionMode) -> &'static str {
+    match mode {
+        SweepExecutionMode::FullFactorial => "vollfaktoriell",
+        SweepExecutionMode::SingleAxisFallback => "Einzel-Sweeps",
+    }
+}
+
+fn format_case_preview(case: &crate::control_function_tests::CasePreview) -> String {
+    format!("{} | {} | {} us", case.label, case.status, case.duration_us)
+}
+
+fn format_test_numeric(value: f64) -> String {
+    if value.fract().abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.4}")
+    }
+}
+
+fn parse_state_count_value(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "Number of states must be a positive integer".to_string())?;
+    if value == 0 {
+        return Err("Number of states must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+fn model_input_order(vars: &VariableCatalogConfig) -> Vec<String> {
+    vars.mvs
+        .iter()
+        .cloned()
+        .chain(vars.dvs.iter().cloned())
+        .collect()
+}
+
+fn build_state_labels(count: usize) -> Vec<String> {
+    (1..=count).map(|index| format!("x{index}")).collect()
+}
+
+fn format_state_vector(count: usize) -> String {
+    format_named_vector(&build_state_labels(count))
+}
+
+fn format_named_vector(names: &[String]) -> String {
+    if names.is_empty() {
+        "(empty)".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn matrix_to_string_cells(matrix: &[Vec<f64>]) -> Vec<Vec<String>> {
+    matrix
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| format_test_numeric(*value))
+                .collect()
+        })
+        .collect()
+}
+
+fn resize_string_matrix(matrix: Vec<Vec<String>>, rows: usize, cols: usize) -> Vec<Vec<String>> {
+    let mut resized = vec![vec![String::from("0.0"); cols]; rows];
+
+    for (row_index, row) in matrix.into_iter().enumerate().take(rows) {
+        for (col_index, value) in row.into_iter().enumerate().take(cols) {
+            resized[row_index][col_index] = value;
+        }
+    }
+
+    resized
+}
+
+fn parse_matrix_import_text(
+    raw: &str,
+    expected_rows: usize,
+    expected_cols: usize,
+) -> Result<Vec<Vec<String>>, String> {
+    let trimmed = raw.trim();
+
+    if expected_rows == 0 {
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err("matrix has no rows in the current shape".to_string());
+    }
+
+    if expected_cols == 0 {
+        if trimmed.is_empty() {
+            return Ok(vec![Vec::new(); expected_rows]);
+        }
+        return Err("matrix has no columns in the current shape".to_string());
+    }
+
+    if trimmed.is_empty() {
+        return Err("import text is empty".to_string());
+    }
+
+    let parsed_rows: Vec<Vec<String>> = trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(split_import_row)
+        .collect::<Result<_, _>>()?;
+
+    if parsed_rows.len() != expected_rows {
+        return Err(format!(
+            "expected {} rows but received {}",
+            expected_rows,
+            parsed_rows.len()
+        ));
+    }
+
+    for (row_index, row) in parsed_rows.iter().enumerate() {
+        if row.len() != expected_cols {
+            return Err(format!(
+                "row {} has {} columns, expected {}",
+                row_index + 1,
+                row.len(),
+                expected_cols
+            ));
+        }
+    }
+
+    Ok(parsed_rows)
+}
+
+fn split_import_row(line: &str) -> Result<Vec<String>, String> {
+    let splitter = if line.contains('\t') {
+        '\t'
+    } else if line.contains(';') {
+        ';'
+    } else if line.contains(',') {
+        ','
+    } else {
+        return Ok(vec![line.trim().to_string()]);
+    };
+
+    let cells: Vec<String> = line
+        .split(splitter)
+        .map(|cell| cell.trim().to_string())
+        .collect();
+
+    if cells.iter().any(|cell| cell.is_empty()) {
+        return Err("import contains an empty cell".to_string());
+    }
+
+    Ok(cells)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::project_config::{
-        CvIoDefinition, LogicParamValue, MvIoDefinition, ProjectConfig, WatchdogConfig,
+        CvIoDefinition, LogicParamValue, MvIoDefinition, ProjectConfig, VariableCatalogConfig,
+        WatchdogConfig,
     };
 
-    use super::sync_io_initial_value_online_params;
+    use super::{
+        ModelEditorState, ModelKindChoice, build_model_config_from_editor,
+        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
+    };
+
+    fn model_test_vars() -> VariableCatalogConfig {
+        VariableCatalogConfig {
+            mvs: vec!["u1".to_string(), "u2".to_string()],
+            cvs: vec!["y1".to_string(), "y2".to_string()],
+            dvs: vec!["d1".to_string()],
+        }
+    }
 
     #[test]
     fn syncs_static_io_initial_values_into_online_params() {
@@ -4245,5 +5479,68 @@ mod tests {
             cfg.logic.params.get("io.mv.u1.ll"),
             Some(&LogicParamValue::F64(-10.0))
         );
+    }
+
+    #[test]
+    fn parses_excel_tsv_matrix_import() {
+        let parsed =
+            parse_matrix_import_text("1\t2\t3\n4\t5\t6", 2, 3).expect("tsv import should parse");
+
+        assert_eq!(
+            parsed,
+            vec![
+                vec!["1".to_string(), "2".to_string(), "3".to_string()],
+                vec!["4".to_string(), "5".to_string(), "6".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_comma_and_semicolon_matrix_import() {
+        let comma = parse_matrix_import_text("1,2\n3,4", 2, 2).expect("comma import should parse");
+        let semicolon =
+            parse_matrix_import_text("1;2\n3;4", 2, 2).expect("semicolon import should parse");
+
+        assert_eq!(
+            comma,
+            vec![
+                vec!["1".to_string(), "2".to_string()],
+                vec!["3".to_string(), "4".to_string()],
+            ]
+        );
+        assert_eq!(comma, semicolon);
+    }
+
+    #[test]
+    fn resize_string_matrix_preserves_top_left_overlap() {
+        let resized = resize_string_matrix(
+            vec![
+                vec!["1".to_string(), "2".to_string()],
+                vec!["3".to_string(), "4".to_string()],
+            ],
+            3,
+            4,
+        );
+
+        assert_eq!(resized[0][0], "1");
+        assert_eq!(resized[0][1], "2");
+        assert_eq!(resized[1][0], "3");
+        assert_eq!(resized[1][1], "4");
+        assert_eq!(resized[2][3], "0.0");
+    }
+
+    #[test]
+    fn save_model_reports_cell_level_numeric_errors() {
+        let vars = model_test_vars();
+        let mut editor = ModelEditorState::blank(&vars);
+        editor.selected_kind = ModelKindChoice::LinearStateSpace;
+        editor.state_count = "2".to_string();
+        editor.resize_matrices_for(&vars);
+        editor.a_cells[0][1] = "oops".to_string();
+
+        let err = build_model_config_from_editor(&editor, &vars)
+            .expect_err("invalid numeric cell should fail");
+
+        assert!(err.contains("A[1, 2]"));
     }
 }

@@ -80,6 +80,7 @@ impl ProjectService {
     pub fn save_config(&self, project_name: &str, cfg: &ProjectConfig) -> Result<()> {
         let mut normalized = cfg.clone();
         normalized.normalize_plot_config();
+        normalized.normalize_model_config();
         normalized.validate()?;
 
         let dir = self.project_dir(project_name);

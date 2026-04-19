@@ -27,7 +27,9 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - Watchdog
   - Ein-/Ausgangsnamen
   - I/O-Definition inkl. OPC Read/Write Test
+  - Optionales State-Space-Modell-Setup (`linear_state_space`, A/B/C/D Import + Matrix-Editor)
   - Regellogik-Reiter mit Strategiewahl
+  - Control Function Tests mit Input-/Parameter-Sweeps, Fehler-Checks und Laufzeitmetriken
   - Online-Parameter (f64/bool), Runtime-Update + Persistenz
   - Statische I/O-Initialwerte (ohne OPC-Adresse) als Online-Parameter editierbar
   - Plotansicht aus lokaler SQLite
@@ -51,10 +53,15 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
 
 ### Noch als Platzhalter (UI-seitig)
 
-- Modell-Setup-Seite (optional)
-- Ausführungszeittest-Setup-Seite (Metriken in Runtime bereits vorhanden)
 - Regler-Simulation-Setup-Seite (optional)
 - Deployment-Setup-Seite (API-Kommandos vorhanden)
+
+Hinweis zum Modell-Setup:
+
+- Die Desktop-App kann ein optionales kontinuierliches Zustandsraummodell `linear_state_space` mit
+  `x_dot = A x + B u` und `y = C x + D u` speichern.
+- Die Konfiguration dient in V1 nur der Projektpersistenz und Dokumentation.
+- Runtime und Simulation führen dieses Modell in der aktuellen Iteration noch nicht aus.
 
 ## Build, Test, Start
 

@@ -18,9 +18,9 @@ use tokio::{
 use crate::{
     communication::{HealthStatus, ProtocolAdapter, opcua::OpcUaClientAdapter},
     logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
-    model::{ModelModule, NoopModel},
+    model::ModelModule,
     project::ProjectService,
-    project_config::{LogicKind, LogicParamValue, ProjectConfig, WatchdogConfig},
+    project_config::{LogicKind, LogicParamValue, ModelConfig, ProjectConfig, WatchdogConfig},
     storage::{CycleMetric, SeriesCatalogEntry, SignalSample, SqliteStorage},
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
@@ -440,7 +440,7 @@ impl RuntimeManager {
         let watchdog = build_watchdog(&config.watchdog)?;
         let project_dir = service.project_dir(project_name);
         let logic = build_logic(&config, &project_dir)?;
-        let model = build_model(config.model.is_some());
+        let model = build_model(config.model.as_ref());
 
         let db_path = project_dir.join("data").join("runtime.sqlite");
         let storage = SqliteStorage::new(db_path)?;
@@ -606,7 +606,10 @@ fn build_watchdog(cfg: &WatchdogConfig) -> Result<Box<dyn WatchdogModule>> {
     }
 }
 
-fn build_logic(config: &ProjectConfig, project_dir: &Path) -> Result<Box<dyn ControlLogic>> {
+pub(crate) fn build_logic(
+    config: &ProjectConfig,
+    project_dir: &Path,
+) -> Result<Box<dyn ControlLogic>> {
     match config.logic.kind {
         LogicKind::PController => {
             let logic = PControllerLogic::new(
@@ -634,11 +637,9 @@ fn build_logic(config: &ProjectConfig, project_dir: &Path) -> Result<Box<dyn Con
     }
 }
 
-fn build_model(has_model_config: bool) -> Option<Box<dyn ModelModule>> {
-    if has_model_config {
-        Some(Box::new(NoopModel::default()))
-    } else {
-        None
+fn build_model(model_config: Option<&ModelConfig>) -> Option<Box<dyn ModelModule>> {
+    match model_config {
+        Some(ModelConfig::Noop { .. }) | Some(ModelConfig::LinearStateSpace { .. }) | None => None,
     }
 }
 

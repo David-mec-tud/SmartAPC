@@ -17,6 +17,7 @@ pub struct ProjectConfig {
     pub io: IoConfig,
     pub limits: LimitsConfig,
     pub logic: LogicConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     pub runtime: RuntimeConfig,
     pub alarms: AlarmConfig,
@@ -52,6 +53,9 @@ impl ProjectConfig {
         self.io.validate()?;
         self.limits.validate()?;
         self.logic.validate(&self.io)?;
+        if let Some(model) = &self.model {
+            model.validate(&self.variables)?;
+        }
         self.plots.validate()?;
 
         if self.runtime.cycle_ms < 1_000 {
@@ -112,6 +116,13 @@ impl ProjectConfig {
             next_custom.push(CustomPlotConfig { title, traces });
         }
         self.plots.custom_plots = next_custom;
+    }
+
+    pub fn normalize_model_config(&mut self) {
+        self.model = self
+            .model
+            .take()
+            .and_then(|model| model.normalized_for(&self.variables));
     }
 
     pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
@@ -219,7 +230,7 @@ impl ProjectConfig {
             ),
             SidebarTask::new("io", "Ein- und Ausgänge definieren", variables_configured),
             SidebarTask::new("limits", "I/O definieren", io_definition_configured),
-            SidebarTask::new("model", "Modell hinterlegen (optional)", true),
+            SidebarTask::new("model", "Define Model (optional)", true),
             SidebarTask::new(
                 "logic",
                 "Regellogik hinterlegen",
@@ -227,8 +238,8 @@ impl ProjectConfig {
             ),
             SidebarTask::new(
                 "timing",
-                "Ausführungszeittest konfigurieren",
-                self.runtime.execution_time_test,
+                "Control Function Tests",
+                self.logic.is_configured_for(&self.io),
             ),
             SidebarTask::new("simulation", "Reglersimulation (optional)", true),
             SidebarTask::new(
@@ -1124,11 +1135,249 @@ pub struct CustomParameterSchemaEntry {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    pub kind: String,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelConfig {
+    Noop {
+        #[serde(default)]
+        config: HashMap<String, serde_json::Value>,
+    },
+    LinearStateSpace {
+        #[serde(flatten)]
+        model: LinearStateSpaceModelConfig,
+    },
+}
+
+impl ModelConfig {
+    fn validate(&self, vars: &VariableCatalogConfig) -> Result<()> {
+        match self {
+            Self::Noop { .. } => Ok(()),
+            Self::LinearStateSpace { model } => model.validate(vars),
+        }
+    }
+
+    fn normalized_for(self, vars: &VariableCatalogConfig) -> Option<Self> {
+        match self {
+            Self::Noop { .. } => None,
+            Self::LinearStateSpace { model } => Some(Self::LinearStateSpace {
+                model: model.normalized_for(vars),
+            }),
+        }
+    }
+
+    pub fn linear_state_space(&self) -> Option<&LinearStateSpaceModelConfig> {
+        match self {
+            Self::LinearStateSpace { model } => Some(model),
+            Self::Noop { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearStateSpaceModelConfig {
+    pub state_count: usize,
     #[serde(default)]
-    pub config: HashMap<String, serde_json::Value>,
+    pub u_order: Vec<String>,
+    #[serde(default)]
+    pub y_order: Vec<String>,
+    #[serde(default)]
+    pub a: Vec<Vec<f64>>,
+    #[serde(default)]
+    pub b: Vec<Vec<f64>>,
+    #[serde(default)]
+    pub c: Vec<Vec<f64>>,
+    #[serde(default)]
+    pub d: Vec<Vec<f64>>,
+}
+
+impl LinearStateSpaceModelConfig {
+    pub fn validate(&self, vars: &VariableCatalogConfig) -> Result<()> {
+        if self.state_count == 0 {
+            bail!("model.linear_state_space.state_count must be > 0");
+        }
+
+        let expected_u_order = linear_model_u_order(vars);
+        let expected_y_order = linear_model_y_order(vars);
+
+        if self.u_order != expected_u_order {
+            bail!("model.linear_state_space.u_order must match MV then DV order");
+        }
+
+        if self.y_order != expected_y_order {
+            bail!("model.linear_state_space.y_order must match CV order");
+        }
+
+        validate_matrix("A", &self.a, self.state_count, self.state_count)?;
+        validate_matrix("B", &self.b, self.state_count, self.u_order.len())?;
+        validate_matrix("C", &self.c, self.y_order.len(), self.state_count)?;
+        validate_matrix("D", &self.d, self.y_order.len(), self.u_order.len())?;
+
+        Ok(())
+    }
+
+    fn normalized_for(self, vars: &VariableCatalogConfig) -> Self {
+        let new_u_order = linear_model_u_order(vars);
+        let new_y_order = linear_model_y_order(vars);
+        let old_u_order = self.u_order;
+        let old_y_order = self.y_order;
+        let state_count = self.state_count;
+
+        Self {
+            state_count,
+            u_order: new_u_order.clone(),
+            y_order: new_y_order.clone(),
+            a: resize_matrix_overlap(self.a, state_count, state_count),
+            b: remap_matrix_columns(self.b, state_count, &old_u_order, &new_u_order),
+            c: remap_matrix_rows(self.c, &old_y_order, &new_y_order, state_count),
+            d: remap_matrix_rows_and_columns(
+                self.d,
+                &old_y_order,
+                &new_y_order,
+                &old_u_order,
+                &new_u_order,
+            ),
+        }
+    }
+}
+
+fn linear_model_u_order(vars: &VariableCatalogConfig) -> Vec<String> {
+    vars.mvs
+        .iter()
+        .cloned()
+        .chain(vars.dvs.iter().cloned())
+        .collect()
+}
+
+fn linear_model_y_order(vars: &VariableCatalogConfig) -> Vec<String> {
+    vars.cvs.clone()
+}
+
+fn validate_matrix(name: &str, matrix: &[Vec<f64>], rows: usize, cols: usize) -> Result<()> {
+    if matrix.len() != rows {
+        bail!(
+            "model.linear_state_space.{name_lower} must have shape {}x{}",
+            rows,
+            cols,
+            name_lower = name.to_ascii_lowercase()
+        );
+    }
+
+    for (row_index, row) in matrix.iter().enumerate() {
+        if row.len() != cols {
+            bail!(
+                "model.linear_state_space.{name_lower}[{}] must have {} columns",
+                row_index,
+                cols,
+                name_lower = name.to_ascii_lowercase()
+            );
+        }
+
+        for value in row {
+            if !value.is_finite() {
+                bail!(
+                    "model.linear_state_space.{name_lower} must contain only finite numbers",
+                    name_lower = name.to_ascii_lowercase()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resize_matrix_overlap(matrix: Vec<Vec<f64>>, rows: usize, cols: usize) -> Vec<Vec<f64>> {
+    let mut resized = vec![vec![0.0; cols]; rows];
+
+    for (row_index, row) in matrix.into_iter().enumerate().take(rows) {
+        for (col_index, value) in row.into_iter().enumerate().take(cols) {
+            resized[row_index][col_index] = value;
+        }
+    }
+
+    resized
+}
+
+fn remap_matrix_rows(
+    matrix: Vec<Vec<f64>>,
+    old_rows: &[String],
+    new_rows: &[String],
+    cols: usize,
+) -> Vec<Vec<f64>> {
+    let resized = resize_matrix_overlap(matrix, old_rows.len(), cols);
+    let row_lookup: HashMap<&str, usize> = old_rows
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let mut out = vec![vec![0.0; cols]; new_rows.len()];
+
+    for (new_row_index, name) in new_rows.iter().enumerate() {
+        if let Some(&old_row_index) = row_lookup.get(name.as_str()) {
+            out[new_row_index].clone_from(&resized[old_row_index]);
+        }
+    }
+
+    out
+}
+
+fn remap_matrix_columns(
+    matrix: Vec<Vec<f64>>,
+    rows: usize,
+    old_cols: &[String],
+    new_cols: &[String],
+) -> Vec<Vec<f64>> {
+    let resized = resize_matrix_overlap(matrix, rows, old_cols.len());
+    let col_lookup: HashMap<&str, usize> = old_cols
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let mut out = vec![vec![0.0; new_cols.len()]; rows];
+
+    for row_index in 0..rows {
+        for (new_col_index, name) in new_cols.iter().enumerate() {
+            if let Some(&old_col_index) = col_lookup.get(name.as_str()) {
+                out[row_index][new_col_index] = resized[row_index][old_col_index];
+            }
+        }
+    }
+
+    out
+}
+
+fn remap_matrix_rows_and_columns(
+    matrix: Vec<Vec<f64>>,
+    old_rows: &[String],
+    new_rows: &[String],
+    old_cols: &[String],
+    new_cols: &[String],
+) -> Vec<Vec<f64>> {
+    let resized = resize_matrix_overlap(matrix, old_rows.len(), old_cols.len());
+    let row_lookup: HashMap<&str, usize> = old_rows
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let col_lookup: HashMap<&str, usize> = old_cols
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let mut out = vec![vec![0.0; new_cols.len()]; new_rows.len()];
+
+    for (new_row_index, row_name) in new_rows.iter().enumerate() {
+        let Some(&old_row_index) = row_lookup.get(row_name.as_str()) else {
+            continue;
+        };
+
+        for (new_col_index, col_name) in new_cols.iter().enumerate() {
+            if let Some(&old_col_index) = col_lookup.get(col_name.as_str()) {
+                out[new_row_index][new_col_index] = resized[old_row_index][old_col_index];
+            }
+        }
+    }
+
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,23 +1444,29 @@ impl DeploymentConfig {
 }
 
 pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
-    let cfg: ProjectConfig = toml::from_str(input).context("failed to parse project TOML")?;
+    let mut cfg: ProjectConfig = toml::from_str(input).context("failed to parse project TOML")?;
+    cfg.normalize_model_config();
     cfg.validate()?;
     Ok(cfg)
 }
 
 pub fn to_toml_string(cfg: &ProjectConfig) -> Result<String> {
-    cfg.validate()?;
-    toml::to_string_pretty(cfg).context("failed to encode project TOML")
+    let mut normalized = cfg.clone();
+    normalized.normalize_plot_config();
+    normalized.normalize_model_config();
+    normalized.validate()?;
+    toml::to_string_pretty(&normalized).context("failed to encode project TOML")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_config_is_valid() {
+    fn valid_config_with_variables() -> ProjectConfig {
         let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string(), "u2".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string(), "y2".to_string()];
+        cfg.variables.dvs = vec!["d1".to_string()];
         cfg.io.inputs.push(SignalPoint {
             name: "cv.y1.soll".to_string(),
             signal_type: SignalType::F64,
@@ -1237,6 +1492,34 @@ mod tests {
             bias: 0.0,
         });
 
+        cfg
+    }
+
+    fn sample_linear_model() -> ModelConfig {
+        ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 3,
+                u_order: vec!["u1".to_string(), "u2".to_string(), "d1".to_string()],
+                y_order: vec!["y1".to_string(), "y2".to_string()],
+                a: vec![
+                    vec![0.0, 1.0, 0.0],
+                    vec![0.0, 0.0, 1.0],
+                    vec![-1.0, -2.0, -3.0],
+                ],
+                b: vec![
+                    vec![0.0, 0.0, 0.0],
+                    vec![1.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.5],
+                ],
+                c: vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]],
+                d: vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]],
+            },
+        }
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        let cfg = valid_config_with_variables();
         assert!(cfg.validate().is_ok());
     }
 
@@ -1250,31 +1533,10 @@ mod tests {
 
     #[test]
     fn toml_roundtrip() {
-        let mut cfg = ProjectConfig::new("demo");
-        cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_SOL".to_string(),
-            opc_tag: Some("TAG_IN".to_string()),
-        });
-        cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_IST".to_string(),
-            opc_tag: None,
-        });
-        cfg.io.outputs.push(SignalPoint {
-            name: "mv.u1.write".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=U1_WRITE".to_string(),
-            opc_tag: None,
-        });
-        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
-            cv: "y1".to_string(),
-            mv: "u1".to_string(),
-            kp: 2.0,
-            bias: 0.5,
-        });
+        let mut cfg = valid_config_with_variables();
+        cfg.io.inputs[0].opc_tag = Some("TAG_IN".to_string());
+        cfg.logic.p_controller.pairs[0].kp = 2.0;
+        cfg.logic.p_controller.pairs[0].bias = 0.5;
         cfg.logic
             .params
             .insert("gain_override".to_string(), LogicParamValue::F64(2.5));
@@ -1285,32 +1547,124 @@ mod tests {
     }
 
     #[test]
+    fn linear_model_roundtrip_uses_typed_shape() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+
+        let encoded = to_toml_string(&cfg).expect("toml encode");
+        let decoded = from_toml_str(&encoded).expect("toml decode");
+
+        assert!(encoded.contains("kind = \"linear_state_space\""));
+        assert_eq!(decoded.model, Some(sample_linear_model()));
+    }
+
+    #[test]
+    fn invalid_linear_model_shape_is_rejected() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 2,
+                u_order: vec!["u1".to_string(), "u2".to_string(), "d1".to_string()],
+                y_order: vec!["y1".to_string(), "y2".to_string()],
+                a: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                b: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                c: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                d: vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]],
+            },
+        });
+
+        let err = cfg.validate().expect_err("expected invalid matrix shape");
+        assert!(err.to_string().contains("model.linear_state_space.b"));
+    }
+
+    #[test]
+    fn legacy_noop_model_is_accepted_and_normalized_to_none() {
+        let input = r#"
+name = "demo"
+
+[communication]
+protocol = "opc_ua"
+endpoint_url = "opc.tcp://127.0.0.1:4840"
+io_cycle_ms = 1000
+
+[watchdog]
+kind = "none"
+
+[variables]
+mvs = ["u1", "u2"]
+cvs = ["y1", "y2"]
+dvs = ["d1"]
+
+[io]
+inputs = [
+  { name = "cv.y1.soll", signal_type = "f64", address = "ns=2;s=Y1_SOL" },
+  { name = "cv.y1.ist", signal_type = "f64", address = "ns=2;s=Y1_IST" }
+]
+outputs = [
+  { name = "mv.u1.write", signal_type = "f64", address = "ns=2;s=U1_WRITE" }
+]
+
+[limits]
+
+[logic]
+kind = "p_controller"
+
+[logic.p_controller]
+pairs = [{ cv = "y1", mv = "u1", kp = 1.0, bias = 0.0 }]
+
+[model]
+kind = "noop"
+
+[model.config]
+note = "legacy placeholder"
+
+[runtime]
+cycle_ms = 1000
+execution_time_test = true
+
+[alarms]
+alarm_timeout_ms = 5000
+off_timeout_ms = 10000
+
+[deployment]
+service_name = "smartapc_demo"
+display_name = "SmartAPC demo"
+description = "SmartAPC controller runtime"
+"#;
+
+        let decoded = from_toml_str(input).expect("legacy noop model should parse");
+        assert!(decoded.model.is_none());
+
+        let encoded = to_toml_string(&decoded).expect("toml encode");
+        assert!(!encoded.contains("[model]"));
+    }
+
+    #[test]
+    fn linear_model_normalization_preserves_overlap_for_variable_changes() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+
+        cfg.variables.mvs = vec!["u2".to_string(), "u3".to_string()];
+        cfg.variables.cvs = vec!["y2".to_string(), "y3".to_string()];
+        cfg.variables.dvs = vec!["d1".to_string(), "d2".to_string()];
+        cfg.normalize_model_config();
+
+        let Some(ModelConfig::LinearStateSpace { model }) = cfg.model else {
+            panic!("expected normalized linear state-space model");
+        };
+
+        assert_eq!(model.u_order, vec!["u2", "u3", "d1", "d2"]);
+        assert_eq!(model.y_order, vec!["y2", "y3"]);
+        assert_eq!(model.b[2], vec![1.0, 0.0, 0.5, 0.0]);
+        assert_eq!(model.c[0], vec![0.0, 1.0, 0.0]);
+        assert_eq!(model.c[1], vec![0.0, 0.0, 0.0]);
+        assert_eq!(model.d[0], vec![0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(model.d[1], vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn optional_model_and_simulation_do_not_block_sidebar_progress() {
-        let mut cfg = ProjectConfig::new("demo");
-        cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_SOL".to_string(),
-            opc_tag: None,
-        });
-        cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_IST".to_string(),
-            opc_tag: None,
-        });
-        cfg.io.outputs.push(SignalPoint {
-            name: "mv.u1.write".to_string(),
-            signal_type: SignalType::F64,
-            address: "ns=2;s=U1_WRITE".to_string(),
-            opc_tag: None,
-        });
-        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
-            cv: "y1".to_string(),
-            mv: "u1".to_string(),
-            kp: 1.0,
-            bias: 0.0,
-        });
+        let cfg = valid_config_with_variables();
 
         assert!(cfg.model.is_none());
         assert!(cfg.validate().is_ok());
@@ -1325,7 +1679,7 @@ mod tests {
             .find(|task| task.id == "simulation")
             .expect("simulation task present");
 
-        assert!(model_task.label.contains("optional"));
+        assert_eq!(model_task.label, "Define Model (optional)");
         assert!(model_task.configured);
         assert!(simulation_task.label.contains("optional"));
         assert!(simulation_task.configured);
