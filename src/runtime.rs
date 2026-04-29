@@ -20,7 +20,11 @@ use crate::{
     logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
     model::ModelModule,
     project::ProjectService,
-    project_config::{LogicKind, LogicParamValue, ModelConfig, ProjectConfig, WatchdogConfig},
+    project_config::{
+        IoConfig, LogicKind, LogicParamValue, ModelConfig, ProjectConfig, SimulationConfig,
+        WatchdogConfig,
+    },
+    simulation::{SimulationCore, SimulationSnapshot, wall_cycle_duration},
     storage::{CycleMetric, SeriesCatalogEntry, SignalSample, SqliteStorage},
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
@@ -45,6 +49,13 @@ pub struct RuntimeSnapshot {
     pub metrics: RuntimeMetrics,
     pub last_inputs: HashMap<String, SignalValue>,
     pub last_outputs: HashMap<String, SignalValue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "mode", content = "snapshot", rename_all = "snake_case")]
+pub enum ExecutionSnapshot {
+    Runtime(RuntimeSnapshot),
+    Simulation(SimulationSnapshot),
 }
 
 struct RuntimeCore {
@@ -411,9 +422,21 @@ struct RuntimeHandle {
     join: JoinHandle<()>,
 }
 
+struct SimulationHandle {
+    project_name: String,
+    core: Arc<Mutex<SimulationCore>>,
+    shutdown: oneshot::Sender<()>,
+    join: JoinHandle<()>,
+}
+
+enum ActiveHandle {
+    Runtime(RuntimeHandle),
+    Simulation(SimulationHandle),
+}
+
 #[derive(Default)]
 pub struct RuntimeManager {
-    handle: Mutex<Option<RuntimeHandle>>,
+    handle: Mutex<Option<ActiveHandle>>,
 }
 
 impl RuntimeManager {
@@ -426,7 +449,7 @@ impl RuntimeManager {
     pub async fn start(&self, service: &ProjectService, project_name: &str) -> Result<()> {
         let mut guard = self.handle.lock().await;
         if guard.is_some() {
-            bail!("runtime already running");
+            bail!("runtime or simulation already running");
         }
 
         let config = service.load_config(project_name)?;
@@ -439,7 +462,7 @@ impl RuntimeManager {
 
         let watchdog = build_watchdog(&config.watchdog)?;
         let project_dir = service.project_dir(project_name);
-        let logic = build_logic(&config, &project_dir)?;
+        let logic = build_logic(&config, &config.io, &project_dir)?;
         let model = build_model(config.model.as_ref());
 
         let db_path = project_dir.join("data").join("runtime.sqlite");
@@ -485,30 +508,124 @@ impl RuntimeManager {
             }
         });
 
-        *guard = Some(RuntimeHandle {
+        *guard = Some(ActiveHandle::Runtime(RuntimeHandle {
             project_name: project_name.to_string(),
             core,
             shutdown: tx,
             join,
+        }));
+
+        Ok(())
+    }
+
+    pub async fn start_simulation(
+        &self,
+        service: &ProjectService,
+        project_name: &str,
+    ) -> Result<()> {
+        let mut guard = self.handle.lock().await;
+        if guard.is_some() {
+            bail!("runtime or simulation already running");
+        }
+
+        let mut config = service.load_config(project_name)?;
+        config.normalize_simulation_config();
+        config.sync_active_online_params();
+        config.validate_for_simulation()?;
+        let (sim_io, limits) = config.build_simulation_io_and_limits()?;
+
+        let project_dir = service.project_dir(project_name);
+        let logic = build_logic(&config, &sim_io, &project_dir)?;
+
+        let db_path = project_dir.join("data").join("simulation.sqlite");
+        let storage = SqliteStorage::new(db_path)?;
+        let log_path = project_dir.join("data").join("simulation.log");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open simulation log '{}'", log_path.display()))?;
+
+        let core = Arc::new(Mutex::new(SimulationCore::new(
+            config.clone(),
+            sim_io,
+            limits,
+            logic,
+            storage,
+            log_file,
+        )?));
+
+        let (tx, mut rx) = oneshot::channel();
+        let core_clone = Arc::clone(&core);
+        let target_cycle = wall_cycle_duration(config.simulation.speed, config.runtime.cycle_ms);
+        let join = tokio::spawn(async move {
+            loop {
+                {
+                    let mut core = core_clone.lock().await;
+                    if let Err(err) = core.tick_once(target_cycle) {
+                        tracing::error!(error = %err, "simulation tick failed");
+                    }
+                }
+
+                if let Some(target) = target_cycle {
+                    tokio::select! {
+                        _ = tokio::time::sleep(target) => {}
+                        _ = &mut rx => break,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::task::yield_now() => {}
+                        _ = &mut rx => break,
+                    }
+                }
+            }
         });
+
+        *guard = Some(ActiveHandle::Simulation(SimulationHandle {
+            project_name: project_name.to_string(),
+            core,
+            shutdown: tx,
+            join,
+        }));
 
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
         let mut guard = self.handle.lock().await;
-        let handle = guard.take();
+        let handle = match guard.take() {
+            Some(ActiveHandle::Runtime(handle)) => handle,
+            Some(other) => {
+                *guard = Some(other);
+                bail!("runtime not running");
+            }
+            None => return Ok(()),
+        };
 
-        if let Some(handle) = handle {
-            let _ = handle.shutdown.send(());
-            let _ = handle.join.await;
-        }
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        Ok(())
+    }
+
+    pub async fn stop_simulation(&self) -> Result<()> {
+        let mut guard = self.handle.lock().await;
+        let handle = match guard.take() {
+            Some(ActiveHandle::Simulation(handle)) => handle,
+            Some(other) => {
+                *guard = Some(other);
+                bail!("simulation not running");
+            }
+            None => return Ok(()),
+        };
+
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
         Ok(())
     }
 
     pub async fn state(&self) -> Result<Option<RuntimeSnapshot>> {
         let guard = self.handle.lock().await;
-        if let Some(handle) = guard.as_ref() {
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
             let core = handle.core.lock().await;
             Ok(Some(core.snapshot()))
         } else {
@@ -516,9 +633,38 @@ impl RuntimeManager {
         }
     }
 
+    pub async fn simulation_state(&self) -> Result<Option<SimulationSnapshot>> {
+        let guard = self.handle.lock().await;
+        if let Some(ActiveHandle::Simulation(handle)) = guard.as_ref() {
+            let core = handle.core.lock().await;
+            Ok(Some(core.snapshot()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn active_state(&self) -> Result<Option<ExecutionSnapshot>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let core = handle.core.lock().await;
+                Ok(Some(ExecutionSnapshot::Runtime(core.snapshot())))
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let core = handle.core.lock().await;
+                Ok(Some(ExecutionSnapshot::Simulation(core.snapshot())))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn active_project(&self) -> Option<String> {
         let guard = self.handle.lock().await;
-        guard.as_ref().map(|h| h.project_name.clone())
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => Some(handle.project_name.clone()),
+            Some(ActiveHandle::Simulation(handle)) => Some(handle.project_name.clone()),
+            None => None,
+        }
     }
 
     pub async fn set_params(
@@ -526,53 +672,143 @@ impl RuntimeManager {
         updates: HashMap<String, LogicParamValue>,
     ) -> Result<HashMap<String, LogicParamValue>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
+            let mut core = handle.core.lock().await;
+            core.set_params(updates)?;
+            Ok(core.current_params())
+        } else {
+            bail!("runtime not running")
+        }
+    }
 
-        let mut core = handle.core.lock().await;
-        core.set_params(updates)?;
-        Ok(core.current_params())
+    pub async fn active_set_params(
+        &self,
+        updates: HashMap<String, LogicParamValue>,
+    ) -> Result<HashMap<String, LogicParamValue>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let mut core = handle.core.lock().await;
+                core.set_params(updates)?;
+                Ok(core.current_params())
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let mut core = handle.core.lock().await;
+                core.set_params(updates)?;
+                Ok(core.current_params())
+            }
+            None => bail!("runtime or simulation not running"),
+        }
     }
 
     pub async fn get_params(&self) -> Result<HashMap<String, LogicParamValue>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
+            let core = handle.core.lock().await;
+            Ok(core.current_params())
+        } else {
+            bail!("runtime not running")
+        }
+    }
 
-        let core = handle.core.lock().await;
-        Ok(core.current_params())
+    pub async fn active_get_params(&self) -> Result<HashMap<String, LogicParamValue>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let core = handle.core.lock().await;
+                Ok(core.current_params())
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let core = handle.core.lock().await;
+                Ok(core.current_params())
+            }
+            None => bail!("runtime or simulation not running"),
+        }
     }
 
     pub async fn read_plots(&self, limit: usize) -> Result<Vec<SignalSample>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
-
-        let core = handle.core.lock().await;
-        core.read_plot_samples(limit)
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
+            let core = handle.core.lock().await;
+            core.read_plot_samples(limit)
+        } else {
+            bail!("runtime not running")
+        }
     }
 
     pub async fn read_plots_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
-
-        let core = handle.core.lock().await;
-        core.read_plot_samples_window(window_ms)
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
+            let core = handle.core.lock().await;
+            core.read_plot_samples_window(window_ms)
+        } else {
+            bail!("runtime not running")
+        }
     }
 
     pub async fn read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
+        if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
+            let core = handle.core.lock().await;
+            core.read_plot_catalog()
+        } else {
+            bail!("runtime not running")
+        }
+    }
 
-        let core = handle.core.lock().await;
-        core.read_plot_catalog()
+    pub async fn active_read_plots(&self, limit: usize) -> Result<Vec<SignalSample>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_samples(limit)
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_samples(limit)
+            }
+            None => bail!("runtime or simulation not running"),
+        }
+    }
+
+    pub async fn active_read_plots_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_samples_window(window_ms)
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_samples_window(window_ms)
+            }
+            None => bail!("runtime or simulation not running"),
+        }
+    }
+
+    pub async fn active_read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_catalog()
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let core = handle.core.lock().await;
+                core.read_plot_catalog()
+            }
+            None => bail!("runtime or simulation not running"),
+        }
+    }
+
+    pub async fn apply_simulation_live_config(&self, config: SimulationConfig) -> Result<()> {
+        let guard = self.handle.lock().await;
+        let Some(ActiveHandle::Simulation(handle)) = guard.as_ref() else {
+            bail!("simulation not running");
+        };
+        let mut core = handle.core.lock().await;
+        core.apply_live_config(&config);
+        Ok(())
     }
 
     pub async fn simulate_step(
@@ -580,9 +816,9 @@ impl RuntimeManager {
         inputs: HashMap<String, SignalValue>,
     ) -> Result<HashMap<String, SignalValue>> {
         let guard = self.handle.lock().await;
-        let handle = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("runtime not running"))?;
+        let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() else {
+            bail!("runtime not running");
+        };
 
         let mut core = handle.core.lock().await;
         core.simulate_step(inputs).await
@@ -608,6 +844,7 @@ fn build_watchdog(cfg: &WatchdogConfig) -> Result<Box<dyn WatchdogModule>> {
 
 pub(crate) fn build_logic(
     config: &ProjectConfig,
+    io: &IoConfig,
     project_dir: &Path,
 ) -> Result<Box<dyn ControlLogic>> {
     match config.logic.kind {
@@ -622,7 +859,7 @@ pub(crate) fn build_logic(
             Ok(Box::new(logic))
         }
         LogicKind::CustomRust => {
-            if !config.logic.custom_rust.is_compatible_with(&config.io) {
+            if !config.logic.custom_rust.is_compatible_with(io) {
                 bail!("custom_rust strategy is not compatible with current I/O definition");
             }
             let artifact_path = if Path::new(&config.logic.custom_rust.artifact_path).is_absolute()
@@ -821,11 +1058,12 @@ mod tests {
             .append(true)
             .open(storage_dir.path().join("runtime.log"))
             .expect("log");
+        let logic_cfg = base_config();
         let mut core = RuntimeCore::new(
             cfg,
             adapter.clone(),
             Box::new(NoneWatchdog),
-            build_logic(&base_config(), storage_dir.path()).expect("build logic"),
+            build_logic(&logic_cfg, &logic_cfg.io, storage_dir.path()).expect("build logic"),
             None,
             storage,
             log_file,
@@ -857,11 +1095,12 @@ mod tests {
             .append(true)
             .open(storage_dir.path().join("runtime.log"))
             .expect("log");
+        let logic_cfg = base_config();
         let mut core = RuntimeCore::new(
             cfg,
             adapter.clone(),
             Box::new(NoneWatchdog),
-            build_logic(&base_config(), storage_dir.path()).expect("build logic"),
+            build_logic(&logic_cfg, &logic_cfg.io, storage_dir.path()).expect("build logic"),
             None,
             storage,
             log_file,
@@ -900,12 +1139,13 @@ mod tests {
             .append(true)
             .open(&log_path)
             .expect("log");
+        let logic_cfg = base_config();
 
         let mut core = RuntimeCore::new(
             cfg,
             adapter.clone(),
             Box::new(NoneWatchdog),
-            build_logic(&base_config(), storage_dir.path()).expect("logic"),
+            build_logic(&logic_cfg, &logic_cfg.io, storage_dir.path()).expect("logic"),
             None,
             storage,
             log_file,

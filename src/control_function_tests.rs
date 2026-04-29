@@ -240,7 +240,7 @@ pub fn run_control_function_tests(
         SweepExecutionMode::SingleAxisFallback
     };
 
-    let mut logic = build_logic(&cfg, project_dir)
+    let mut logic = build_logic(&cfg, &cfg.io, project_dir)
         .with_context(|| "active control logic could not be loaded for offline tests")?;
 
     let suite_started = Instant::now();

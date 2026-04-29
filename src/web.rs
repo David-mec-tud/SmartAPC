@@ -14,7 +14,8 @@ use crate::{
     deployment::{DeploymentCommands, windows_service_commands},
     project::ProjectService,
     project_config::{LogicParamValue, PlotConfig, ProjectConfig},
-    runtime::{RuntimeManager, RuntimeSnapshot},
+    runtime::{ExecutionSnapshot, RuntimeManager, RuntimeSnapshot},
+    simulation::SimulationSnapshot,
     storage::{SeriesCatalogEntry, SignalSample},
     types::SignalValue,
 };
@@ -50,6 +51,19 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/runtime/plots/window", get(get_runtime_plots_window))
         .route("/api/runtime/plots/catalog", get(get_runtime_plots_catalog))
+        .route("/api/simulation/start", post(start_simulation))
+        .route("/api/simulation/stop", post(stop_simulation))
+        .route("/api/simulation/state", get(get_simulation_state))
+        .route("/api/execution/state", get(get_execution_state))
+        .route("/api/execution/params", get(get_execution_params))
+        .route(
+            "/api/execution/plots/window",
+            get(get_execution_plots_window),
+        )
+        .route(
+            "/api/execution/plots/catalog",
+            get(get_execution_plots_catalog),
+        )
         .route("/api/plots", get(get_plots))
         .route("/api/simulate/step", post(simulate_step))
         .route("/api/deployment/commands", get(get_deployment_commands))
@@ -107,7 +121,7 @@ async fn index_page() -> Html<&'static str> {
     <div class="panel">
       <h1>SmartAPC V1</h1>
       <p>Modulare Regelungssoftware mit OPC-UA, Watchdog, Runtime-State-Machine und SQLite-Plots.</p>
-      <p>API Startpunkte: <code>/api/projects</code>, <code>/api/runtime/start</code>, <code>/api/runtime/state</code>.</p>
+      <p>API Startpunkte: <code>/api/projects</code>, <code>/api/runtime/start</code>, <code>/api/simulation/start</code>, <code>/api/execution/state</code>.</p>
       <p><a href="/plots">Interaktive Plot-Ansicht öffnen</a></p>
       <div class="grid">
         <div class="card"><h3>Projektkonfiguration</h3><p>TOML-basierte Projekte, Sidebar-Tasks und Parametrierung.</p></div>
@@ -260,8 +274,8 @@ async fn plots_page() -> Html<&'static str> {
 <body>
   <div class="wrap">
     <div class="hero">
-      <h1>Interactive Runtime Plots</h1>
-      <div class="muted">Live sliding-window plots for MV/CV/DV plus configurable custom charts.</div>
+      <h1>Interactive Execution Plots</h1>
+      <div class="muted">Live sliding-window plots for runtime or offline simulation, plus configurable custom charts.</div>
       <div class="toolbar">
         <div class="field">
           <label for="projectSelect">Project</label>
@@ -272,8 +286,8 @@ async fn plots_page() -> Html<&'static str> {
           <input id="windowSec" type="number" min="10" max="3600" value="180" />
         </div>
         <div class="field">
-          <label>Runtime</label>
-          <div id="runtimeState" class="muted">loading...</div>
+          <label>Execution</label>
+          <div id="executionState" class="muted">loading...</div>
         </div>
       </div>
       <div id="status" class="status"></div>
@@ -346,7 +360,7 @@ async fn plots_page() -> Html<&'static str> {
   const el = {
     projectSelect: document.getElementById("projectSelect"),
     windowSec: document.getElementById("windowSec"),
-    runtimeState: document.getElementById("runtimeState"),
+    executionState: document.getElementById("executionState"),
     status: document.getElementById("status"),
     mvCards: document.getElementById("mvCards"),
     cvCards: document.getElementById("cvCards"),
@@ -474,17 +488,22 @@ async fn plots_page() -> Html<&'static str> {
   }
 
   async function loadProjectsAndSelectInitial() {
-    const [projects, runtimeState] = await Promise.all([
+    const [projects, executionState] = await Promise.all([
       api("/api/projects"),
-      api("/api/runtime/state"),
+      api("/api/execution/state"),
     ]);
     state.projects = projects;
     updateProjectSelect();
     const preferred = preferredProjectFromQuery();
     if (preferred && projects.includes(preferred)) {
       state.projectName = preferred;
-    } else if (runtimeState && runtimeState.project_name && projects.includes(runtimeState.project_name)) {
-      state.projectName = runtimeState.project_name;
+    } else if (
+      executionState &&
+      executionState.snapshot &&
+      executionState.snapshot.project_name &&
+      projects.includes(executionState.snapshot.project_name)
+    ) {
+      state.projectName = executionState.snapshot.project_name;
     } else {
       state.projectName = projects.length > 0 ? projects[0] : null;
     }
@@ -585,7 +604,7 @@ async fn plots_page() -> Html<&'static str> {
 
   async function refreshCatalog() {
     try {
-      const rows = await api("/api/runtime/plots/catalog");
+      const rows = await api("/api/execution/plots/catalog");
       const changed = setCatalog(rows);
       if (changed) {
         renderTraceSelectors();
@@ -826,16 +845,17 @@ async fn plots_page() -> Html<&'static str> {
     });
   }
 
-  async function pollRuntime() {
+  async function pollExecution() {
     try {
-      const snapshot = await api("/api/runtime/state");
+      const execution = await api("/api/execution/state");
+      const snapshot = execution ? execution.snapshot : null;
       if (!snapshot) {
-        el.runtimeState.textContent = "not running";
+        el.executionState.textContent = "not running";
         return;
       }
-      el.runtimeState.textContent = `${snapshot.state} (${snapshot.project_name})`;
+      el.executionState.textContent = `${execution.mode}: ${snapshot.state} (${snapshot.project_name})`;
       const windowMs = clampWindow(Number(state.plotConfig.window_sec || 180)) * 1000;
-      const samples = await api(`/api/runtime/plots/window?window_ms=${windowMs}`);
+      const samples = await api(`/api/execution/plots/window?window_ms=${windowMs}`);
       updateSeriesFromSamples(samples);
       const catalogChanged = mergeCatalogFromSamples(samples);
       if (catalogChanged) {
@@ -843,7 +863,7 @@ async fn plots_page() -> Html<&'static str> {
       }
       renderPlots();
     } catch (err) {
-      el.runtimeState.textContent = "not running";
+      el.executionState.textContent = "not running";
       setStatus(`Live update paused: ${err.message}`, true);
     }
   }
@@ -917,12 +937,12 @@ async fn plots_page() -> Html<&'static str> {
       await loadProject(state.projectName);
       await refreshCatalog();
       renderTraceSelectors(true);
-      await pollRuntime();
+      await pollExecution();
       setStatus("Interactive plotting ready.");
     } catch (err) {
       setStatus(`Initialization failed: ${err.message}`, true);
     }
-    setInterval(pollRuntime, POLL_MS);
+    setInterval(pollExecution, POLL_MS);
     setInterval(refreshCatalog, 5000);
   }
 
@@ -1026,16 +1046,55 @@ async fn stop_runtime(State(state): State<AppState>) -> Result<Json<serde_json::
     Ok(Json(serde_json::json!({"status": "stopped"})))
 }
 
+async fn start_simulation(
+    State(state): State<AppState>,
+    Json(req): Json<StartRuntimeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .runtime
+        .start_simulation(&state.project_service, &req.project_name)
+        .await?;
+    Ok(Json(
+        serde_json::json!({"status": "started", "project": req.project_name}),
+    ))
+}
+
+async fn stop_simulation(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state.runtime.stop_simulation().await?;
+    Ok(Json(serde_json::json!({"status": "stopped"})))
+}
+
 async fn get_runtime_state(
     State(state): State<AppState>,
 ) -> Result<Json<Option<RuntimeSnapshot>>, AppError> {
     Ok(Json(state.runtime.state().await?))
 }
 
+async fn get_simulation_state(
+    State(state): State<AppState>,
+) -> Result<Json<Option<SimulationSnapshot>>, AppError> {
+    Ok(Json(state.runtime.simulation_state().await?))
+}
+
+async fn get_execution_state(
+    State(state): State<AppState>,
+) -> Result<Json<Option<ExecutionSnapshot>>, AppError> {
+    Ok(Json(state.runtime.active_state().await?))
+}
+
 async fn get_runtime_params(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, LogicParamValue>>, AppError> {
     let params = state.runtime.get_params().await?;
+    Ok(Json(params))
+}
+
+async fn get_execution_params(
+    State(state): State<AppState>,
+) -> Result<Json<HashMap<String, LogicParamValue>>, AppError> {
+    let params = state.runtime.active_get_params().await?;
     Ok(Json(params))
 }
 
@@ -1069,7 +1128,7 @@ async fn get_plots(
     Query(query): Query<PlotQuery>,
 ) -> Result<Json<Vec<SignalSample>>, AppError> {
     let limit = query.limit.unwrap_or(250).clamp(1, 10_000);
-    let rows = state.runtime.read_plots(limit).await?;
+    let rows = state.runtime.active_read_plots(limit).await?;
     Ok(Json(rows))
 }
 
@@ -1087,10 +1146,26 @@ async fn get_runtime_plots_window(
     Ok(Json(rows))
 }
 
+async fn get_execution_plots_window(
+    State(state): State<AppState>,
+    Query(query): Query<RuntimePlotWindowQuery>,
+) -> Result<Json<Vec<SignalSample>>, AppError> {
+    let window_ms = query.window_ms.unwrap_or(180_000).clamp(10_000, 3_600_000);
+    let rows = state.runtime.active_read_plots_window(window_ms).await?;
+    Ok(Json(rows))
+}
+
 async fn get_runtime_plots_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SeriesCatalogEntry>>, AppError> {
     let rows = state.runtime.read_plot_catalog().await?;
+    Ok(Json(rows))
+}
+
+async fn get_execution_plots_catalog(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SeriesCatalogEntry>>, AppError> {
+    let rows = state.runtime.active_read_plot_catalog().await?;
     Ok(Json(rows))
 }
 
@@ -1174,8 +1249,9 @@ mod tests {
     use crate::{
         project::ProjectService,
         project_config::{
-            CustomPlotConfig, CustomPlotTraceConfig, LogicKind, LogicParamValue,
-            PControllerLogicConfig, PControllerPairConfig, PlotConfig, SignalPoint, WatchdogConfig,
+            CustomPlotConfig, CustomPlotTraceConfig, CvIoDefinition, LinearStateSpaceModelConfig,
+            LogicKind, LogicParamValue, ModelConfig, MvIoDefinition, PControllerLogicConfig,
+            PControllerPairConfig, PlotConfig, SignalPoint, WatchdogConfig,
         },
         runtime::RuntimeManager,
         storage::{SeriesCatalogEntry, SqliteStorage},
@@ -1183,6 +1259,53 @@ mod tests {
     };
 
     use super::*;
+
+    fn configure_simulation_project(projects: &ProjectService, name: &str) {
+        let mut cfg = projects.load_config(name).expect("config");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=U1_WRITE".to_string(),
+            mv_read: "ns=2;s=U1_READ".to_string(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: "ns=2;s=Y1_SOLL".to_string(),
+            ist: "ns=2;s=Y1_IST".to_string(),
+            sollband_opc: None,
+            sollband_value: Some(0.0),
+            enable: None,
+        });
+        cfg.logic.kind = LogicKind::PController;
+        cfg.logic.p_controller = PControllerLogicConfig {
+            pairs: vec![PControllerPairConfig {
+                cv: "y1".to_string(),
+                mv: "u1".to_string(),
+                kp: 1.0,
+                bias: 0.0,
+            }],
+        };
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("rebuild runtime io");
+        projects.save_config(name, &cfg).expect("save cfg");
+    }
 
     #[tokio::test]
     async fn project_api_roundtrip_and_param_persist() {
@@ -1525,5 +1648,60 @@ mod tests {
         );
 
         let _ = server.post("/api/runtime/stop").await;
+    }
+
+    #[tokio::test]
+    async fn simulation_and_active_execution_endpoints_follow_simulation_mode() {
+        let dir = tempdir().expect("tmp");
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("demo").expect("create");
+        configure_simulation_project(&projects, "demo");
+
+        let app = build_router(AppState {
+            project_service: projects.clone(),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: std::env::current_exe().expect("exe"),
+        });
+        let server = TestServer::new(app).expect("server");
+
+        server
+            .post("/api/simulation/start")
+            .json(&serde_json::json!({"project_name": "demo"}))
+            .await
+            .assert_status_ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let simulation_state_resp = server.get("/api/simulation/state").await;
+        simulation_state_resp.assert_status_ok();
+        let simulation_state: serde_json::Value = simulation_state_resp.json();
+        assert_eq!(simulation_state["project_name"], "demo");
+
+        let execution_state_resp = server.get("/api/execution/state").await;
+        execution_state_resp.assert_status_ok();
+        let execution_state: serde_json::Value = execution_state_resp.json();
+        assert_eq!(execution_state["mode"], "simulation");
+        assert_eq!(execution_state["snapshot"]["project_name"], "demo");
+
+        let runtime_start_resp = server
+            .post("/api/runtime/start")
+            .json(&serde_json::json!({"project_name": "demo"}))
+            .await;
+        runtime_start_resp.assert_status_bad_request();
+
+        let plots_resp = server
+            .get("/api/execution/plots/window?window_ms=180000")
+            .await;
+        plots_resp.assert_status_ok();
+        let samples: Vec<SignalSample> = plots_resp.json();
+        assert!(!samples.is_empty());
+
+        let catalog_resp = server.get("/api/execution/plots/catalog").await;
+        catalog_resp.assert_status_ok();
+        let catalog: Vec<SeriesCatalogEntry> = catalog_resp.json();
+        assert!(catalog.iter().any(|row| row.direction == "input"));
+        assert!(catalog.iter().any(|row| row.direction == "output"));
+
+        let _ = server.post("/api/simulation/stop").await;
     }
 }

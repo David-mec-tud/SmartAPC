@@ -12,7 +12,7 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - `ControlLogic`:
     - `p_controller` (produktiv nutzbar)
     - `custom_rust` (projektlokale `cdylib`)
-  - `ModelModule` (optional; V1 aktuell `NoopModel`)
+  - Persistiertes `linear_state_space`-Modell für Offline-Simulation
 - Runtime-State-Machine:
   - `Running -> Hold -> Alarm -> Off`
   - Fault-Verhalten: Hold Last Value -> Alarm -> Off
@@ -22,12 +22,17 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - Online-Parameter je Zyklus
   - Online-Parameter-Änderungen
   - User-definierte Logs aus `custom_rust`-Strategien
+- Simulations-Logging in `projects/<projekt>/data/simulation.log` (JSONL):
+  - `simulation_cycle` je Zyklus
+  - `simulation_time_s`
+  - Inputs/Outputs und User-Logs analog zur Runtime
 - Native Desktop-App (`iced`) mit Setup-Workflow:
   - OPC-UA Kommunikation
   - Watchdog
   - Ein-/Ausgangsnamen
   - I/O-Definition inkl. OPC Read/Write Test
   - Optionales State-Space-Modell-Setup (`linear_state_space`, A/B/C/D Import + Matrix-Editor)
+  - Optionales Controller-Simulations-Setup mit Start/Stop, Geschwindigkeitswahl, Initialwerten, Störungen, Rauschen und Live-A/B-Skalierung
   - Regellogik-Reiter mit Strategiewahl
   - Control Function Tests mit Input-/Parameter-Sweeps, Fehler-Checks und Laufzeitmetriken
   - Online-Parameter (f64/bool), Runtime-Update + Persistenz
@@ -37,12 +42,15 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - Projekte laden/speichern
   - Plot-Konfiguration pro Projekt (Window, Reihenfolge, Custom Plots)
   - Runtime Start/Stop/State
+  - Simulation Start/Stop/State
+  - Aktive Execution-Reads für State, Parameter und Plots
   - Runtime-Parameter lesen/schreiben
   - Simulation Step
   - Plotdaten (Limit + Sliding Window + Series-Katalog)
   - Deployment-Kommandos (Windows Service via `sc.exe`)
 - Interaktive Web-Plotansicht:
   - `GET /plots`
+  - Folgt automatisch Runtime oder Simulation
   - Plotly.js lokal gebündelt (kein CDN notwendig)
   - Sliding-Window-Zeitfenster als User-Parameter
   - MV/CV/DV Panels per Drag-and-Drop sortierbar
@@ -53,15 +61,15 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
 
 ### Noch als Platzhalter (UI-seitig)
 
-- Regler-Simulation-Setup-Seite (optional)
 - Deployment-Setup-Seite (API-Kommandos vorhanden)
 
 Hinweis zum Modell-Setup:
 
 - Die Desktop-App kann ein optionales kontinuierliches Zustandsraummodell `linear_state_space` mit
   `x_dot = A x + B u` und `y = C x + D u` speichern.
-- Die Konfiguration dient in V1 nur der Projektpersistenz und Dokumentation.
-- Runtime und Simulation führen dieses Modell in der aktuellen Iteration noch nicht aus.
+- Die Offline-Reglersimulation verwendet dieses Modell direkt.
+- Als Löser wird ein festes RK4-Verfahren mit Zero-Order Hold pro Regelzyklus verwendet.
+- Die Runtime selbst verwendet weiterhin keine interne Pflanzen-Simulation.
 
 ## Build, Test, Start
 
@@ -93,6 +101,8 @@ projects/
     data/
       runtime.sqlite
       runtime.log
+      simulation.sqlite
+      simulation.log
     logic/
       custom_strategy/   # wird bei Template-Generierung angelegt
 ```
@@ -157,6 +167,7 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
 - Rust Toolchain lokal installiert (`cargo` verfügbar)
 - Projekt-I/O bereits definiert
 - Runtime gestoppt (für Konfig-Änderungen)
+- Simulation gestoppt (für strukturelle Konfig-Änderungen)
 
 ### Schritt-für-Schritt
 
@@ -218,6 +229,7 @@ Im Template stehen flexible Log-Helfer zur Verfügung:
 - `out.log_values("text", values_map)`
 
 Diese Einträge landen im Runtime-Logfile (`data/runtime.log`) im Feld `user_logs`.
+Während der Offline-Simulation landen sie analog in `data/simulation.log`.
 
 ### Minimalbeispiel
 
@@ -271,9 +283,16 @@ Damit können diese Werte auch zur Laufzeit über **Online Parameter** angepasst
 - `GET /api/runtime/state`
 - `GET /api/runtime/params`
 - `PUT /api/runtime/params`
+- `POST /api/simulation/start`
+- `POST /api/simulation/stop`
+- `GET /api/simulation/state`
+- `GET /api/execution/state`
+- `GET /api/execution/params`
 - `GET /api/plots?limit=250`
 - `GET /api/runtime/plots/window?window_ms=180000`
 - `GET /api/runtime/plots/catalog`
+- `GET /api/execution/plots/window?window_ms=180000`
+- `GET /api/execution/plots/catalog`
 - `GET /api/projects/{name}/plots/config`
 - `PUT /api/projects/{name}/plots/config`
 - `POST /api/simulate/step`

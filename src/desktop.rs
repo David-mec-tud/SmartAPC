@@ -28,9 +28,10 @@ use crate::{
     project_config::{
         CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
         LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
-        PControllerPairConfig, SidebarTask, VariableCatalogConfig, WatchdogConfig,
+        PControllerPairConfig, SidebarTask, SimulationConfig, SimulationSpeedMode,
+        VariableCatalogConfig, WatchdogConfig,
     },
-    runtime::{RuntimeManager, RuntimeSnapshot},
+    runtime::{ExecutionSnapshot, RuntimeManager},
     storage::SignalSample,
     types::SignalValue,
     web::{AppState, build_router},
@@ -448,6 +449,179 @@ impl ModelEditorState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimulationSpeedChoice {
+    RealTime,
+    X0_1,
+    X0_5,
+    X10,
+    X20,
+    X50,
+    X100,
+    AsFastAsPossible,
+}
+
+const SIMULATION_SPEED_OPTIONS: [SimulationSpeedChoice; 8] = [
+    SimulationSpeedChoice::RealTime,
+    SimulationSpeedChoice::X0_1,
+    SimulationSpeedChoice::X0_5,
+    SimulationSpeedChoice::X10,
+    SimulationSpeedChoice::X20,
+    SimulationSpeedChoice::X50,
+    SimulationSpeedChoice::X100,
+    SimulationSpeedChoice::AsFastAsPossible,
+];
+
+impl fmt::Display for SimulationSpeedChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RealTime => write!(f, "real time"),
+            Self::X0_1 => write!(f, "0.1x"),
+            Self::X0_5 => write!(f, "0.5x"),
+            Self::X10 => write!(f, "10x"),
+            Self::X20 => write!(f, "20x"),
+            Self::X50 => write!(f, "50x"),
+            Self::X100 => write!(f, "100x"),
+            Self::AsFastAsPossible => write!(f, "as fast as possible"),
+        }
+    }
+}
+
+impl From<SimulationSpeedMode> for SimulationSpeedChoice {
+    fn from(value: SimulationSpeedMode) -> Self {
+        match value {
+            SimulationSpeedMode::RealTime => Self::RealTime,
+            SimulationSpeedMode::X0_1 => Self::X0_1,
+            SimulationSpeedMode::X0_5 => Self::X0_5,
+            SimulationSpeedMode::X10 => Self::X10,
+            SimulationSpeedMode::X20 => Self::X20,
+            SimulationSpeedMode::X50 => Self::X50,
+            SimulationSpeedMode::X100 => Self::X100,
+            SimulationSpeedMode::AsFastAsPossible => Self::AsFastAsPossible,
+        }
+    }
+}
+
+impl From<SimulationSpeedChoice> for SimulationSpeedMode {
+    fn from(value: SimulationSpeedChoice) -> Self {
+        match value {
+            SimulationSpeedChoice::RealTime => Self::RealTime,
+            SimulationSpeedChoice::X0_1 => Self::X0_1,
+            SimulationSpeedChoice::X0_5 => Self::X0_5,
+            SimulationSpeedChoice::X10 => Self::X10,
+            SimulationSpeedChoice::X20 => Self::X20,
+            SimulationSpeedChoice::X50 => Self::X50,
+            SimulationSpeedChoice::X100 => Self::X100,
+            SimulationSpeedChoice::AsFastAsPossible => Self::AsFastAsPossible,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SimulationNamedValueRow {
+    name: String,
+    value: String,
+}
+
+impl SimulationNamedValueRow {
+    fn from_named_value(name: impl Into<String>, value: f64) -> Self {
+        Self {
+            name: name.into(),
+            value: format!("{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SimulationEditorState {
+    speed: SimulationSpeedChoice,
+    cv_setpoints: Vec<SimulationNamedValueRow>,
+    cv_initials: Vec<SimulationNamedValueRow>,
+    mv_initials: Vec<SimulationNamedValueRow>,
+    dv_initials: Vec<SimulationNamedValueRow>,
+    cv_noise_std: Vec<SimulationNamedValueRow>,
+    mv_noise_std: Vec<SimulationNamedValueRow>,
+    dv_disturbances: Vec<SimulationNamedValueRow>,
+    cv_offsets: Vec<SimulationNamedValueRow>,
+    a_scale_cells: Vec<Vec<String>>,
+    b_scale_cells: Vec<Vec<String>>,
+}
+
+impl SimulationEditorState {
+    fn from_config(
+        simulation: &SimulationConfig,
+        vars: &VariableCatalogConfig,
+        model: Option<&ModelConfig>,
+    ) -> Self {
+        let mut state = Self::blank(vars, model);
+        state.speed = simulation.speed.into();
+        state.cv_setpoints = named_value_rows(&vars.cvs, &simulation.cv_setpoints);
+        state.cv_initials = named_value_rows(&vars.cvs, &simulation.cv_initials);
+        state.mv_initials = named_value_rows(&vars.mvs, &simulation.mv_initials);
+        state.dv_initials = named_value_rows(&vars.dvs, &simulation.dv_initials);
+        state.cv_noise_std = named_value_rows(&vars.cvs, &simulation.cv_noise_std);
+        state.mv_noise_std = named_value_rows(&vars.mvs, &simulation.mv_noise_std);
+        state.dv_disturbances = named_value_rows(&vars.dvs, &simulation.dv_disturbances);
+        state.cv_offsets = named_value_rows(&vars.cvs, &simulation.cv_offsets);
+        state.a_scale_cells = matrix_to_string_cells(&simulation.a_scale_pct);
+        state.b_scale_cells = matrix_to_string_cells(&simulation.b_scale_pct);
+        state.resize_matrices_for(model);
+        state
+    }
+
+    fn blank(vars: &VariableCatalogConfig, model: Option<&ModelConfig>) -> Self {
+        let mut state = Self {
+            speed: SimulationSpeedChoice::RealTime,
+            cv_setpoints: named_value_rows(&vars.cvs, &HashMap::new()),
+            cv_initials: named_value_rows(&vars.cvs, &HashMap::new()),
+            mv_initials: named_value_rows(&vars.mvs, &HashMap::new()),
+            dv_initials: named_value_rows(&vars.dvs, &HashMap::new()),
+            cv_noise_std: named_value_rows(&vars.cvs, &HashMap::new()),
+            mv_noise_std: named_value_rows(&vars.mvs, &HashMap::new()),
+            dv_disturbances: named_value_rows(&vars.dvs, &HashMap::new()),
+            cv_offsets: named_value_rows(&vars.cvs, &HashMap::new()),
+            a_scale_cells: Vec::new(),
+            b_scale_cells: Vec::new(),
+        };
+        state.resize_matrices_for(model);
+        state
+    }
+
+    fn resize_for(&mut self, vars: &VariableCatalogConfig, model: Option<&ModelConfig>) {
+        sync_named_value_rows(&mut self.cv_setpoints, &vars.cvs);
+        sync_named_value_rows(&mut self.cv_initials, &vars.cvs);
+        sync_named_value_rows(&mut self.mv_initials, &vars.mvs);
+        sync_named_value_rows(&mut self.dv_initials, &vars.dvs);
+        sync_named_value_rows(&mut self.cv_noise_std, &vars.cvs);
+        sync_named_value_rows(&mut self.mv_noise_std, &vars.mvs);
+        sync_named_value_rows(&mut self.dv_disturbances, &vars.dvs);
+        sync_named_value_rows(&mut self.cv_offsets, &vars.cvs);
+        self.resize_matrices_for(model);
+    }
+
+    fn resize_matrices_for(&mut self, model: Option<&ModelConfig>) {
+        let Some(model) = model.and_then(ModelConfig::linear_state_space) else {
+            self.a_scale_cells.clear();
+            self.b_scale_cells.clear();
+            return;
+        };
+
+        self.a_scale_cells = resize_string_matrix(
+            std::mem::take(&mut self.a_scale_cells),
+            model.state_count,
+            model.state_count,
+        );
+        self.b_scale_cells = resize_string_matrix(
+            std::mem::take(&mut self.b_scale_cells),
+            model.state_count,
+            model.u_order.len(),
+        );
+
+        fill_empty_cells(&mut self.a_scale_cells, "100.0");
+        fill_empty_cells(&mut self.b_scale_cells, "100.0");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogicKindChoice {
     PController,
     CustomRust,
@@ -674,7 +848,7 @@ impl SetupPage {
             Self::Model => "Define Model",
             Self::Logic => "Regellogik",
             Self::Timing => "Control Function Tests",
-            Self::Simulation => "Reglersimulation",
+            Self::Simulation => "Simulate Controller",
             Self::Deployment => "Deployment",
             Self::Params => "Online Parameter",
             Self::Plots => "Plots",
@@ -688,6 +862,7 @@ struct ProjectPanelData {
     config_params: HashMap<String, LogicParamValue>,
     logic_editor: LogicEditorState,
     model_editor: ModelEditorState,
+    simulation_editor: SimulationEditorState,
     control_function_tests: ControlFunctionTestState,
     communication: CommunicationEditorState,
     variables: VariableCatalogConfig,
@@ -702,7 +877,7 @@ struct ProjectPanelData {
 
 #[derive(Debug, Clone)]
 struct RefreshData {
-    snapshot: Option<RuntimeSnapshot>,
+    snapshot: Option<ExecutionSnapshot>,
     params: Option<HashMap<String, LogicParamValue>>,
     samples: Vec<SignalSample>,
 }
@@ -741,6 +916,15 @@ struct CvReadValues {
 struct DvReadValues {
     read: String,
     enable: String,
+}
+
+#[derive(Debug, Clone)]
+enum SimulationLiveScalarField {
+    CvSetpoint(String),
+    CvNoiseStd(String),
+    MvNoiseStd(String),
+    DvDisturbance(String),
+    CvOffset(String),
 }
 
 #[derive(Debug, Clone)]
@@ -814,6 +998,22 @@ enum Message {
     ApplyModelImportPressed(MatrixKey),
     SaveModelPressed,
     ModelSaved(Result<String, String>),
+    SimulationSpeedChanged(SimulationSpeedChoice),
+    SimulationCvSetpointChanged(usize, String),
+    SimulationCvInitialChanged(usize, String),
+    SimulationMvInitialChanged(usize, String),
+    SimulationDvInitialChanged(usize, String),
+    SimulationCvNoiseChanged(usize, String),
+    SimulationMvNoiseChanged(usize, String),
+    SimulationDvDisturbanceChanged(usize, String),
+    SimulationCvOffsetChanged(usize, String),
+    SimulationScaleCellChanged(MatrixKey, usize, usize, String),
+    SaveSimulationPressed,
+    SimulationSaved(Result<String, String>),
+    StartSimulationPressed,
+    StopSimulationPressed,
+    SimulationActionFinished(Result<String, String>),
+    SimulationLiveUpdated(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     AddPControllerPair,
     PPairCvChanged(usize, String),
@@ -854,11 +1054,12 @@ struct DesktopApp {
     param_inputs: HashMap<String, String>,
     param_dirty_keys: HashSet<String>,
     samples: Vec<SignalSample>,
-    runtime_snapshot: Option<RuntimeSnapshot>,
+    active_snapshot: Option<ExecutionSnapshot>,
     selected_page: SetupPage,
     new_project_name: String,
     communication_editor: CommunicationEditorState,
     model_editor: ModelEditorState,
+    simulation_editor: SimulationEditorState,
     logic_editor: LogicEditorState,
     control_function_tests: ControlFunctionTestState,
     variables: VariableCatalogConfig,
@@ -895,11 +1096,15 @@ impl DesktopApp {
             param_inputs: HashMap::new(),
             param_dirty_keys: HashSet::new(),
             samples: Vec::new(),
-            runtime_snapshot: None,
+            active_snapshot: None,
             selected_page: SetupPage::Communication,
             new_project_name: String::new(),
             communication_editor: CommunicationEditorState::blank(),
             model_editor: ModelEditorState::blank(&VariableCatalogConfig::default()),
+            simulation_editor: SimulationEditorState::blank(
+                &VariableCatalogConfig::default(),
+                None,
+            ),
             logic_editor: LogicEditorState::blank(),
             control_function_tests: ControlFunctionTestState::blank(),
             variables: VariableCatalogConfig::default(),
@@ -928,6 +1133,70 @@ impl DesktopApp {
 
     fn subscription(&self) -> Subscription<Message> {
         time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+    }
+
+    fn execution_active(&self) -> bool {
+        self.active_snapshot.is_some()
+    }
+
+    fn runtime_running(&self) -> bool {
+        matches!(self.active_snapshot, Some(ExecutionSnapshot::Runtime(_)))
+    }
+
+    fn simulation_running(&self) -> bool {
+        matches!(self.active_snapshot, Some(ExecutionSnapshot::Simulation(_)))
+    }
+
+    fn maybe_save_live_simulation_scalar(
+        &self,
+        field: SimulationLiveScalarField,
+        raw: &str,
+    ) -> Task<Message> {
+        if !self.simulation_running() {
+            return Task::none();
+        }
+        let Some(project_name) = self.selected_project.clone() else {
+            return Task::none();
+        };
+        let parsed = match parse_live_simulation_scalar(&field, raw) {
+            Ok(value) => value,
+            Err(_) => return Task::none(),
+        };
+        save_simulation_live_scalar_task(
+            Arc::clone(&self.runtime),
+            self.project_service.clone(),
+            project_name,
+            field,
+            parsed,
+        )
+    }
+
+    fn maybe_save_live_simulation_matrix(
+        &self,
+        matrix: MatrixKey,
+        row_index: usize,
+        col_index: usize,
+        raw: &str,
+    ) -> Task<Message> {
+        if !self.simulation_running() {
+            return Task::none();
+        }
+        let Some(project_name) = self.selected_project.clone() else {
+            return Task::none();
+        };
+        let parsed = match parse_live_simulation_matrix_value(raw) {
+            Ok(value) => value,
+            Err(_) => return Task::none(),
+        };
+        save_simulation_live_matrix_task(
+            Arc::clone(&self.runtime),
+            self.project_service.clone(),
+            project_name,
+            matrix,
+            row_index,
+            col_index,
+            parsed,
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -961,6 +1230,7 @@ impl DesktopApp {
                     self.sidebar_tasks = panel.sidebar_tasks;
                     self.communication_editor = panel.communication;
                     self.model_editor = panel.model_editor;
+                    self.simulation_editor = panel.simulation_editor;
                     self.logic_editor = panel.logic_editor;
                     self.control_function_tests = panel.control_function_tests;
                     self.variables = panel.variables;
@@ -973,7 +1243,7 @@ impl DesktopApp {
                     self.watchdog_editor = panel.watchdog;
                     self.param_dirty_keys.clear();
 
-                    if self.runtime_snapshot.is_none() {
+                    if !self.execution_active() {
                         self.logic_params = panel.config_params;
                         self.refresh_param_inputs_full();
                     }
@@ -1034,9 +1304,10 @@ impl DesktopApp {
                 Task::none()
             }
             Message::SaveLogicPressed => {
-                if self.runtime_snapshot.is_some() {
-                    self.error_message =
-                        Some("Runtime läuft. Für Logik-Änderungen bitte erst stoppen.".to_string());
+                if self.execution_active() {
+                    self.error_message = Some(
+                        "Ausführung läuft. Für Logik-Änderungen bitte erst stoppen.".to_string(),
+                    );
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
@@ -1158,9 +1429,10 @@ impl DesktopApp {
                 Task::none()
             }
             Message::RunControlFunctionTestsPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für Control Function Tests bitte erst stoppen.".to_string(),
+                        "Ausführung läuft. Für Control Function Tests bitte erst stoppen."
+                            .to_string(),
                     );
                     return Task::none();
                 }
@@ -1244,7 +1516,7 @@ impl DesktopApp {
             Message::Tick => refresh_task(Arc::clone(&self.runtime)),
             Message::Refreshed(result) => match result {
                 Ok(data) => {
-                    self.runtime_snapshot = data.snapshot;
+                    self.active_snapshot = data.snapshot;
                     self.samples = data.samples;
                     if let Some(params) = data.params {
                         self.logic_params = params;
@@ -1359,9 +1631,9 @@ impl DesktopApp {
                 Task::none()
             }
             Message::SaveCommunicationPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für Kommunikations-Änderungen bitte erst stoppen."
+                        "Ausführung läuft. Für Kommunikations-Änderungen bitte erst stoppen."
                             .to_string(),
                     );
                     return Task::none();
@@ -1414,9 +1686,9 @@ impl DesktopApp {
                 Task::none()
             }
             Message::SaveWatchdogPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
                             .to_string(),
                     );
                     return Task::none();
@@ -1434,9 +1706,9 @@ impl DesktopApp {
                 )
             }
             Message::TestWatchdogPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für den Watchdog-Test bitte erst stoppen.".to_string(),
+                        "Ausführung läuft. Für den Watchdog-Test bitte erst stoppen.".to_string(),
                     );
                     return Task::none();
                 }
@@ -1515,9 +1787,9 @@ impl DesktopApp {
                 Task::none()
             }
             Message::SaveVariablesPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
                             .to_string(),
                     );
                     return Task::none();
@@ -1722,9 +1994,9 @@ impl DesktopApp {
                 }
             },
             Message::SaveIoDefinitionPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
                             .to_string(),
                     );
                     return Task::none();
@@ -1769,11 +2041,19 @@ impl DesktopApp {
                     self.model_editor.state_count = "1".to_string();
                 }
                 self.model_editor.resize_matrices_for(&self.variables);
+                self.simulation_editor.resize_for(
+                    &self.variables,
+                    build_model_preview(&self.model_editor, &self.variables).as_ref(),
+                );
                 Task::none()
             }
             Message::ModelStateCountChanged(value) => {
                 self.model_editor.state_count = value;
                 self.model_editor.resize_matrices_for(&self.variables);
+                self.simulation_editor.resize_for(
+                    &self.variables,
+                    build_model_preview(&self.model_editor, &self.variables).as_ref(),
+                );
                 Task::none()
             }
             Message::ModelCellChanged(matrix, row_index, col_index, value) => {
@@ -1807,9 +2087,9 @@ impl DesktopApp {
                 Task::none()
             }
             Message::SaveModelPressed => {
-                if self.runtime_snapshot.is_some() {
+                if self.execution_active() {
                     self.error_message = Some(
-                        "Runtime läuft. Für Modell-Änderungen bitte erst stoppen.".to_string(),
+                        "Ausführung läuft. Für Modell-Änderungen bitte erst stoppen.".to_string(),
                     );
                     return Task::none();
                 }
@@ -1834,6 +2114,166 @@ impl DesktopApp {
                     } else {
                         Task::none()
                     }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::SimulationSpeedChanged(speed) => {
+                self.simulation_editor.speed = speed;
+                Task::none()
+            }
+            Message::SimulationCvSetpointChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.cv_setpoints.get_mut(index) {
+                    row.value = value.clone();
+                    let name = row.name.clone();
+                    return self.maybe_save_live_simulation_scalar(
+                        SimulationLiveScalarField::CvSetpoint(name),
+                        &value,
+                    );
+                }
+                Task::none()
+            }
+            Message::SimulationCvInitialChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.cv_initials.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::SimulationMvInitialChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.mv_initials.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::SimulationDvInitialChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.dv_initials.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::SimulationCvNoiseChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.cv_noise_std.get_mut(index) {
+                    row.value = value.clone();
+                    let name = row.name.clone();
+                    return self.maybe_save_live_simulation_scalar(
+                        SimulationLiveScalarField::CvNoiseStd(name),
+                        &value,
+                    );
+                }
+                Task::none()
+            }
+            Message::SimulationMvNoiseChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.mv_noise_std.get_mut(index) {
+                    row.value = value.clone();
+                    let name = row.name.clone();
+                    return self.maybe_save_live_simulation_scalar(
+                        SimulationLiveScalarField::MvNoiseStd(name),
+                        &value,
+                    );
+                }
+                Task::none()
+            }
+            Message::SimulationDvDisturbanceChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.dv_disturbances.get_mut(index) {
+                    row.value = value.clone();
+                    let name = row.name.clone();
+                    return self.maybe_save_live_simulation_scalar(
+                        SimulationLiveScalarField::DvDisturbance(name),
+                        &value,
+                    );
+                }
+                Task::none()
+            }
+            Message::SimulationCvOffsetChanged(index, value) => {
+                if let Some(row) = self.simulation_editor.cv_offsets.get_mut(index) {
+                    row.value = value.clone();
+                    let name = row.name.clone();
+                    return self.maybe_save_live_simulation_scalar(
+                        SimulationLiveScalarField::CvOffset(name),
+                        &value,
+                    );
+                }
+                Task::none()
+            }
+            Message::SimulationScaleCellChanged(matrix, row_index, col_index, value) => {
+                let cells = match matrix {
+                    MatrixKey::A => &mut self.simulation_editor.a_scale_cells,
+                    MatrixKey::B => &mut self.simulation_editor.b_scale_cells,
+                    MatrixKey::C | MatrixKey::D => return Task::none(),
+                };
+                if let Some(row) = cells.get_mut(row_index) {
+                    if let Some(cell) = row.get_mut(col_index) {
+                        *cell = value.clone();
+                        return self.maybe_save_live_simulation_matrix(
+                            matrix, row_index, col_index, &value,
+                        );
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveSimulationPressed => {
+                if self.execution_active() {
+                    self.error_message = Some(
+                        "Ausführung läuft. Für strukturelle Simulations-Änderungen bitte erst stoppen."
+                            .to_string(),
+                    );
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                save_simulation_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.simulation_editor.clone(),
+                )
+            }
+            Message::SimulationSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::StartSimulationPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                start_simulation_task(
+                    Arc::clone(&self.runtime),
+                    self.project_service.clone(),
+                    project_name,
+                )
+            }
+            Message::StopSimulationPressed => stop_simulation_task(Arc::clone(&self.runtime)),
+            Message::SimulationActionFinished(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    refresh_task(Arc::clone(&self.runtime))
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::SimulationLiveUpdated(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    Task::none()
                 }
                 Err(err) => {
                     self.error_message = Some(err);
@@ -1916,8 +2356,9 @@ impl DesktopApp {
     }
 
     fn runtime_view(&self) -> Element<'_, Message> {
-        let runtime_running = self.runtime_snapshot.is_some();
-        let start_button = if self.selected_project.is_some() && !runtime_running {
+        let runtime_running = self.runtime_running();
+        let execution_active = self.execution_active();
+        let start_button = if self.selected_project.is_some() && !execution_active {
             button("Runtime Start").on_press(Message::StartRuntimePressed)
         } else {
             button("Runtime Start")
@@ -1929,9 +2370,9 @@ impl DesktopApp {
             button("Runtime Stop")
         };
 
-        let summary = if let Some(snapshot) = &self.runtime_snapshot {
-            format!(
-                "Projekt={} | State={:?} | Watchdog={:?} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
+        let summary = match &self.active_snapshot {
+            Some(ExecutionSnapshot::Runtime(snapshot)) => format!(
+                "Runtime | Projekt={} | State={:?} | Watchdog={:?} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
                 snapshot.project_name,
                 snapshot.state,
                 snapshot.watchdog_status,
@@ -1939,9 +2380,16 @@ impl DesktopApp {
                 snapshot.metrics.deadline_misses,
                 snapshot.metrics.last_duration_us,
                 snapshot.metrics.last_jitter_us
-            )
-        } else {
-            "Runtime nicht aktiv".to_string()
+            ),
+            Some(ExecutionSnapshot::Simulation(snapshot)) => format!(
+                "Simulation | Projekt={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
+                snapshot.project_name,
+                snapshot.state,
+                snapshot.simulation_time_s,
+                snapshot.metrics.total_cycles,
+                snapshot.metrics.last_duration_us
+            ),
+            None => "Keine aktive Runtime/Simulation".to_string(),
         };
 
         container(row![start_button, stop_button, text(summary).size(14)].spacing(12))
@@ -2005,19 +2453,16 @@ impl DesktopApp {
     }
 
     fn current_page_view(&self) -> Element<'_, Message> {
-        let runtime_running = self.runtime_snapshot.is_some();
+        let execution_active = self.execution_active();
         match self.selected_page {
-            SetupPage::Communication => self.communication_editor_view(runtime_running),
-            SetupPage::Watchdog => self.watchdog_editor_view(runtime_running),
-            SetupPage::Io => self.io_editor_view(runtime_running),
-            SetupPage::Limits => self.limits_editor_view(runtime_running),
-            SetupPage::Model => self.model_editor_view(runtime_running),
-            SetupPage::Logic => self.logic_editor_view(runtime_running),
-            SetupPage::Timing => self.control_function_tests_view(runtime_running),
-            SetupPage::Simulation => self.placeholder_page_view(
-                SetupPage::Simulation,
-                "Optional in V1: Reglersimulation kann ausgelassen werden. Umsetzung und UI folgen in einem späteren Schritt.",
-            ),
+            SetupPage::Communication => self.communication_editor_view(execution_active),
+            SetupPage::Watchdog => self.watchdog_editor_view(execution_active),
+            SetupPage::Io => self.io_editor_view(execution_active),
+            SetupPage::Limits => self.limits_editor_view(execution_active),
+            SetupPage::Model => self.model_editor_view(execution_active),
+            SetupPage::Logic => self.logic_editor_view(execution_active),
+            SetupPage::Timing => self.control_function_tests_view(execution_active),
+            SetupPage::Simulation => self.simulation_editor_view(),
             SetupPage::Deployment => self.placeholder_page_view(
                 SetupPage::Deployment,
                 "Hier folgt ein Deployment-Assistent (Install/Start/Stop) für Windows-Service-Betrieb.",
@@ -2072,7 +2517,7 @@ impl DesktopApp {
 
         let mut content = column![
             text("Define Model").size(24),
-            text("Optional continuous-time state-space setup. The configured model is stored in project.toml and is not executed by runtime or simulation in this iteration.")
+            text("Optional continuous-time state-space setup. The configured model is stored in project.toml and is used by the offline controller simulation.")
                 .size(14),
             row![
                 text("Model type").width(Length::Fixed(120.0)),
@@ -2090,7 +2535,7 @@ impl DesktopApp {
 
         if runtime_running {
             content = content.push(
-                text("Runtime is running: stop it before changing the stored model.").size(13),
+                text("Runtime oder Simulation läuft: erst stoppen, dann Modell ändern.").size(13),
             );
         }
 
@@ -2181,6 +2626,300 @@ impl DesktopApp {
         .into()
     }
 
+    fn simulation_editor_view(&self) -> Element<'_, Message> {
+        let model_preview = build_model_preview(&self.model_editor, &self.variables);
+        let simulation_running = self.simulation_running();
+        let execution_active = self.execution_active();
+        let structural_editable = !execution_active;
+        let live_editable = simulation_running;
+        let can_start = self.selected_project.is_some() && !execution_active;
+        let can_stop = simulation_running;
+        let can_save = self.selected_project.is_some() && !execution_active;
+
+        let start_button = if can_start {
+            button("Simulation Start").on_press(Message::StartSimulationPressed)
+        } else {
+            button("Simulation Start")
+        };
+        let stop_button = if can_stop {
+            button("Simulation Stop").on_press(Message::StopSimulationPressed)
+        } else {
+            button("Simulation Stop")
+        };
+        let save_button = if can_save {
+            button("Simulation speichern").on_press(Message::SaveSimulationPressed)
+        } else {
+            button("Simulation speichern")
+        };
+
+        let summary = match &self.active_snapshot {
+            Some(ExecutionSnapshot::Simulation(snapshot)) => format!(
+                "Simulation aktiv | Projekt={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
+                snapshot.project_name,
+                snapshot.state,
+                snapshot.simulation_time_s,
+                snapshot.metrics.total_cycles,
+                snapshot.metrics.last_duration_us
+            ),
+            Some(ExecutionSnapshot::Runtime(snapshot)) => format!(
+                "Runtime aktiv | Projekt={} | State={:?}",
+                snapshot.project_name, snapshot.state
+            ),
+            None => "Simulation nicht aktiv".to_string(),
+        };
+
+        let mut content = column![
+            text("Simulate Controller").size(24),
+            text("Offline closed-loop simulation from the stored continuous-time state-space model. No OPC-UA is used.").size(14),
+            row![start_button, stop_button, save_button, text(summary).size(13)]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+        ]
+        .spacing(12);
+
+        if matches!(self.active_snapshot, Some(ExecutionSnapshot::Runtime(_))) {
+            content =
+                content.push(text("Runtime läuft: Für Simulation erst Runtime stoppen.").size(13));
+        }
+
+        if model_preview.is_none() {
+            content = content.push(
+                container(
+                    column![
+                        text("Zuerst ein lineares Zustandsraummodell definieren.").size(16),
+                        text("Die Simulation benötigt das gespeicherte A/B/C/D-Modell aus \"Define Model\".")
+                            .size(14),
+                    ]
+                    .spacing(8),
+                )
+                .padding(12),
+            );
+        } else {
+            let speed_control: Element<'_, Message> = if structural_editable {
+                pick_list(
+                    SIMULATION_SPEED_OPTIONS,
+                    Some(self.simulation_editor.speed),
+                    Message::SimulationSpeedChanged,
+                )
+                .width(Length::Fixed(220.0))
+                .into()
+            } else {
+                text(self.simulation_editor.speed.to_string())
+                    .size(15)
+                    .into()
+            };
+
+            content = content.push(
+                row![
+                    text("Simulation speed").width(Length::Fixed(140.0)),
+                    speed_control,
+                    text(if simulation_running {
+                        "Live edits allowed: setpoints, disturbances, offsets, noise, A/B scales"
+                    } else {
+                        "Speed and initial conditions apply on next start"
+                    })
+                    .size(13),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            );
+
+            content = content
+                .push(self.simulation_named_rows_section(
+                    "Live setpoints",
+                    "cv",
+                    "soll",
+                    &self.simulation_editor.cv_setpoints,
+                    structural_editable || live_editable,
+                    Message::SimulationCvSetpointChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "Initial CV values",
+                    "cv",
+                    "ist",
+                    &self.simulation_editor.cv_initials,
+                    structural_editable,
+                    Message::SimulationCvInitialChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "Initial MV values",
+                    "mv",
+                    "read",
+                    &self.simulation_editor.mv_initials,
+                    structural_editable,
+                    Message::SimulationMvInitialChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "Initial DV values",
+                    "dv",
+                    "read",
+                    &self.simulation_editor.dv_initials,
+                    structural_editable,
+                    Message::SimulationDvInitialChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "DV disturbances",
+                    "dv",
+                    "read",
+                    &self.simulation_editor.dv_disturbances,
+                    structural_editable || live_editable,
+                    Message::SimulationDvDisturbanceChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "CV offsets",
+                    "cv",
+                    "offset",
+                    &self.simulation_editor.cv_offsets,
+                    structural_editable || live_editable,
+                    Message::SimulationCvOffsetChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "CV noise std",
+                    "cv",
+                    "noise_std",
+                    &self.simulation_editor.cv_noise_std,
+                    structural_editable || live_editable,
+                    Message::SimulationCvNoiseChanged,
+                ))
+                .push(self.simulation_named_rows_section(
+                    "MV noise std",
+                    "mv",
+                    "noise_std",
+                    &self.simulation_editor.mv_noise_std,
+                    structural_editable || live_editable,
+                    Message::SimulationMvNoiseChanged,
+                ))
+                .push(
+                    self.simulation_scale_matrix_view(
+                        MatrixKey::A,
+                        "A scale (%)",
+                        &self.simulation_editor.a_scale_cells,
+                        structural_editable || live_editable,
+                        build_state_labels(
+                            model_preview
+                                .as_ref()
+                                .and_then(ModelConfig::linear_state_space)
+                                .map(|model| model.state_count)
+                                .unwrap_or_default(),
+                        ),
+                        build_state_labels(
+                            model_preview
+                                .as_ref()
+                                .and_then(ModelConfig::linear_state_space)
+                                .map(|model| model.state_count)
+                                .unwrap_or_default(),
+                        ),
+                    ),
+                )
+                .push(
+                    self.simulation_scale_matrix_view(
+                        MatrixKey::B,
+                        "B scale (%)",
+                        &self.simulation_editor.b_scale_cells,
+                        structural_editable || live_editable,
+                        build_state_labels(
+                            model_preview
+                                .as_ref()
+                                .and_then(ModelConfig::linear_state_space)
+                                .map(|model| model.state_count)
+                                .unwrap_or_default(),
+                        ),
+                        model_preview
+                            .as_ref()
+                            .and_then(ModelConfig::linear_state_space)
+                            .map(|model| model.u_order.clone())
+                            .unwrap_or_default(),
+                    ),
+                );
+        }
+
+        container(
+            scrollable(content)
+                .direction(iced::widget::scrollable::Direction::Both {
+                    vertical: iced::widget::scrollable::Scrollbar::new(),
+                    horizontal: iced::widget::scrollable::Scrollbar::new(),
+                })
+                .height(Length::Fill),
+        )
+        .padding(12)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn simulation_named_rows_section<F>(
+        &self,
+        title: &str,
+        prefix: &str,
+        suffix: &str,
+        rows: &[SimulationNamedValueRow],
+        editable: bool,
+        on_change: F,
+    ) -> Element<'_, Message>
+    where
+        F: Fn(usize, String) -> Message + Copy + 'static,
+    {
+        let mut content = column![text(title.to_string()).size(18)].spacing(8);
+        for (index, row_data) in rows.iter().enumerate() {
+            let signal = format!("{}.{}.{}", prefix, row_data.name, suffix);
+            let value_input = if editable {
+                text_input("0.0", &row_data.value)
+                    .on_input(move |value| on_change(index, value))
+                    .width(Length::FillPortion(2))
+            } else {
+                text_input("0.0", &row_data.value).width(Length::FillPortion(2))
+            };
+            content = content.push(
+                row![text(signal).width(Length::FillPortion(3)), value_input,]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+            );
+        }
+
+        container(content).padding(12).into()
+    }
+
+    fn simulation_scale_matrix_view(
+        &self,
+        matrix: MatrixKey,
+        title: &str,
+        cells: &[Vec<String>],
+        editable: bool,
+        row_labels: Vec<String>,
+        col_labels: Vec<String>,
+    ) -> Element<'_, Message> {
+        let mut grid = column![].spacing(6);
+        let mut header = row![text("").width(Length::Fixed(100.0))].spacing(6);
+        for label in &col_labels {
+            header = header.push(text(label.clone()).width(Length::Fixed(90.0)));
+        }
+        grid = grid.push(header);
+
+        for (row_index, row_label) in row_labels.iter().enumerate() {
+            let mut row_view = row![text(row_label.clone()).width(Length::Fixed(100.0))].spacing(6);
+            if let Some(row_cells) = cells.get(row_index) {
+                for (col_index, value) in row_cells.iter().enumerate() {
+                    let input = if editable {
+                        text_input("100.0", value)
+                            .on_input(move |next| {
+                                Message::SimulationScaleCellChanged(
+                                    matrix, row_index, col_index, next,
+                                )
+                            })
+                            .width(Length::Fixed(90.0))
+                    } else {
+                        text_input("100.0", value).width(Length::Fixed(90.0))
+                    };
+                    row_view = row_view.push(input);
+                }
+            }
+            grid = grid.push(row_view);
+        }
+
+        container(column![text(title.to_string()).size(18), scrollable(grid)].spacing(10))
+            .padding(12)
+            .into()
+    }
+
     fn matrix_editor_card_view(
         &self,
         matrix: MatrixKey,
@@ -2266,7 +3005,7 @@ impl DesktopApp {
         };
 
         let runtime_hint = if runtime_running {
-            "Runtime läuft: Offline-Tests sind erst nach Stop verfügbar."
+            "Ausführung läuft: Offline-Tests sind erst nach Stop verfügbar."
         } else {
             "Die aktive Regellogik wird offline geprüft. Bei großen Räumen wird automatisch auf Einzel-Sweeps pro Dimension zurückgefallen."
         };
@@ -2477,7 +3216,7 @@ impl DesktopApp {
         };
 
         let runtime_hint = if runtime_running {
-            "Runtime läuft: Für Kommunikations-Änderungen erst stoppen."
+            "Ausführung läuft: Für Kommunikations-Änderungen erst stoppen."
         } else {
             ""
         };
@@ -2540,7 +3279,7 @@ impl DesktopApp {
                 text("Typ").width(Length::Fixed(70.0)),
                 kind_pick,
                 text(if runtime_running {
-                    "Runtime läuft: Speichern deaktiviert"
+                    "Ausführung läuft: Speichern deaktiviert"
                 } else {
                     ""
                 })
@@ -2683,7 +3422,7 @@ impl DesktopApp {
         };
 
         let hint = if runtime_running {
-            text("Runtime läuft: Für strukturelle Änderungen erst stoppen.").size(13)
+            text("Ausführung läuft: Für strukturelle Änderungen erst stoppen.").size(13)
         } else {
             text("").size(13)
         };
@@ -2934,7 +3673,7 @@ impl DesktopApp {
         };
 
         let hint = if runtime_running {
-            text("Runtime läuft: Für strukturelle Änderungen erst stoppen.").size(13)
+            text("Ausführung läuft: Für strukturelle Änderungen erst stoppen.").size(13)
         } else {
             text("").size(13)
         };
@@ -3115,7 +3854,7 @@ impl DesktopApp {
     }
 
     fn params_view(&self) -> Element<'_, Message> {
-        let runtime_running = self.runtime_snapshot.is_some();
+        let execution_active = self.execution_active();
         let mut content = column![text("Online Parameter").size(20)].spacing(10);
 
         if self.has_configured_variables() {
@@ -3146,7 +3885,7 @@ impl DesktopApp {
                     .unwrap_or_else(|| format_logic_param_value(&current));
                 let key_clone = key.clone();
 
-                let apply_button = if runtime_running {
+                let apply_button = if execution_active {
                     button("Apply").on_press(Message::ApplyParamPressed(key_clone))
                 } else {
                     button("Apply")
@@ -3303,6 +4042,11 @@ impl DesktopApp {
             cvs: cvs.clone(),
             dvs: dvs.clone(),
         };
+        self.model_editor.resize_matrices_for(&self.variables);
+        self.simulation_editor.resize_for(
+            &self.variables,
+            build_model_preview(&self.model_editor, &self.variables).as_ref(),
+        );
         self.mv_io_rows = sync_mv_rows(&mvs, &self.mv_io_rows);
         self.cv_io_rows = sync_cv_rows(&cvs, &self.cv_io_rows);
         self.dv_io_rows = sync_dv_rows(&dvs, &self.dv_io_rows);
@@ -3452,6 +4196,11 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             })?;
             let communication = CommunicationEditorState::from_config(&cfg.communication);
             let model_editor = ModelEditorState::from_config(cfg.model.as_ref(), &cfg.variables);
+            let simulation_editor = SimulationEditorState::from_config(
+                &cfg.simulation,
+                &cfg.variables,
+                cfg.model.as_ref(),
+            );
             let logic_editor = LogicEditorState::from_config(&cfg.logic, &cfg.io);
             let control_function_tests =
                 ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
@@ -3512,6 +4261,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 config_params: cfg.logic.params.clone(),
                 logic_editor,
                 model_editor,
+                simulation_editor,
                 control_function_tests,
                 communication,
                 variables: cfg.variables.clone(),
@@ -3570,6 +4320,36 @@ fn stop_runtime_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
     )
 }
 
+fn start_simulation_task(
+    runtime: Arc<RuntimeManager>,
+    project_service: ProjectService,
+    project_name: String,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            runtime
+                .start_simulation(&project_service, &project_name)
+                .await
+                .map_err(|err| format!("Simulation konnte nicht gestartet werden: {err}"))?;
+            Ok(format!("Simulation für '{}' gestartet", project_name))
+        },
+        Message::SimulationActionFinished,
+    )
+}
+
+fn stop_simulation_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
+    Task::perform(
+        async move {
+            runtime
+                .stop_simulation()
+                .await
+                .map_err(|err| format!("Simulation konnte nicht gestoppt werden: {err}"))?;
+            Ok("Simulation gestoppt".to_string())
+        },
+        Message::SimulationActionFinished,
+    )
+}
+
 fn open_url_task(url: String) -> Task<Message> {
     Task::perform(
         async move {
@@ -3611,9 +4391,9 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
     Task::perform(
         async move {
             let snapshot = runtime
-                .state()
+                .active_state()
                 .await
-                .map_err(|err| format!("Runtime-Status konnte nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("Status konnte nicht gelesen werden: {err}"))?;
 
             if snapshot.is_none() {
                 return Ok(RefreshData {
@@ -3624,11 +4404,11 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             }
 
             let params = runtime
-                .get_params()
+                .active_get_params()
                 .await
-                .map_err(|err| format!("Runtime-Parameter konnten nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("Parameter konnten nicht gelesen werden: {err}"))?;
             let samples = runtime
-                .read_plots(400)
+                .active_read_plots(400)
                 .await
                 .map_err(|err| format!("Plotdaten konnten nicht gelesen werden: {err}"))?;
 
@@ -3654,9 +4434,9 @@ fn set_param_task(
             updates.insert(key.clone(), value);
 
             let params = runtime
-                .set_params(updates.clone())
+                .active_set_params(updates.clone())
                 .await
-                .map_err(|err| format!("Runtime-Parameter konnten nicht gesetzt werden: {err}"))?;
+                .map_err(|err| format!("Parameter konnten nicht gesetzt werden: {err}"))?;
 
             if let Some(project_name) = runtime.active_project().await {
                 project_service
@@ -4056,6 +4836,121 @@ fn save_model_task(
     )
 }
 
+fn save_simulation_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: SimulationEditorState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            cfg.simulation =
+                build_simulation_config_from_editor(&editor, &cfg.variables, cfg.model.as_ref())?;
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Simulation konnte nicht gespeichert werden: {err}"))?;
+
+            Ok(format!("Simulation für '{}' gespeichert", project_name))
+        },
+        Message::SimulationSaved,
+    )
+}
+
+fn save_simulation_live_scalar_task(
+    runtime: Arc<RuntimeManager>,
+    project_service: ProjectService,
+    project_name: String,
+    field: SimulationLiveScalarField,
+    value: f64,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            cfg.normalize_simulation_config();
+            match &field {
+                SimulationLiveScalarField::CvSetpoint(name) => {
+                    cfg.simulation.cv_setpoints.insert(name.clone(), value);
+                }
+                SimulationLiveScalarField::CvNoiseStd(name) => {
+                    cfg.simulation.cv_noise_std.insert(name.clone(), value);
+                }
+                SimulationLiveScalarField::MvNoiseStd(name) => {
+                    cfg.simulation.mv_noise_std.insert(name.clone(), value);
+                }
+                SimulationLiveScalarField::DvDisturbance(name) => {
+                    cfg.simulation.dv_disturbances.insert(name.clone(), value);
+                }
+                SimulationLiveScalarField::CvOffset(name) => {
+                    cfg.simulation.cv_offsets.insert(name.clone(), value);
+                }
+            }
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| {
+                    format!("Live-Simulationswert konnte nicht gespeichert werden: {err}")
+                })?;
+            runtime
+                .apply_simulation_live_config(cfg.simulation.clone())
+                .await
+                .map_err(|err| {
+                    format!("Live-Simulationswert konnte nicht übernommen werden: {err}")
+                })?;
+
+            Ok(format!("Live-Simulationswert aktualisiert"))
+        },
+        Message::SimulationLiveUpdated,
+    )
+}
+
+fn save_simulation_live_matrix_task(
+    runtime: Arc<RuntimeManager>,
+    project_service: ProjectService,
+    project_name: String,
+    matrix: MatrixKey,
+    row_index: usize,
+    col_index: usize,
+    value: f64,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            cfg.normalize_simulation_config();
+            let cells = match matrix {
+                MatrixKey::A => &mut cfg.simulation.a_scale_pct,
+                MatrixKey::B => &mut cfg.simulation.b_scale_pct,
+                MatrixKey::C | MatrixKey::D => {
+                    return Err("Nur A/B-Skalierung ist für die Simulation erlaubt".to_string());
+                }
+            };
+            let Some(row) = cells.get_mut(row_index) else {
+                return Err("Live-Skalierungszeile außerhalb des Modells".to_string());
+            };
+            let Some(cell) = row.get_mut(col_index) else {
+                return Err("Live-Skalierungsspalte außerhalb des Modells".to_string());
+            };
+            *cell = value;
+
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| format!("Live-Skalierung konnte nicht gespeichert werden: {err}"))?;
+            runtime
+                .apply_simulation_live_config(cfg.simulation.clone())
+                .await
+                .map_err(|err| format!("Live-Skalierung konnte nicht übernommen werden: {err}"))?;
+
+            Ok("Live-Skalierung aktualisiert".to_string())
+        },
+        Message::SimulationLiveUpdated,
+    )
+}
+
 fn build_model_config_from_editor(
     editor: &ModelEditorState,
     vars: &VariableCatalogConfig,
@@ -4091,6 +4986,37 @@ fn build_model_config_from_editor(
             }))
         }
     }
+}
+
+fn build_simulation_config_from_editor(
+    editor: &SimulationEditorState,
+    _vars: &VariableCatalogConfig,
+    model: Option<&ModelConfig>,
+) -> Result<SimulationConfig, String> {
+    let linear_model = model.and_then(ModelConfig::linear_state_space);
+    let (a_rows, a_cols, b_rows, b_cols) = match linear_model {
+        Some(model) => (
+            model.state_count,
+            model.state_count,
+            model.state_count,
+            model.u_order.len(),
+        ),
+        None => (0, 0, 0, 0),
+    };
+
+    Ok(SimulationConfig {
+        speed: editor.speed.into(),
+        cv_setpoints: parse_named_value_rows("cv setpoint", &editor.cv_setpoints, false)?,
+        cv_initials: parse_named_value_rows("cv initial", &editor.cv_initials, false)?,
+        mv_initials: parse_named_value_rows("mv initial", &editor.mv_initials, false)?,
+        dv_initials: parse_named_value_rows("dv initial", &editor.dv_initials, false)?,
+        cv_noise_std: parse_named_value_rows("cv noise", &editor.cv_noise_std, true)?,
+        mv_noise_std: parse_named_value_rows("mv noise", &editor.mv_noise_std, true)?,
+        dv_disturbances: parse_named_value_rows("dv disturbance", &editor.dv_disturbances, false)?,
+        cv_offsets: parse_named_value_rows("cv offset", &editor.cv_offsets, false)?,
+        a_scale_pct: parse_numeric_matrix("A scale", &editor.a_scale_cells, a_rows, a_cols)?,
+        b_scale_pct: parse_numeric_matrix("B scale", &editor.b_scale_cells, b_rows, b_cols)?,
+    })
 }
 
 fn parse_numeric_matrix(
@@ -5297,6 +6223,13 @@ fn format_named_vector(names: &[String]) -> String {
     }
 }
 
+fn build_model_preview(
+    editor: &ModelEditorState,
+    vars: &VariableCatalogConfig,
+) -> Option<ModelConfig> {
+    build_model_config_from_editor(editor, vars).ok().flatten()
+}
+
 fn matrix_to_string_cells(matrix: &[Vec<f64>]) -> Vec<Vec<String>> {
     matrix
         .iter()
@@ -5318,6 +6251,103 @@ fn resize_string_matrix(matrix: Vec<Vec<String>>, rows: usize, cols: usize) -> V
     }
 
     resized
+}
+
+fn fill_empty_cells(cells: &mut [Vec<String>], value: &str) {
+    for row in cells {
+        for cell in row {
+            if cell.trim().is_empty() {
+                *cell = value.to_string();
+            }
+        }
+    }
+}
+
+fn named_value_rows(
+    names: &[String],
+    values: &HashMap<String, f64>,
+) -> Vec<SimulationNamedValueRow> {
+    names
+        .iter()
+        .map(|name| {
+            SimulationNamedValueRow::from_named_value(
+                name.clone(),
+                values.get(name).copied().unwrap_or(0.0),
+            )
+        })
+        .collect()
+}
+
+fn sync_named_value_rows(rows: &mut Vec<SimulationNamedValueRow>, names: &[String]) {
+    let existing: HashMap<_, _> = rows
+        .iter()
+        .map(|row| (row.name.clone(), row.value.clone()))
+        .collect();
+    *rows = names
+        .iter()
+        .map(|name| SimulationNamedValueRow {
+            name: name.clone(),
+            value: existing
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "0.0".to_string()),
+        })
+        .collect();
+}
+
+fn parse_named_value_rows(
+    label: &str,
+    rows: &[SimulationNamedValueRow],
+    require_non_negative: bool,
+) -> Result<HashMap<String, f64>, String> {
+    let mut values = HashMap::new();
+    for row in rows {
+        let parsed = row
+            .value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{} '{}' ist keine gültige Zahl", label, row.name))?;
+        if !parsed.is_finite() {
+            return Err(format!("{} '{}' muss endlich sein", label, row.name));
+        }
+        if require_non_negative && parsed < 0.0 {
+            return Err(format!("{} '{}' muss >= 0 sein", label, row.name));
+        }
+        values.insert(row.name.clone(), parsed);
+    }
+    Ok(values)
+}
+
+fn parse_live_simulation_scalar(
+    field: &SimulationLiveScalarField,
+    raw: &str,
+) -> Result<f64, String> {
+    let parsed = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "draft value is not yet a valid number".to_string())?;
+    if !parsed.is_finite() {
+        return Err("draft value must be finite".to_string());
+    }
+    match field {
+        SimulationLiveScalarField::CvNoiseStd(_) | SimulationLiveScalarField::MvNoiseStd(_)
+            if parsed < 0.0 =>
+        {
+            Err("noise std must be >= 0".to_string())
+        }
+        _ => Ok(parsed),
+    }
+}
+
+fn parse_live_simulation_matrix_value(raw: &str) -> Result<f64, String> {
+    let parsed = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "draft value is not yet a valid number".to_string())?;
+    if !parsed.is_finite() {
+        return Err("draft value must be finite".to_string());
+    }
+    Ok(parsed)
 }
 
 fn parse_matrix_import_text(

@@ -7,6 +7,7 @@ pub mod model;
 pub mod project;
 pub mod project_config;
 pub mod runtime;
+pub mod simulation;
 pub mod storage;
 pub mod types;
 pub mod virtual_hardware;

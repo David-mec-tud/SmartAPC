@@ -19,6 +19,8 @@ pub struct ProjectConfig {
     pub logic: LogicConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
+    #[serde(default)]
+    pub simulation: SimulationConfig,
     pub runtime: RuntimeConfig,
     pub alarms: AlarmConfig,
     pub deployment: DeploymentConfig,
@@ -40,6 +42,7 @@ impl ProjectConfig {
             limits: LimitsConfig::default(),
             logic: LogicConfig::default(),
             model: None,
+            simulation: SimulationConfig::default(),
             runtime: RuntimeConfig::default(),
             alarms: AlarmConfig::default(),
             plots: PlotConfig::default(),
@@ -56,6 +59,8 @@ impl ProjectConfig {
         if let Some(model) = &self.model {
             model.validate(&self.variables)?;
         }
+        self.simulation
+            .validate(self.model.as_ref(), &self.variables)?;
         self.plots.validate()?;
 
         if self.runtime.cycle_ms < 1_000 {
@@ -125,6 +130,11 @@ impl ProjectConfig {
             .and_then(|model| model.normalized_for(&self.variables));
     }
 
+    pub fn normalize_simulation_config(&mut self) {
+        let simulation = std::mem::take(&mut self.simulation);
+        self.simulation = simulation.normalized_for(&self.variables, self.model.as_ref());
+    }
+
     pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
         let (io, limits) = self
             .io_definition
@@ -132,6 +142,149 @@ impl ProjectConfig {
         self.io = io;
         self.limits = limits;
         Ok(())
+    }
+
+    pub fn build_simulation_io_and_limits(&self) -> Result<(IoConfig, LimitsConfig)> {
+        if !self.variables.has_any() {
+            bail!("simulation requires configured MV/CV/DV names");
+        }
+        if !self.io_definition.is_complete_for(&self.variables) {
+            bail!("simulation requires a complete I/O definition");
+        }
+
+        let io = self.build_simulation_logic_io()?;
+        let mut limits = HashMap::new();
+
+        for name in &self.variables.mvs {
+            let row = self
+                .io_definition
+                .mvs
+                .iter()
+                .find(|row| row.name == *name)
+                .expect("checked by is_complete_for");
+
+            let (Some(ll), Some(hl)) = (row.ll, row.hl) else {
+                bail!("simulation requires numeric MV limits for '{}'", name);
+            };
+            limits.insert(
+                format!("mv.{}.write", name),
+                NumericLimit {
+                    min: ll,
+                    max: hl,
+                    opc_tag: None,
+                },
+            );
+        }
+
+        Ok((io, LimitsConfig { values: limits }))
+    }
+
+    pub fn validate_for_simulation(&self) -> Result<()> {
+        let Some(model) = self.model.as_ref() else {
+            bail!("simulation requires a configured model");
+        };
+        model.validate(&self.variables)?;
+        if model.linear_state_space().is_none() {
+            bail!("simulation requires a linear state-space model");
+        }
+
+        let (io, limits) = self.build_simulation_io_and_limits()?;
+        self.logic.validate(&io)?;
+        limits.validate()?;
+        Ok(())
+    }
+
+    fn build_simulation_logic_io(&self) -> Result<IoConfig> {
+        let has_runtime_contract = !self.io.inputs.is_empty() || !self.io.outputs.is_empty();
+        if has_runtime_contract {
+            if self.logic.is_configured_for(&self.io) {
+                return Ok(self.io.clone());
+            }
+            bail!("selected logic is not configured for current runtime I/O definition");
+        }
+
+        match self.logic.kind {
+            LogicKind::PController => Ok(self.build_minimal_p_controller_simulation_io()),
+            LogicKind::CustomRust => self.build_minimal_custom_rust_simulation_io(),
+        }
+    }
+
+    fn build_minimal_p_controller_simulation_io(&self) -> IoConfig {
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        let mut input_names = HashSet::new();
+        let mut output_names = HashSet::new();
+
+        for pair in &self.logic.p_controller.pairs {
+            let soll = format!("cv.{}.soll", pair.cv);
+            if input_names.insert(soll.clone()) {
+                inputs.push(simulation_signal_point(soll, SignalType::F64));
+            }
+
+            let ist = format!("cv.{}.ist", pair.cv);
+            if input_names.insert(ist.clone()) {
+                inputs.push(simulation_signal_point(ist, SignalType::F64));
+            }
+
+            let write = format!("mv.{}.write", pair.mv);
+            if output_names.insert(write.clone()) {
+                outputs.push(simulation_signal_point(write, SignalType::F64));
+            }
+        }
+
+        IoConfig { inputs, outputs }
+    }
+
+    fn build_minimal_custom_rust_simulation_io(&self) -> Result<IoConfig> {
+        if !self.logic.custom_rust.compatible {
+            bail!("custom_rust strategy is not marked compatible");
+        }
+        if self.logic.custom_rust.required_outputs.is_empty() {
+            bail!("custom_rust strategy has no required outputs");
+        }
+
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        let mut input_names = HashSet::new();
+        let mut output_names = HashSet::new();
+
+        for name in &self.logic.custom_rust.required_inputs {
+            let signal_name = name.trim();
+            if signal_name.is_empty() || !input_names.insert(signal_name.to_string()) {
+                continue;
+            }
+            let signal_type = self
+                .io
+                .inputs
+                .iter()
+                .find(|point| point.name == signal_name)
+                .map(|point| point.signal_type)
+                .unwrap_or_else(|| infer_simulation_signal_type(signal_name));
+            inputs.push(simulation_signal_point(
+                signal_name.to_string(),
+                signal_type,
+            ));
+        }
+
+        for name in &self.logic.custom_rust.required_outputs {
+            let signal_name = name.trim();
+            if signal_name.is_empty() || !output_names.insert(signal_name.to_string()) {
+                continue;
+            }
+            let signal_type = self
+                .io
+                .outputs
+                .iter()
+                .find(|point| point.name == signal_name)
+                .map(|point| point.signal_type)
+                .unwrap_or_else(|| infer_simulation_signal_type(signal_name));
+            outputs.push(simulation_signal_point(
+                signal_name.to_string(),
+                signal_type,
+            ));
+        }
+
+        Ok(IoConfig { inputs, outputs })
     }
 
     pub fn sync_active_online_params(&mut self) {
@@ -241,7 +394,7 @@ impl ProjectConfig {
                 "Control Function Tests",
                 self.logic.is_configured_for(&self.io),
             ),
-            SidebarTask::new("simulation", "Reglersimulation (optional)", true),
+            SidebarTask::new("simulation", "Simulate Controller (optional)", true),
             SidebarTask::new(
                 "deployment",
                 "Deployment konfigurieren",
@@ -719,6 +872,23 @@ fn optional_trimmed(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn simulation_signal_point(name: String, signal_type: SignalType) -> SignalPoint {
+    SignalPoint {
+        name: name.clone(),
+        signal_type,
+        address: format!("sim://{}", name.replace('.', "/")),
+        opc_tag: None,
+    }
+}
+
+fn infer_simulation_signal_type(name: &str) -> SignalType {
+    if name.ends_with(".enable") {
+        SignalType::Bool
+    } else {
+        SignalType::F64
     }
 }
 
@@ -1240,6 +1410,160 @@ impl LinearStateSpaceModelConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulationSpeedMode {
+    #[default]
+    RealTime,
+    X0_1,
+    X0_5,
+    X10,
+    X20,
+    X50,
+    X100,
+    AsFastAsPossible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationConfig {
+    #[serde(default)]
+    pub speed: SimulationSpeedMode,
+    #[serde(default)]
+    pub cv_setpoints: HashMap<String, f64>,
+    #[serde(default)]
+    pub cv_initials: HashMap<String, f64>,
+    #[serde(default)]
+    pub mv_initials: HashMap<String, f64>,
+    #[serde(default)]
+    pub dv_initials: HashMap<String, f64>,
+    #[serde(default)]
+    pub cv_noise_std: HashMap<String, f64>,
+    #[serde(default)]
+    pub mv_noise_std: HashMap<String, f64>,
+    #[serde(default)]
+    pub dv_disturbances: HashMap<String, f64>,
+    #[serde(default)]
+    pub cv_offsets: HashMap<String, f64>,
+    #[serde(default)]
+    pub a_scale_pct: Vec<Vec<f64>>,
+    #[serde(default)]
+    pub b_scale_pct: Vec<Vec<f64>>,
+}
+
+impl Default for SimulationConfig {
+    fn default() -> Self {
+        Self {
+            speed: SimulationSpeedMode::RealTime,
+            cv_setpoints: HashMap::new(),
+            cv_initials: HashMap::new(),
+            mv_initials: HashMap::new(),
+            dv_initials: HashMap::new(),
+            cv_noise_std: HashMap::new(),
+            mv_noise_std: HashMap::new(),
+            dv_disturbances: HashMap::new(),
+            cv_offsets: HashMap::new(),
+            a_scale_pct: Vec::new(),
+            b_scale_pct: Vec::new(),
+        }
+    }
+}
+
+impl SimulationConfig {
+    fn normalized_for(self, vars: &VariableCatalogConfig, model: Option<&ModelConfig>) -> Self {
+        let (a_rows, a_cols, b_rows, b_cols) = match model.and_then(ModelConfig::linear_state_space)
+        {
+            Some(model) => (
+                model.state_count,
+                model.state_count,
+                model.state_count,
+                model.u_order.len(),
+            ),
+            None => (0, 0, 0, 0),
+        };
+
+        Self {
+            speed: self.speed,
+            cv_setpoints: normalize_named_f64_map(self.cv_setpoints, &vars.cvs, 0.0),
+            cv_initials: normalize_named_f64_map(self.cv_initials, &vars.cvs, 0.0),
+            mv_initials: normalize_named_f64_map(self.mv_initials, &vars.mvs, 0.0),
+            dv_initials: normalize_named_f64_map(self.dv_initials, &vars.dvs, 0.0),
+            cv_noise_std: normalize_named_f64_map(self.cv_noise_std, &vars.cvs, 0.0),
+            mv_noise_std: normalize_named_f64_map(self.mv_noise_std, &vars.mvs, 0.0),
+            dv_disturbances: normalize_named_f64_map(self.dv_disturbances, &vars.dvs, 0.0),
+            cv_offsets: normalize_named_f64_map(self.cv_offsets, &vars.cvs, 0.0),
+            a_scale_pct: resize_matrix_fill(self.a_scale_pct, a_rows, a_cols, 100.0),
+            b_scale_pct: resize_matrix_fill(self.b_scale_pct, b_rows, b_cols, 100.0),
+        }
+    }
+
+    fn validate(&self, model: Option<&ModelConfig>, vars: &VariableCatalogConfig) -> Result<()> {
+        validate_named_f64_values(
+            "simulation.cv_setpoints",
+            &self.cv_setpoints,
+            &vars.cvs,
+            false,
+        )?;
+        validate_named_f64_values(
+            "simulation.cv_initials",
+            &self.cv_initials,
+            &vars.cvs,
+            false,
+        )?;
+        validate_named_f64_values(
+            "simulation.mv_initials",
+            &self.mv_initials,
+            &vars.mvs,
+            false,
+        )?;
+        validate_named_f64_values(
+            "simulation.dv_initials",
+            &self.dv_initials,
+            &vars.dvs,
+            false,
+        )?;
+        validate_named_f64_values(
+            "simulation.cv_noise_std",
+            &self.cv_noise_std,
+            &vars.cvs,
+            true,
+        )?;
+        validate_named_f64_values(
+            "simulation.mv_noise_std",
+            &self.mv_noise_std,
+            &vars.mvs,
+            true,
+        )?;
+        validate_named_f64_values(
+            "simulation.dv_disturbances",
+            &self.dv_disturbances,
+            &vars.dvs,
+            false,
+        )?;
+        validate_named_f64_values("simulation.cv_offsets", &self.cv_offsets, &vars.cvs, false)?;
+
+        let Some(model) = model.and_then(ModelConfig::linear_state_space) else {
+            if !self.a_scale_pct.is_empty() || !self.b_scale_pct.is_empty() {
+                bail!("simulation.a_scale_pct and simulation.b_scale_pct require a linear model");
+            }
+            return Ok(());
+        };
+
+        validate_matrix_finite(
+            "simulation.a_scale_pct",
+            &self.a_scale_pct,
+            model.state_count,
+            model.state_count,
+        )?;
+        validate_matrix_finite(
+            "simulation.b_scale_pct",
+            &self.b_scale_pct,
+            model.state_count,
+            model.u_order.len(),
+        )?;
+        Ok(())
+    }
+}
+
 fn linear_model_u_order(vars: &VariableCatalogConfig) -> Vec<String> {
     vars.mvs
         .iter()
@@ -1285,8 +1609,32 @@ fn validate_matrix(name: &str, matrix: &[Vec<f64>], rows: usize, cols: usize) ->
     Ok(())
 }
 
+fn validate_matrix_finite(name: &str, matrix: &[Vec<f64>], rows: usize, cols: usize) -> Result<()> {
+    if matrix.len() != rows {
+        bail!("{name} must have shape {}x{}", rows, cols);
+    }
+
+    for (row_index, row) in matrix.iter().enumerate() {
+        if row.len() != cols {
+            bail!("{name}[{}] must have {} columns", row_index, cols);
+        }
+
+        for value in row {
+            if !value.is_finite() {
+                bail!("{name} must contain only finite numbers");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn resize_matrix_overlap(matrix: Vec<Vec<f64>>, rows: usize, cols: usize) -> Vec<Vec<f64>> {
-    let mut resized = vec![vec![0.0; cols]; rows];
+    resize_matrix_fill(matrix, rows, cols, 0.0)
+}
+
+fn resize_matrix_fill(matrix: Vec<Vec<f64>>, rows: usize, cols: usize, fill: f64) -> Vec<Vec<f64>> {
+    let mut resized = vec![vec![fill; cols]; rows];
 
     for (row_index, row) in matrix.into_iter().enumerate().take(rows) {
         for (col_index, value) in row.into_iter().enumerate().take(cols) {
@@ -1295,6 +1643,39 @@ fn resize_matrix_overlap(matrix: Vec<Vec<f64>>, rows: usize, cols: usize) -> Vec
     }
 
     resized
+}
+
+fn normalize_named_f64_map(
+    values: HashMap<String, f64>,
+    names: &[String],
+    default: f64,
+) -> HashMap<String, f64> {
+    let mut normalized = HashMap::new();
+    for name in names {
+        normalized.insert(name.clone(), values.get(name).copied().unwrap_or(default));
+    }
+    normalized
+}
+
+fn validate_named_f64_values(
+    field: &str,
+    values: &HashMap<String, f64>,
+    allowed_names: &[String],
+    require_non_negative: bool,
+) -> Result<()> {
+    let allowed: HashSet<_> = allowed_names.iter().map(|name| name.as_str()).collect();
+    for (name, value) in values {
+        if !allowed.contains(name.as_str()) {
+            bail!("{field} references unknown variable '{}'", name);
+        }
+        if !value.is_finite() {
+            bail!("{field} must contain only finite numbers");
+        }
+        if require_non_negative && *value < 0.0 {
+            bail!("{field} must be >= 0");
+        }
+    }
+    Ok(())
 }
 
 fn remap_matrix_rows(
@@ -1446,6 +1827,7 @@ impl DeploymentConfig {
 pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
     let mut cfg: ProjectConfig = toml::from_str(input).context("failed to parse project TOML")?;
     cfg.normalize_model_config();
+    cfg.normalize_simulation_config();
     cfg.validate()?;
     Ok(cfg)
 }
@@ -1454,6 +1836,7 @@ pub fn to_toml_string(cfg: &ProjectConfig) -> Result<String> {
     let mut normalized = cfg.clone();
     normalized.normalize_plot_config();
     normalized.normalize_model_config();
+    normalized.normalize_simulation_config();
     normalized.validate()?;
     toml::to_string_pretty(&normalized).context("failed to encode project TOML")
 }
@@ -1681,8 +2064,175 @@ description = "SmartAPC controller runtime"
 
         assert_eq!(model_task.label, "Define Model (optional)");
         assert!(model_task.configured);
-        assert!(simulation_task.label.contains("optional"));
+        assert_eq!(simulation_task.label, "Simulate Controller (optional)");
         assert!(simulation_task.configured);
+    }
+
+    #[test]
+    fn simulation_normalization_tracks_names_and_resizes_scale_matrices() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+        cfg.simulation.cv_setpoints.insert("y2".to_string(), 2.5);
+        cfg.simulation
+            .cv_setpoints
+            .insert("unused".to_string(), 99.0);
+        cfg.simulation.a_scale_pct = vec![vec![50.0]];
+        cfg.simulation.b_scale_pct = vec![vec![75.0]];
+
+        cfg.normalize_simulation_config();
+
+        assert_eq!(cfg.simulation.cv_setpoints.get("y1"), Some(&0.0));
+        assert_eq!(cfg.simulation.cv_setpoints.get("y2"), Some(&2.5));
+        assert!(!cfg.simulation.cv_setpoints.contains_key("unused"));
+        assert_eq!(cfg.simulation.a_scale_pct.len(), 3);
+        assert_eq!(cfg.simulation.a_scale_pct[0].len(), 3);
+        assert_eq!(cfg.simulation.a_scale_pct[0][0], 50.0);
+        assert_eq!(cfg.simulation.a_scale_pct[2][2], 100.0);
+        assert_eq!(cfg.simulation.b_scale_pct.len(), 3);
+        assert_eq!(cfg.simulation.b_scale_pct[0].len(), 3);
+        assert_eq!(cfg.simulation.b_scale_pct[0][0], 75.0);
+        assert_eq!(cfg.simulation.b_scale_pct[2][2], 100.0);
+
+        cfg.variables.mvs.push("u3".to_string());
+        cfg.variables.cvs.push("y3".to_string());
+        cfg.variables.dvs.push("d2".to_string());
+        cfg.normalize_model_config();
+        cfg.normalize_simulation_config();
+
+        assert_eq!(cfg.simulation.cv_setpoints.get("y3"), Some(&0.0));
+        assert_eq!(cfg.simulation.a_scale_pct.len(), 3);
+        assert_eq!(cfg.simulation.a_scale_pct[0].len(), 3);
+        assert_eq!(cfg.simulation.b_scale_pct.len(), 3);
+        assert_eq!(cfg.simulation.b_scale_pct[0].len(), 5);
+        assert_eq!(cfg.simulation.b_scale_pct[0][0], 75.0);
+        assert_eq!(cfg.simulation.b_scale_pct[2][4], 100.0);
+    }
+
+    #[test]
+    fn simulation_validation_uses_synthetic_io_without_runtime_opc_addresses() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: String::new(),
+            mv_read: String::new(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: String::new(),
+            ist: String::new(),
+            sollband_opc: None,
+            sollband_value: Some(0.0),
+            enable: None,
+        });
+        cfg.logic.kind = LogicKind::PController;
+        cfg.logic.p_controller.pairs.push(PControllerPairConfig {
+            cv: "y1".to_string(),
+            mv: "u1".to_string(),
+            kp: 1.0,
+            bias: 0.0,
+        });
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.normalize_simulation_config();
+
+        let (sim_io, sim_limits) = cfg.build_simulation_io_and_limits().expect("simulation io");
+        let input_names: Vec<_> = sim_io
+            .inputs
+            .iter()
+            .map(|signal| signal.name.as_str())
+            .collect();
+        let output_names: Vec<_> = sim_io
+            .outputs
+            .iter()
+            .map(|signal| signal.name.as_str())
+            .collect();
+        assert_eq!(input_names, vec!["cv.y1.soll", "cv.y1.ist"]);
+        assert_eq!(output_names, vec!["mv.u1.write"]);
+        assert!(sim_limits.values.contains_key("mv.u1.write"));
+        assert!(cfg.validate_for_simulation().is_ok());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn simulation_reuses_runtime_io_contract_for_compatible_custom_logic() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=U1_WRITE".to_string(),
+            mv_read: "ns=2;s=U1_READ".to_string(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(100.0),
+            ll: Some(-100.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: "ns=2;s=Y1_SOLL".to_string(),
+            ist: "ns=2;s=Y1_IST".to_string(),
+            sollband_opc: None,
+            sollband_value: Some(0.0),
+            enable: None,
+        });
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("rebuild runtime io");
+        cfg.logic.kind = LogicKind::CustomRust;
+        cfg.logic.custom_rust.source_path = "logic/custom_strategy/src/lib.rs".to_string();
+        cfg.logic.custom_rust.artifact_path =
+            "logic/custom_strategy/target/release/demo.dll".to_string();
+        cfg.logic.custom_rust.required_inputs = vec![
+            "mv.u1.read".to_string(),
+            "cv.y1.soll".to_string(),
+            "cv.y1.ist".to_string(),
+        ];
+        cfg.logic.custom_rust.required_outputs = vec!["mv.u1.write".to_string()];
+        cfg.logic.custom_rust.compatible = true;
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.normalize_simulation_config();
+
+        let (sim_io, _) = cfg.build_simulation_io_and_limits().expect("simulation io");
+        let input_names: Vec<_> = sim_io
+            .inputs
+            .iter()
+            .map(|signal| signal.name.as_str())
+            .collect();
+        let output_names: Vec<_> = sim_io
+            .outputs
+            .iter()
+            .map(|signal| signal.name.as_str())
+            .collect();
+
+        assert_eq!(input_names, vec!["mv.u1.read", "cv.y1.soll", "cv.y1.ist"]);
+        assert_eq!(output_names, vec!["mv.u1.write"]);
+        assert!(cfg.validate_for_simulation().is_ok());
     }
 
     #[test]

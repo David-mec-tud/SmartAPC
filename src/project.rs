@@ -81,6 +81,7 @@ impl ProjectService {
         let mut normalized = cfg.clone();
         normalized.normalize_plot_config();
         normalized.normalize_model_config();
+        normalized.normalize_simulation_config();
         normalized.validate()?;
 
         let dir = self.project_dir(project_name);
