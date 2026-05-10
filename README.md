@@ -176,10 +176,11 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
   - Horizonte: `mpc.prediction_horizon`, `mpc.control_horizon`
   - CV-Tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
   - MV-Tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
-  - Kalman-Filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`
+  - Kalman-Filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`, `mpc.kalman.cv.<cv>.bias_q`
 - CV-Bänder sind relativ zum Live-Sollwert. Innerhalb des Bandes wird kein CV-Fehler bestraft; außerhalb wird auf die nächste Bandkante optimiert.
+- Pro CV wird ein Ausgangs-Bias geschätzt. Dieser Bias kompensiert konstante Messoffsets und stationäre Modellabweichungen in den MPC-Vorhersagen.
 - MV-Grenzen kommen aus `io.mv.<mv>.ll` und `io.mv.<mv>.hl`, sofern statisch oder als OPC-Eingang verfügbar.
-- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*` und `mpc.status.*`.
+- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*` und `mpc.status.*`.
 
 ## Guide: Eigene Rust-Regellogik (`custom_rust`)
 

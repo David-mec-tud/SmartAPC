@@ -18,6 +18,7 @@ const DEFAULT_CV_Q: f64 = 1.0;
 const DEFAULT_MV_R: f64 = 0.1;
 const DEFAULT_MAX_DELTA_U: f64 = 1.0;
 const DEFAULT_PROCESS_Q: f64 = 1.0e-4;
+const DEFAULT_OUTPUT_BIAS_Q: f64 = 1.0e-3;
 const DEFAULT_MEASUREMENT_R: f64 = 1.0e-2;
 const DEFAULT_INITIAL_P: f64 = 1.0;
 const MAX_HORIZON: usize = 200;
@@ -31,6 +32,7 @@ pub struct LinearMpcLogic {
     params: HashMap<String, LogicParamValue>,
     defaults: HashMap<String, LogicParamValue>,
     x_hat: DVector<f64>,
+    y_bias: DVector<f64>,
     covariance: DMatrix<f64>,
     initialized: bool,
     last_mv: Vec<f64>,
@@ -76,7 +78,11 @@ impl LinearMpcLogic {
         let u_count = model.u_order.len();
         Self {
             x_hat: DVector::zeros(model.state_count),
-            covariance: DMatrix::identity(model.state_count, model.state_count) * DEFAULT_INITIAL_P,
+            y_bias: DVector::zeros(vars.cvs.len()),
+            covariance: DMatrix::identity(
+                model.state_count + vars.cvs.len(),
+                model.state_count + vars.cvs.len(),
+            ) * DEFAULT_INITIAL_P,
             last_mv: vec![0.0; mv_count],
             last_u_total: vec![0.0; u_count],
             initialized: false,
@@ -141,6 +147,11 @@ impl LinearMpcLogic {
             DEFAULT_PROCESS_Q,
         )
         .max(0.0)
+    }
+
+    fn output_bias_noise(&self, cv: &str) -> f64 {
+        self.f64_param(&format!("mpc.kalman.cv.{cv}.bias_q"), DEFAULT_OUTPUT_BIAS_Q)
+            .max(0.0)
     }
 
     fn measurement_noise(&self, cv: &str) -> f64 {
@@ -280,53 +291,84 @@ impl LinearMpcLogic {
         if let Some(solution) = normal.lu().solve(&rhs) {
             self.x_hat = solution;
         }
+        let y_model = &model.c * &self.x_hat + &model.d * u_total;
+        self.y_bias = DVector::from_iterator(
+            y_measured.len(),
+            y_measured
+                .iter()
+                .enumerate()
+                .map(|(index, y)| y - y_model[index]),
+        );
         let initial_p = self
             .f64_param("mpc.kalman.initial_p", DEFAULT_INITIAL_P)
             .max(MIN_WEIGHT);
-        self.covariance =
-            DMatrix::identity(self.model.state_count, self.model.state_count) * initial_p;
+        self.covariance = DMatrix::identity(
+            self.model.state_count + self.vars.cvs.len(),
+            self.model.state_count + self.vars.cvs.len(),
+        ) * initial_p;
         self.initialized = true;
     }
 
     fn update_kalman(&mut self, y_measured: &[f64], u_total: &DVector<f64>, model: &DiscreteModel) {
         let nx = self.model.state_count;
         let ny = self.vars.cvs.len();
+        let nz = nx + ny;
         if !self.initialized {
             self.init_from_measurement(y_measured, u_total, model);
             return;
         }
 
         let q = DMatrix::from_diagonal(&DVector::from_iterator(
-            nx,
-            (0..nx).map(|index| self.process_noise(index)),
+            nz,
+            (0..nz).map(|index| {
+                if index < nx {
+                    self.process_noise(index)
+                } else {
+                    self.output_bias_noise(&self.vars.cvs[index - nx])
+                }
+            }),
         ));
         let r = DMatrix::from_diagonal(&DVector::from_iterator(
             ny,
             self.vars.cvs.iter().map(|cv| self.measurement_noise(cv)),
         ));
 
-        let x_pred =
+        let x_state_pred =
             &model.a * &self.x_hat + &model.b * DVector::from_vec(self.last_u_total.clone());
-        let p_pred = &model.a * &self.covariance * model.a.transpose() + q;
-        let y_adjusted = DVector::from_iterator(
-            ny,
-            y_measured.iter().enumerate().map(|(row, y)| {
-                let d_row = model.d.row(row);
-                y - d_row.dot(u_total)
-            }),
-        );
-        let innovation = y_adjusted - &model.c * &x_pred;
-        let s = &model.c * &p_pred * model.c.transpose() + r;
-        let rhs = &model.c * &p_pred;
+        let mut z_pred = DVector::zeros(nz);
+        z_pred.rows_mut(0, nx).copy_from(&x_state_pred);
+        z_pred.rows_mut(nx, ny).copy_from(&self.y_bias);
+
+        let mut f = DMatrix::zeros(nz, nz);
+        f.view_mut((0, 0), (nx, nx)).copy_from(&model.a);
+        for index in 0..ny {
+            f[(nx + index, nx + index)] = 1.0;
+        }
+
+        let mut h = DMatrix::zeros(ny, nz);
+        h.view_mut((0, 0), (ny, nx)).copy_from(&model.c);
+        for index in 0..ny {
+            h[(index, nx + index)] = 1.0;
+        }
+
+        let p_pred = &f * &self.covariance * f.transpose() + q;
+        let y_direct = &model.d * u_total;
+        let y_measured = DVector::from_column_slice(y_measured);
+        let innovation = y_measured - y_direct - &h * &z_pred;
+        let s = &h * &p_pred * h.transpose() + r;
+        let rhs = &h * &p_pred;
         let Some(k_t) = s.lu().solve(&rhs) else {
-            self.x_hat = x_pred;
+            self.x_hat = x_state_pred;
+            self.y_bias = z_pred.rows(nx, ny).into_owned();
             self.covariance = p_pred;
             return;
         };
         let k = k_t.transpose();
-        self.x_hat = x_pred + &k * innovation;
-        let identity = DMatrix::identity(nx, nx);
-        self.covariance = (&identity - &k * &model.c) * p_pred;
+        let z_hat = z_pred + &k * innovation;
+        self.x_hat = z_hat.rows(0, nx).into_owned();
+        self.y_bias = z_hat.rows(nx, ny).into_owned();
+        let identity = DMatrix::identity(nz, nz);
+        self.covariance = (&identity - &k * &h) * p_pred;
     }
 
     fn build_problem_data(
@@ -414,7 +456,7 @@ impl LinearMpcLogic {
                 *value += cumulative_du[index];
             }
             let u_total = self.total_input_vector(&mv, current_dv);
-            let y = &model.c * &x + &model.d * &u_total;
+            let y = &model.c * &x + &model.d * &u_total + &self.y_bias;
             for cv_index in 0..ny {
                 out[step * ny + cv_index] = y[cv_index];
             }
@@ -582,6 +624,12 @@ impl LinearMpcLogic {
                 SignalValue::F64(self.x_hat[index]),
             );
         }
+        for (index, cv) in self.vars.cvs.iter().enumerate() {
+            values.insert(
+                format!("mpc.bias.cv.{cv}"),
+                SignalValue::F64(self.y_bias[index]),
+            );
+        }
         for (index, mv) in self.vars.mvs.iter().enumerate() {
             values.insert(
                 format!("mpc.du.{mv}"),
@@ -660,6 +708,8 @@ impl ControlLogic for LinearMpcLogic {
             .total_input_vector(&self.last_mv, &vec![0.0; self.vars.dvs.len()])
             .as_slice()
             .to_vec();
+        self.x_hat.fill(0.0);
+        self.y_bias.fill(0.0);
         self.initialized = false;
         self.pending_logs.clear();
     }
@@ -793,6 +843,10 @@ pub fn linear_mpc_default_params(
             format!("mpc.kalman.cv.{cv}.r"),
             LogicParamValue::F64(DEFAULT_MEASUREMENT_R),
         );
+        defaults.insert(
+            format!("mpc.kalman.cv.{cv}.bias_q"),
+            LogicParamValue::F64(DEFAULT_OUTPUT_BIAS_Q),
+        );
     }
 
     for mv in &vars.mvs {
@@ -890,7 +944,11 @@ fn linear_mpc_param_description(name: &str) -> String {
     } else if name.contains(".kalman.state.") {
         "Kalman process noise variance for one state".to_string()
     } else if name.contains(".kalman.cv.") {
-        "Kalman measurement noise variance for one CV".to_string()
+        if name.ends_with(".bias_q") {
+            "Kalman random-walk process noise for one CV output bias".to_string()
+        } else {
+            "Kalman measurement noise variance for one CV".to_string()
+        }
     } else if name.contains(".cv.") && name.ends_with(".q") {
         "CV tracking weight outside the soft band".to_string()
     } else if name.contains(".mv.") && name.ends_with(".r") {
@@ -1020,5 +1078,47 @@ mod tests {
         let d = discretize_rk4(&logic.model, 1.0);
         logic.update_kalman(&[2.0], &DVector::from_vec(vec![0.0]), &d);
         assert!((logic.x_hat[0] - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn kalman_output_bias_learns_constant_cv_offset() {
+        let mut logic = one_by_one_logic();
+        logic.params.insert(
+            "mpc.kalman.state.1.q".to_string(),
+            LogicParamValue::F64(1.0e-8),
+        );
+        logic.params.insert(
+            "mpc.kalman.cv.y1.bias_q".to_string(),
+            LogicParamValue::F64(1.0e-1),
+        );
+        logic.params.insert(
+            "mpc.kalman.cv.y1.r".to_string(),
+            LogicParamValue::F64(1.0e-4),
+        );
+        let d = discretize_rk4(&logic.model, 1.0);
+
+        for _ in 0..20 {
+            logic.update_kalman(&[0.5], &DVector::from_vec(vec![0.0]), &d);
+            logic.last_u_total = vec![0.0];
+        }
+
+        assert!(logic.y_bias[0] > 0.35, "bias={}", logic.y_bias[0]);
+    }
+
+    #[test]
+    fn mpc_prediction_uses_estimated_cv_bias() {
+        let mut logic = one_by_one_logic();
+        logic.y_bias[0] = 0.5;
+        logic.initialized = true;
+        let mut inputs = HashMap::new();
+        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(0.5));
+        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.5));
+
+        let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
+        let u = outputs
+            .get("mv.u1.write")
+            .and_then(SignalValue::as_f64)
+            .expect("u");
+        assert!(u.abs() < 1.0e-8, "u={u}");
     }
 }
