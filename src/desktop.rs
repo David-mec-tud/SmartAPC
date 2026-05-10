@@ -624,6 +624,7 @@ impl SimulationEditorState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogicKindChoice {
     PController,
+    LinearMpc,
     CustomRust,
 }
 
@@ -631,6 +632,7 @@ impl fmt::Display for LogicKindChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PController => write!(f, "P-Regler"),
+            Self::LinearMpc => write!(f, "Linear MPC"),
             Self::CustomRust => write!(f, "Eigene Regellogik"),
         }
     }
@@ -640,6 +642,7 @@ impl From<LogicKind> for LogicKindChoice {
     fn from(value: LogicKind) -> Self {
         match value {
             LogicKind::PController => Self::PController,
+            LogicKind::LinearMpc => Self::LinearMpc,
             LogicKind::CustomRust => Self::CustomRust,
         }
     }
@@ -649,6 +652,7 @@ impl From<LogicKindChoice> for LogicKind {
     fn from(value: LogicKindChoice) -> Self {
         match value {
             LogicKindChoice::PController => Self::PController,
+            LogicKindChoice::LinearMpc => Self::LinearMpc,
             LogicKindChoice::CustomRust => Self::CustomRust,
         }
     }
@@ -1145,6 +1149,47 @@ impl DesktopApp {
 
     fn simulation_running(&self) -> bool {
         matches!(self.active_snapshot, Some(ExecutionSnapshot::Simulation(_)))
+    }
+
+    fn linear_mpc_available(&self) -> bool {
+        if self.model_editor.selected_kind != ModelKindChoice::LinearStateSpace {
+            return false;
+        }
+        if self.variables.mvs.is_empty() || self.variables.cvs.is_empty() {
+            return false;
+        }
+        let Some(state_count) = self.model_editor.state_count_value() else {
+            return false;
+        };
+        if state_count == 0 {
+            return false;
+        }
+
+        for mv in &self.variables.mvs {
+            let Some(row) = self.mv_io_rows.iter().find(|row| row.name == *mv) else {
+                return false;
+            };
+            if row.mv_write.trim().is_empty() {
+                return false;
+            }
+        }
+        for cv in &self.variables.cvs {
+            let Some(row) = self.cv_io_rows.iter().find(|row| row.name == *cv) else {
+                return false;
+            };
+            if row.soll.trim().is_empty() || row.ist.trim().is_empty() {
+                return false;
+            }
+        }
+        for dv in &self.variables.dvs {
+            let Some(row) = self.dv_io_rows.iter().find(|row| row.name == *dv) else {
+                return false;
+            };
+            if row.read.trim().is_empty() {
+                return false;
+            }
+        }
+        true
     }
 
     fn maybe_save_live_simulation_scalar(
@@ -3703,6 +3748,9 @@ impl DesktopApp {
         let can_run_custom_actions = self.selected_project.is_some() && !runtime_running;
 
         let mut available = vec![LogicKindChoice::PController];
+        if self.linear_mpc_available() {
+            available.push(LogicKindChoice::LinearMpc);
+        }
         if self.logic_editor.custom_compatible {
             available.push(LogicKindChoice::CustomRust);
         }
@@ -3769,6 +3817,10 @@ impl DesktopApp {
                     .align_y(iced::Alignment::Center),
                 );
             }
+        } else if selected_kind == LogicKindChoice::LinearMpc {
+            content = content.push(text(
+                "Linear MPC ist aktiv. Tuning, CV-Bänder, MV-Gewichte und Kalman-Parameter werden als Online-Parameter bearbeitet.",
+            ).size(14));
         } else {
             content = content.push(text("Eigene Regellogik ist aktiv.").size(14));
         }

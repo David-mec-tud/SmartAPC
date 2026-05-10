@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{SignalType, SignalValue};
+use crate::{
+    linear_mpc::linear_mpc_default_params,
+    types::{SignalType, SignalValue},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -55,9 +58,12 @@ impl ProjectConfig {
         self.io_definition.validate(&self.variables)?;
         self.io.validate()?;
         self.limits.validate()?;
-        self.logic.validate(&self.io)?;
         if let Some(model) = &self.model {
             model.validate(&self.variables)?;
+        }
+        self.logic.validate(&self.io)?;
+        if self.logic.kind == LogicKind::LinearMpc {
+            self.validate_linear_mpc()?;
         }
         self.simulation
             .validate(self.model.as_ref(), &self.variables)?;
@@ -190,6 +196,11 @@ impl ProjectConfig {
 
         let (io, limits) = self.build_simulation_io_and_limits()?;
         self.logic.validate(&io)?;
+        if self.logic.kind == LogicKind::LinearMpc {
+            if let Some(err) = self.linear_mpc_config_error(&io) {
+                bail!("{err}");
+            }
+        }
         limits.validate()?;
         Ok(())
     }
@@ -197,7 +208,12 @@ impl ProjectConfig {
     fn build_simulation_logic_io(&self) -> Result<IoConfig> {
         let has_runtime_contract = !self.io.inputs.is_empty() || !self.io.outputs.is_empty();
         if has_runtime_contract {
-            if self.logic.is_configured_for(&self.io) {
+            let configured = if self.logic.kind == LogicKind::LinearMpc {
+                self.linear_mpc_is_configured_for(&self.io)
+            } else {
+                self.logic.is_configured_for(&self.io)
+            };
+            if configured {
                 return Ok(self.io.clone());
             }
             bail!("selected logic is not configured for current runtime I/O definition");
@@ -205,6 +221,7 @@ impl ProjectConfig {
 
         match self.logic.kind {
             LogicKind::PController => Ok(self.build_minimal_p_controller_simulation_io()),
+            LogicKind::LinearMpc => Ok(self.build_minimal_linear_mpc_simulation_io()),
             LogicKind::CustomRust => self.build_minimal_custom_rust_simulation_io(),
         }
     }
@@ -230,6 +247,42 @@ impl ProjectConfig {
             if output_names.insert(write.clone()) {
                 outputs.push(simulation_signal_point(write, SignalType::F64));
             }
+        }
+
+        IoConfig { inputs, outputs }
+    }
+
+    fn build_minimal_linear_mpc_simulation_io(&self) -> IoConfig {
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+
+        for mv in &self.variables.mvs {
+            inputs.push(simulation_signal_point(
+                format!("mv.{mv}.read"),
+                SignalType::F64,
+            ));
+            outputs.push(simulation_signal_point(
+                format!("mv.{mv}.write"),
+                SignalType::F64,
+            ));
+        }
+
+        for cv in &self.variables.cvs {
+            inputs.push(simulation_signal_point(
+                format!("cv.{cv}.soll"),
+                SignalType::F64,
+            ));
+            inputs.push(simulation_signal_point(
+                format!("cv.{cv}.ist"),
+                SignalType::F64,
+            ));
+        }
+
+        for dv in &self.variables.dvs {
+            inputs.push(simulation_signal_point(
+                format!("dv.{dv}.read"),
+                SignalType::F64,
+            ));
         }
 
         IoConfig { inputs, outputs }
@@ -320,6 +373,19 @@ impl ProjectConfig {
                     );
                 }
             }
+            LogicKind::LinearMpc => {
+                if let Some(model) = self
+                    .model
+                    .as_ref()
+                    .and_then(ModelConfig::linear_state_space)
+                {
+                    defaults.extend(linear_mpc_default_params(
+                        model,
+                        &self.variables,
+                        &self.static_cv_band_defaults(),
+                    ));
+                }
+            }
             LogicKind::CustomRust => {
                 for entry in &self.logic.custom_rust.parameter_schema {
                     defaults.insert(
@@ -360,6 +426,84 @@ impl ProjectConfig {
         defaults
     }
 
+    pub fn linear_mpc_is_configured_for(&self, io: &IoConfig) -> bool {
+        self.linear_mpc_config_error(io).is_none()
+    }
+
+    fn validate_linear_mpc(&self) -> Result<()> {
+        if let Some(err) = self.linear_mpc_config_error(&self.io) {
+            bail!("{err}");
+        }
+        Ok(())
+    }
+
+    fn linear_mpc_config_error(&self, io: &IoConfig) -> Option<String> {
+        let Some(model) = self
+            .model
+            .as_ref()
+            .and_then(ModelConfig::linear_state_space)
+        else {
+            return Some("linear_mpc requires a linear_state_space model".to_string());
+        };
+        if self.variables.mvs.is_empty() || self.variables.cvs.is_empty() {
+            return Some("linear_mpc requires at least one MV and one CV".to_string());
+        }
+
+        let expected_u_order: Vec<_> = self
+            .variables
+            .mvs
+            .iter()
+            .cloned()
+            .chain(self.variables.dvs.iter().cloned())
+            .collect();
+        if model.u_order != expected_u_order {
+            return Some("linear_mpc model u_order must match MV then DV order".to_string());
+        }
+        if model.y_order != self.variables.cvs {
+            return Some("linear_mpc model y_order must match CV order".to_string());
+        }
+
+        let input_names: HashSet<_> = io.inputs.iter().map(|point| point.name.as_str()).collect();
+        let output_names: HashSet<_> = io.outputs.iter().map(|point| point.name.as_str()).collect();
+
+        for cv in &self.variables.cvs {
+            let soll = format!("cv.{cv}.soll");
+            let ist = format!("cv.{cv}.ist");
+            if !input_names.contains(soll.as_str()) {
+                return Some(format!("linear_mpc requires input '{soll}'"));
+            }
+            if !input_names.contains(ist.as_str()) {
+                return Some(format!("linear_mpc requires input '{ist}'"));
+            }
+        }
+        for mv in &self.variables.mvs {
+            let write = format!("mv.{mv}.write");
+            if !output_names.contains(write.as_str()) {
+                return Some(format!("linear_mpc requires output '{write}'"));
+            }
+        }
+        for dv in &self.variables.dvs {
+            let read = format!("dv.{dv}.read");
+            if !input_names.contains(read.as_str()) {
+                return Some(format!("linear_mpc requires input '{read}'"));
+            }
+        }
+
+        None
+    }
+
+    pub fn static_cv_band_defaults(&self) -> HashMap<String, f64> {
+        let mut values = HashMap::new();
+        for cv in &self.io_definition.cvs {
+            if cv.sollband_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = cv.sollband_value {
+                    values.insert(cv.name.clone(), value);
+                }
+            }
+        }
+        values
+    }
+
     pub fn sidebar_tasks(&self) -> Vec<SidebarTask> {
         let legacy_io_present = !self.io.inputs.is_empty() || !self.io.outputs.is_empty();
         let variables_configured = self.variables.has_any() || legacy_io_present;
@@ -367,6 +511,11 @@ impl ProjectConfig {
             self.io_definition.is_complete_for(&self.variables)
         } else {
             !self.io.inputs.is_empty() && !self.io.outputs.is_empty()
+        };
+        let logic_configured = if self.logic.kind == LogicKind::LinearMpc {
+            self.linear_mpc_is_configured_for(&self.io)
+        } else {
+            self.logic.is_configured_for(&self.io)
         };
 
         vec![
@@ -384,16 +533,8 @@ impl ProjectConfig {
             SidebarTask::new("io", "Ein- und Ausgänge definieren", variables_configured),
             SidebarTask::new("limits", "I/O definieren", io_definition_configured),
             SidebarTask::new("model", "Define Model (optional)", true),
-            SidebarTask::new(
-                "logic",
-                "Regellogik hinterlegen",
-                self.logic.is_configured_for(&self.io),
-            ),
-            SidebarTask::new(
-                "timing",
-                "Control Function Tests",
-                self.logic.is_configured_for(&self.io),
-            ),
+            SidebarTask::new("logic", "Regellogik hinterlegen", logic_configured),
+            SidebarTask::new("timing", "Control Function Tests", logic_configured),
             SidebarTask::new("simulation", "Simulate Controller (optional)", true),
             SidebarTask::new(
                 "deployment",
@@ -1057,6 +1198,7 @@ impl LogicConfig {
     pub fn is_configured_for(&self, io: &IoConfig) -> bool {
         match self.kind {
             LogicKind::PController => self.p_controller.is_configured_for(io),
+            LogicKind::LinearMpc => true,
             LogicKind::CustomRust => self.custom_rust.is_compatible_with(io),
         }
     }
@@ -1073,6 +1215,7 @@ fn default_logic_param_value(param_type: LogicParamType) -> LogicParamValue {
 #[serde(rename_all = "snake_case")]
 pub enum LogicKind {
     PController,
+    LinearMpc,
     CustomRust,
 }
 
@@ -2327,6 +2470,96 @@ description = "SmartAPC controller runtime"
         assert!(cfg.logic.params.contains_key("p.y1.u1.bias"));
         assert!(cfg.logic.params.contains_key("io.mv.u1.hl"));
         assert!(!cfg.logic.params.contains_key("custom_gain"));
+    }
+
+    #[test]
+    fn linear_mpc_requires_linear_model() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.soll".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_SOL".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.inputs.push(SignalPoint {
+            name: "cv.y1.ist".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=Y1_IST".to_string(),
+            opc_tag: None,
+        });
+        cfg.io.outputs.push(SignalPoint {
+            name: "mv.u1.write".to_string(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=U1_WRITE".to_string(),
+            opc_tag: None,
+        });
+        cfg.logic.kind = LogicKind::LinearMpc;
+
+        let err = cfg.validate().expect_err("linear_mpc requires model");
+        assert!(err.to_string().contains("linear_state_space model"));
+    }
+
+    #[test]
+    fn linear_mpc_syncs_active_online_params() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=U1_WRITE".to_string(),
+            mv_read: String::new(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: "ns=2;s=Y1_SOL".to_string(),
+            ist: "ns=2;s=Y1_IST".to_string(),
+            sollband_opc: None,
+            sollband_value: Some(2.0),
+            enable: None,
+        });
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("runtime io");
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.logic
+            .params
+            .insert("custom_gain".to_string(), LogicParamValue::F64(5.0));
+        cfg.logic
+            .params
+            .insert("mpc.cv.y1.q".to_string(), LogicParamValue::F64(3.0));
+
+        cfg.sync_active_online_params();
+
+        assert_eq!(
+            cfg.logic.params.get("mpc.cv.y1.q"),
+            Some(&LogicParamValue::F64(3.0))
+        );
+        assert_eq!(
+            cfg.logic.params.get("mpc.cv.y1.band_low"),
+            Some(&LogicParamValue::F64(-2.0))
+        );
+        assert!(cfg.logic.params.contains_key("mpc.mv.u1.r"));
+        assert!(cfg.logic.params.contains_key("mpc.kalman.state.1.q"));
+        assert!(cfg.logic.params.contains_key("io.mv.u1.hl"));
+        assert!(!cfg.logic.params.contains_key("custom_gain"));
+        assert!(cfg.linear_mpc_is_configured_for(&cfg.io));
     }
 
     #[test]

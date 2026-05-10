@@ -11,6 +11,7 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - `WatchdogModule` (`none`, `counter_mirror`)
   - `ControlLogic`:
     - `p_controller` (produktiv nutzbar)
+    - `linear_mpc` (lineares MPC auf Basis des gespeicherten State-Space-Modells)
     - `custom_rust` (projektlokale `cdylib`)
   - Persistiertes `linear_state_space`-Modell für Offline-Simulation
 - Runtime-State-Machine:
@@ -21,7 +22,7 @@ SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgeb
   - Inputs/Outputs je Zyklus
   - Online-Parameter je Zyklus
   - Online-Parameter-Änderungen
-  - User-definierte Logs aus `custom_rust`-Strategien
+  - User-definierte Logs aus `custom_rust`-Strategien und strukturierte `linear_mpc`-Diagnosen
 - Simulations-Logging in `projects/<projekt>/data/simulation.log` (JSONL):
   - `simulation_cycle` je Zyklus
   - `simulation_time_s`
@@ -145,9 +146,11 @@ Virtuelle Hardware OPC-UA Tags:
 Im Reiter **Regellogik** gibt es oben eine Strategiewahl.
 
 - Basis: `P-Regler` (`p_controller`)
+- Modellbasiert: `Linear MPC` (`linear_mpc`)
 - Alternative: `Eigene Regellogik` (`custom_rust`)
 
 Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition kompatibel sind.  
+`Linear MPC` erscheint, wenn ein `linear_state_space`-Modell sowie passende MV/CV/DV-I/O vorhanden sind.
 `Eigene Regellogik` erscheint erst nach erfolgreichem Build/Check als kompatibel.
 
 ### P-Regler
@@ -159,6 +162,24 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
 - Formel: `u = kp * (soll - ist) + bias`
 - Enable-Verhalten:
   - Falls `cv.<name>.enable == false` oder `mv.<name>.enable == false`, wird für dieses Paar kein Output geschrieben.
+
+### Linear MPC
+
+- Verwendet das gespeicherte kontinuierliche Modell `x_dot = A x + B u`, `y = C x + D u`.
+- Diskretisierung erfolgt je Regelzyklus mit Zero-Order Hold/RK4 wie in der Offline-Simulation.
+- `u_order` bleibt `MVs + DVs`: MVs werden optimiert, DVs werden als gemessene Störungen über den Horizont konstant gehalten.
+- Benötigte I/O:
+  - je CV: `cv.<name>.soll` und `cv.<name>.ist`
+  - je MV: `mv.<name>.write`; `mv.<name>.read` ist optional und wird sonst durch den letzten Stellwert ersetzt
+  - je DV: `dv.<name>.read`
+- Online-Parameter:
+  - Horizonte: `mpc.prediction_horizon`, `mpc.control_horizon`
+  - CV-Tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
+  - MV-Tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
+  - Kalman-Filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`
+- CV-Bänder sind relativ zum Live-Sollwert. Innerhalb des Bandes wird kein CV-Fehler bestraft; außerhalb wird auf die nächste Bandkante optimiert.
+- MV-Grenzen kommen aus `io.mv.<mv>.ll` und `io.mv.<mv>.hl`, sofern statisch oder als OPC-Eingang verfügbar.
+- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*` und `mpc.status.*`.
 
 ## Guide: Eigene Rust-Regellogik (`custom_rust`)
 

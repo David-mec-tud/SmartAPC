@@ -17,6 +17,7 @@ use tokio::{
 
 use crate::{
     communication::{HealthStatus, ProtocolAdapter, opcua::OpcUaClientAdapter},
+    linear_mpc::LinearMpcLogic,
     logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
     model::ModelModule,
     project::ProjectService,
@@ -855,6 +856,28 @@ pub(crate) fn build_logic(
             );
             if !logic.is_configured() {
                 bail!("p_controller has no CV->MV pairs configured");
+            }
+            Ok(Box::new(logic))
+        }
+        LogicKind::LinearMpc => {
+            if !config.linear_mpc_is_configured_for(io) {
+                bail!("linear_mpc strategy is not compatible with current model/I/O definition");
+            }
+            let model = config
+                .model
+                .as_ref()
+                .and_then(ModelConfig::linear_state_space)
+                .cloned()
+                .ok_or_else(|| anyhow!("linear_mpc requires a linear_state_space model"))?;
+            let logic = LinearMpcLogic::new(
+                model,
+                config.variables.clone(),
+                config.runtime.cycle_ms,
+                config.logic.params.clone(),
+                config.static_cv_band_defaults(),
+            );
+            if !logic.is_configured() {
+                bail!("linear_mpc has no usable MV/CV model configuration");
             }
             Ok(Box::new(logic))
         }

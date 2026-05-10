@@ -758,6 +758,15 @@ pub(crate) fn wall_cycle_duration(speed: SimulationSpeedMode, cycle_ms: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        project_config::{
+            CvIoDefinition, IoDefinitionConfig, LogicKind, ModelConfig, MvIoDefinition,
+            ProjectConfig, VariableCatalogConfig,
+        },
+        runtime::build_logic,
+        storage::SqliteStorage,
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn wall_cycle_duration_scales_expected_direction() {
@@ -793,5 +802,69 @@ mod tests {
         let b = vec![vec![1.0]];
         let next = rk4_step(&a, &b, &[0.0], &[1.0], 1.0);
         assert!((next[0] - 0.625).abs() < 0.01);
+    }
+
+    #[test]
+    fn linear_mpc_drives_stable_closed_loop_simulation() {
+        let temp = tempdir().expect("tempdir");
+        let mut cfg = ProjectConfig::new("mpc_demo");
+        cfg.variables = VariableCatalogConfig {
+            mvs: vec!["u1".to_string()],
+            cvs: vec!["y1".to_string()],
+            dvs: Vec::new(),
+        };
+        cfg.io_definition = IoDefinitionConfig {
+            mvs: vec![MvIoDefinition {
+                name: "u1".to_string(),
+                mv_write: String::new(),
+                mv_read: String::new(),
+                hl_opc: None,
+                ll_opc: None,
+                hl: Some(10.0),
+                ll: Some(-10.0),
+                enable: None,
+            }],
+            cvs: vec![CvIoDefinition {
+                name: "y1".to_string(),
+                soll: String::new(),
+                ist: String::new(),
+                sollband_opc: None,
+                sollband_value: Some(0.05),
+                enable: None,
+            }],
+            dvs: Vec::new(),
+        };
+        cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.simulation.cv_setpoints.insert("y1".to_string(), 1.0);
+        cfg.normalize_model_config();
+        cfg.normalize_simulation_config();
+        cfg.sync_active_online_params();
+
+        let (sim_io, limits) = cfg.build_simulation_io_and_limits().expect("sim io");
+        let logic = build_logic(&cfg, &sim_io, temp.path()).expect("logic");
+        let storage = SqliteStorage::new(temp.path().join("simulation.sqlite")).expect("storage");
+        let log_file = File::create(temp.path().join("simulation.log")).expect("log");
+        let mut core =
+            SimulationCore::new(cfg, sim_io, limits, logic, storage, log_file).expect("core");
+
+        for _ in 0..5 {
+            core.tick_once(None).expect("tick");
+        }
+
+        let y = core.current_cv.get("y1").copied().unwrap_or(0.0);
+        let u = core.applied_mv.get("u1").copied().unwrap_or(0.0);
+        assert!(y > 0.0);
+        assert!(u > 0.0);
     }
 }

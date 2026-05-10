@@ -2,6 +2,7 @@ pub mod communication;
 pub mod control_function_tests;
 pub mod deployment;
 pub mod desktop;
+pub mod linear_mpc;
 pub mod logic;
 pub mod model;
 pub mod project;
