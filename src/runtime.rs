@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::json;
 use tokio::{
-    sync::{Mutex, oneshot},
+    sync::{Mutex, Notify, oneshot},
     task::JoinHandle,
 };
 
@@ -25,7 +25,7 @@ use crate::{
         IoConfig, LogicKind, LogicParamValue, ModelConfig, ProjectConfig, SimulationConfig,
         WatchdogConfig,
     },
-    simulation::{SimulationCore, SimulationSnapshot, wall_cycle_duration},
+    simulation::{SimulationCore, SimulationSnapshot},
     storage::{CycleMetric, SeriesCatalogEntry, SignalSample, SqliteStorage},
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
@@ -172,8 +172,7 @@ impl RuntimeCore {
     }
 
     fn read_plot_samples_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
-        let since = now_ms().saturating_sub(window_ms as i64);
-        self.storage.read_samples_since(since)
+        self.storage.read_latest_samples_window(window_ms)
     }
 
     fn read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
@@ -426,6 +425,7 @@ struct RuntimeHandle {
 struct SimulationHandle {
     project_name: String,
     core: Arc<Mutex<SimulationCore>>,
+    reconfigure: Arc<Notify>,
     shutdown: oneshot::Sender<()>,
     join: JoinHandle<()>,
 }
@@ -539,11 +539,13 @@ impl RuntimeManager {
         let logic = build_logic(&config, &sim_io, &project_dir)?;
 
         let db_path = project_dir.join("data").join("simulation.sqlite");
+        reset_simulation_artifacts(&db_path)?;
         let storage = SqliteStorage::new(db_path)?;
         let log_path = project_dir.join("data").join("simulation.log");
         let log_file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(&log_path)
             .with_context(|| format!("failed to open simulation log '{}'", log_path.display()))?;
 
@@ -558,24 +560,39 @@ impl RuntimeManager {
 
         let (tx, mut rx) = oneshot::channel();
         let core_clone = Arc::clone(&core);
-        let target_cycle = wall_cycle_duration(config.simulation.speed, config.runtime.cycle_ms);
+        let reconfigure = Arc::new(Notify::new());
+        let reconfigure_clone = Arc::clone(&reconfigure);
         let join = tokio::spawn(async move {
+            let mut next_deadline = None;
             loop {
-                {
+                let target_cycle = {
                     let mut core = core_clone.lock().await;
+                    let target_cycle = core.target_cycle_duration();
                     if let Err(err) = core.tick_once(target_cycle) {
                         tracing::error!(error = %err, "simulation tick failed");
                     }
-                }
+                    target_cycle
+                };
 
                 if let Some(target) = target_cycle {
-                    tokio::select! {
-                        _ = tokio::time::sleep(target) => {}
-                        _ = &mut rx => break,
+                    let now = tokio::time::Instant::now();
+                    let deadline = next_deadline.unwrap_or(now + target);
+                    next_deadline = Some(deadline + target);
+
+                    if deadline > now {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(deadline) => {}
+                            _ = reconfigure_clone.notified() => {
+                                next_deadline = None;
+                            }
+                            _ = &mut rx => break,
+                        }
                     }
                 } else {
+                    next_deadline = None;
                     tokio::select! {
                         _ = tokio::task::yield_now() => {}
+                        _ = reconfigure_clone.notified() => {}
                         _ = &mut rx => break,
                     }
                 }
@@ -585,6 +602,7 @@ impl RuntimeManager {
         *guard = Some(ActiveHandle::Simulation(SimulationHandle {
             project_name: project_name.to_string(),
             core,
+            reconfigure,
             shutdown: tx,
             join,
         }));
@@ -809,6 +827,7 @@ impl RuntimeManager {
         };
         let mut core = handle.core.lock().await;
         core.apply_live_config(&config);
+        handle.reconfigure.notify_one();
         Ok(())
     }
 
@@ -928,6 +947,31 @@ fn seed_protocol_nodes(adapter: &OpcUaClientAdapter, config: &ProjectConfig) -> 
     {
         adapter.seed_node(read_node.clone(), SignalValue::F64(0.0));
         adapter.seed_node(write_node.clone(), SignalValue::F64(0.0));
+    }
+
+    Ok(())
+}
+
+fn reset_simulation_artifacts(db_path: &Path) -> Result<()> {
+    if db_path.exists() {
+        fs::remove_file(db_path).with_context(|| {
+            format!(
+                "failed to remove previous simulation database '{}'",
+                db_path.display()
+            )
+        })?;
+    }
+
+    for suffix in ["-shm", "-wal"] {
+        let sidecar = PathBuf::from(format!("{}{}", db_path.display(), suffix));
+        if sidecar.exists() {
+            fs::remove_file(&sidecar).with_context(|| {
+                format!(
+                    "failed to remove previous simulation database sidecar '{}'",
+                    sidecar.display()
+                )
+            })?;
+        }
     }
 
     Ok(())

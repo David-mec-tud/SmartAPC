@@ -344,6 +344,7 @@ async fn plots_page() -> Html<&'static str> {
 
   const state = {
     projectName: null,
+    executionMode: null,
     projects: [],
     variables: { mvs: [], cvs: [], dvs: [] },
     plotConfig: { window_sec: 180, mv_order: [], cv_order: [], dv_order: [], custom_plots: [] },
@@ -760,14 +761,27 @@ async fn plots_page() -> Html<&'static str> {
     }
   }
 
+  function latestSeriesTimestampMs() {
+    let latest = null;
+    let value = [...state.latestSeries.values()].reduce((max, row) => {
+      if (!row || !row.points || row.points.length === 0) return max;
+      const rowLatest = row.points[row.points.length - 1].t;
+      return max === null ? rowLatest : Math.max(max, rowLatest);
+    }, latest);
+    return value === null ? null : value;
+  }
+
   function plotTracesToSeries(traceSpecs) {
     const out = [];
+    const simulationMode = state.executionMode === "simulation";
     for (const trace of traceSpecs) {
       const key = seriesKey(trace.direction, trace.signal);
       const row = state.latestSeries.get(key);
       if (!row || row.points.length === 0) continue;
       out.push({
-        x: row.points.map((p) => new Date(p.t)),
+        x: simulationMode
+          ? row.points.map((p) => p.t / 1000.0)
+          : row.points.map((p) => new Date(p.t)),
         y: row.points.map((p) => p.y),
         mode: "lines",
         name: trace.label ? `${trace.label} (${trace.direction})` : `${trace.signal} (${trace.direction})`,
@@ -809,7 +823,8 @@ async fn plots_page() -> Html<&'static str> {
     const div = document.getElementById(divId);
     if (!div) return;
     const windowMs = state.plotConfig.window_sec * 1000;
-    const now = Date.now();
+    const latestTimestampMs = latestSeriesTimestampMs() ?? Date.now();
+    const simulationMode = state.executionMode === "simulation";
     const uiState = getPlotUiState(divId);
     const data = plotTracesToSeries(traces);
     const layout = {
@@ -818,8 +833,24 @@ async fn plots_page() -> Html<&'static str> {
       paper_bgcolor: "#fff",
       plot_bgcolor: "#fff",
       xaxis: uiState.xRange
-        ? { type: "date", range: uiState.xRange }
-        : { type: "date", range: [new Date(now - windowMs), new Date(now)] },
+        ? {
+            type: simulationMode ? "linear" : "date",
+            range: uiState.xRange,
+            title: simulationMode ? { text: "Simulation time (s)" } : undefined,
+          }
+        : simulationMode
+          ? {
+              type: "linear",
+              range: [
+                Math.max(0, latestTimestampMs / 1000.0 - windowMs / 1000.0),
+                latestTimestampMs / 1000.0,
+              ],
+              title: { text: "Simulation time (s)" },
+            }
+          : {
+              type: "date",
+              range: [new Date(latestTimestampMs - windowMs), new Date(latestTimestampMs)],
+            },
       yaxis: { automargin: true },
       legend: { orientation: "h", y: -0.2 },
       uirevision: divId,
@@ -850,8 +881,16 @@ async fn plots_page() -> Html<&'static str> {
       const execution = await api("/api/execution/state");
       const snapshot = execution ? execution.snapshot : null;
       if (!snapshot) {
+        if (state.executionMode !== null) {
+          state.executionMode = null;
+          state.plotUi.clear();
+        }
         el.executionState.textContent = "not running";
         return;
+      }
+      if (state.executionMode !== execution.mode) {
+        state.executionMode = execution.mode;
+        state.plotUi.clear();
       }
       el.executionState.textContent = `${execution.mode}: ${snapshot.state} (${snapshot.project_name})`;
       const windowMs = clampWindow(Number(state.plotConfig.window_sec || 180)) * 1000;

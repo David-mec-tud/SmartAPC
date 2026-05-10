@@ -923,15 +923,6 @@ struct DvReadValues {
 }
 
 #[derive(Debug, Clone)]
-enum SimulationLiveScalarField {
-    CvSetpoint(String),
-    CvNoiseStd(String),
-    MvNoiseStd(String),
-    DvDisturbance(String),
-    CvOffset(String),
-}
-
-#[derive(Debug, Clone)]
 enum Message {
     ProjectsLoaded(Result<Vec<String>, String>),
     ProjectSelected(String),
@@ -1012,8 +1003,6 @@ enum Message {
     SimulationDvDisturbanceChanged(usize, String),
     SimulationCvOffsetChanged(usize, String),
     SimulationScaleCellChanged(MatrixKey, usize, usize, String),
-    SaveSimulationPressed,
-    SimulationSaved(Result<String, String>),
     StartSimulationPressed,
     StopSimulationPressed,
     SimulationActionFinished(Result<String, String>),
@@ -1192,56 +1181,54 @@ impl DesktopApp {
         true
     }
 
-    fn maybe_save_live_simulation_scalar(
-        &self,
-        field: SimulationLiveScalarField,
-        raw: &str,
-    ) -> Task<Message> {
-        if !self.simulation_running() {
-            return Task::none();
-        }
+    fn maybe_autosave_simulation_editor(&self) -> Task<Message> {
         let Some(project_name) = self.selected_project.clone() else {
             return Task::none();
         };
-        let parsed = match parse_live_simulation_scalar(&field, raw) {
-            Ok(value) => value,
-            Err(_) => return Task::none(),
-        };
-        save_simulation_live_scalar_task(
+        let model_preview = build_model_preview(&self.model_editor, &self.variables);
+        if build_simulation_config_from_editor(
+            &self.simulation_editor,
+            &self.variables,
+            model_preview.as_ref(),
+        )
+        .is_err()
+        {
+            return Task::none();
+        }
+        sync_simulation_editor_task(
             Arc::clone(&self.runtime),
             self.project_service.clone(),
             project_name,
-            field,
-            parsed,
+            self.simulation_editor.clone(),
+            self.simulation_running(),
         )
     }
 
-    fn maybe_save_live_simulation_matrix(
+    fn maybe_autosave_simulation_matrix(
         &self,
         matrix: MatrixKey,
         row_index: usize,
         col_index: usize,
         raw: &str,
     ) -> Task<Message> {
-        if !self.simulation_running() {
-            return Task::none();
-        }
-        let Some(project_name) = self.selected_project.clone() else {
-            return Task::none();
-        };
         let parsed = match parse_live_simulation_matrix_value(raw) {
             Ok(value) => value,
             Err(_) => return Task::none(),
         };
-        save_simulation_live_matrix_task(
-            Arc::clone(&self.runtime),
-            self.project_service.clone(),
-            project_name,
-            matrix,
-            row_index,
-            col_index,
-            parsed,
-        )
+        let cells = match matrix {
+            MatrixKey::A => &self.simulation_editor.a_scale_cells,
+            MatrixKey::B => &self.simulation_editor.b_scale_cells,
+            MatrixKey::C | MatrixKey::D => return Task::none(),
+        };
+        if cells
+            .get(row_index)
+            .and_then(|row| row.get(col_index))
+            .is_none()
+        {
+            return Task::none();
+        }
+        let _ = parsed;
+        self.maybe_autosave_simulation_editor()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -2167,78 +2154,61 @@ impl DesktopApp {
             },
             Message::SimulationSpeedChanged(speed) => {
                 self.simulation_editor.speed = speed;
-                Task::none()
+                self.maybe_autosave_simulation_editor()
             }
             Message::SimulationCvSetpointChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.cv_setpoints.get_mut(index) {
-                    row.value = value.clone();
-                    let name = row.name.clone();
-                    return self.maybe_save_live_simulation_scalar(
-                        SimulationLiveScalarField::CvSetpoint(name),
-                        &value,
-                    );
+                    row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationCvInitialChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.cv_initials.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationMvInitialChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.mv_initials.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationDvInitialChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.dv_initials.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationCvNoiseChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.cv_noise_std.get_mut(index) {
-                    row.value = value.clone();
-                    let name = row.name.clone();
-                    return self.maybe_save_live_simulation_scalar(
-                        SimulationLiveScalarField::CvNoiseStd(name),
-                        &value,
-                    );
+                    row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationMvNoiseChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.mv_noise_std.get_mut(index) {
-                    row.value = value.clone();
-                    let name = row.name.clone();
-                    return self.maybe_save_live_simulation_scalar(
-                        SimulationLiveScalarField::MvNoiseStd(name),
-                        &value,
-                    );
+                    row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationDvDisturbanceChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.dv_disturbances.get_mut(index) {
-                    row.value = value.clone();
-                    let name = row.name.clone();
-                    return self.maybe_save_live_simulation_scalar(
-                        SimulationLiveScalarField::DvDisturbance(name),
-                        &value,
-                    );
+                    row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
             Message::SimulationCvOffsetChanged(index, value) => {
                 if let Some(row) = self.simulation_editor.cv_offsets.get_mut(index) {
-                    row.value = value.clone();
-                    let name = row.name.clone();
-                    return self.maybe_save_live_simulation_scalar(
-                        SimulationLiveScalarField::CvOffset(name),
-                        &value,
-                    );
+                    row.value = value;
+                    return self.maybe_autosave_simulation_editor();
                 }
                 Task::none()
             }
@@ -2250,47 +2220,14 @@ impl DesktopApp {
                 };
                 if let Some(row) = cells.get_mut(row_index) {
                     if let Some(cell) = row.get_mut(col_index) {
-                        *cell = value.clone();
-                        return self.maybe_save_live_simulation_matrix(
-                            matrix, row_index, col_index, &value,
-                        );
+                        let raw = value;
+                        *cell = raw.clone();
+                        return self
+                            .maybe_autosave_simulation_matrix(matrix, row_index, col_index, &raw);
                     }
                 }
                 Task::none()
             }
-            Message::SaveSimulationPressed => {
-                if self.execution_active() {
-                    self.error_message = Some(
-                        "Ausführung läuft. Für strukturelle Simulations-Änderungen bitte erst stoppen."
-                            .to_string(),
-                    );
-                    return Task::none();
-                }
-                let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
-                    return Task::none();
-                };
-                save_simulation_task(
-                    self.project_service.clone(),
-                    project_name,
-                    self.simulation_editor.clone(),
-                )
-            }
-            Message::SimulationSaved(result) => match result {
-                Ok(status) => {
-                    self.status_message = status;
-                    self.error_message = None;
-                    if let Some(project_name) = self.selected_project.clone() {
-                        load_project_panel_task(self.project_service.clone(), project_name)
-                    } else {
-                        Task::none()
-                    }
-                }
-                Err(err) => {
-                    self.error_message = Some(err);
-                    Task::none()
-                }
-            },
             Message::StartSimulationPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
                     self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
@@ -2679,7 +2616,6 @@ impl DesktopApp {
         let live_editable = simulation_running;
         let can_start = self.selected_project.is_some() && !execution_active;
         let can_stop = simulation_running;
-        let can_save = self.selected_project.is_some() && !execution_active;
 
         let start_button = if can_start {
             button("Simulation Start").on_press(Message::StartSimulationPressed)
@@ -2690,11 +2626,6 @@ impl DesktopApp {
             button("Simulation Stop").on_press(Message::StopSimulationPressed)
         } else {
             button("Simulation Stop")
-        };
-        let save_button = if can_save {
-            button("Simulation speichern").on_press(Message::SaveSimulationPressed)
-        } else {
-            button("Simulation speichern")
         };
 
         let summary = match &self.active_snapshot {
@@ -2716,9 +2647,11 @@ impl DesktopApp {
         let mut content = column![
             text("Simulate Controller").size(24),
             text("Offline closed-loop simulation from the stored continuous-time state-space model. No OPC-UA is used.").size(14),
-            row![start_button, stop_button, save_button, text(summary).size(13)]
+            row![start_button, stop_button, text(summary).size(13)]
                 .spacing(10)
-                .align_y(iced::Alignment::Center)
+                .align_y(iced::Alignment::Center),
+            text("Simulation settings are saved automatically when the current input is valid.")
+                .size(13)
         ]
         .spacing(12);
 
@@ -2740,7 +2673,7 @@ impl DesktopApp {
                 .padding(12),
             );
         } else {
-            let speed_control: Element<'_, Message> = if structural_editable {
+            let speed_control: Element<'_, Message> = if structural_editable || live_editable {
                 pick_list(
                     SIMULATION_SPEED_OPTIONS,
                     Some(self.simulation_editor.speed),
@@ -2759,9 +2692,9 @@ impl DesktopApp {
                     text("Simulation speed").width(Length::Fixed(140.0)),
                     speed_control,
                     text(if simulation_running {
-                        "Live edits allowed: setpoints, disturbances, offsets, noise, A/B scales"
+                        "Live edits allowed: speed, setpoints, disturbances, offsets, noise, A/B scales"
                     } else {
-                        "Speed and initial conditions apply on next start"
+                        "Speed, initial conditions, disturbances, noise and A/B scales are saved immediately"
                     })
                     .size(13),
                 ]
@@ -4888,10 +4821,12 @@ fn save_model_task(
     )
 }
 
-fn save_simulation_task(
+fn sync_simulation_editor_task(
+    runtime: Arc<RuntimeManager>,
     project_service: ProjectService,
     project_name: String,
     editor: SimulationEditorState,
+    apply_live: bool,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -4900,104 +4835,25 @@ fn save_simulation_task(
             })?;
             cfg.simulation =
                 build_simulation_config_from_editor(&editor, &cfg.variables, cfg.model.as_ref())?;
-
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Simulation konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| {
+                    format!("Simulationseinstellungen konnten nicht gespeichert werden: {err}")
+                })?;
 
-            Ok(format!("Simulation für '{}' gespeichert", project_name))
-        },
-        Message::SimulationSaved,
-    )
-}
-
-fn save_simulation_live_scalar_task(
-    runtime: Arc<RuntimeManager>,
-    project_service: ProjectService,
-    project_name: String,
-    field: SimulationLiveScalarField,
-    value: f64,
-) -> Task<Message> {
-    Task::perform(
-        async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
-            cfg.normalize_simulation_config();
-            match &field {
-                SimulationLiveScalarField::CvSetpoint(name) => {
-                    cfg.simulation.cv_setpoints.insert(name.clone(), value);
-                }
-                SimulationLiveScalarField::CvNoiseStd(name) => {
-                    cfg.simulation.cv_noise_std.insert(name.clone(), value);
-                }
-                SimulationLiveScalarField::MvNoiseStd(name) => {
-                    cfg.simulation.mv_noise_std.insert(name.clone(), value);
-                }
-                SimulationLiveScalarField::DvDisturbance(name) => {
-                    cfg.simulation.dv_disturbances.insert(name.clone(), value);
-                }
-                SimulationLiveScalarField::CvOffset(name) => {
-                    cfg.simulation.cv_offsets.insert(name.clone(), value);
-                }
+            if apply_live {
+                runtime
+                    .apply_simulation_live_config(cfg.simulation.clone())
+                    .await
+                    .map_err(|err| {
+                        format!(
+                            "Simulationseinstellungen konnten nicht live übernommen werden: {err}"
+                        )
+                    })?;
+                Ok("Simulationseinstellungen live aktualisiert".to_string())
+            } else {
+                Ok("Simulationseinstellungen gespeichert".to_string())
             }
-            project_service
-                .save_config(&project_name, &cfg)
-                .map_err(|err| {
-                    format!("Live-Simulationswert konnte nicht gespeichert werden: {err}")
-                })?;
-            runtime
-                .apply_simulation_live_config(cfg.simulation.clone())
-                .await
-                .map_err(|err| {
-                    format!("Live-Simulationswert konnte nicht übernommen werden: {err}")
-                })?;
-
-            Ok(format!("Live-Simulationswert aktualisiert"))
-        },
-        Message::SimulationLiveUpdated,
-    )
-}
-
-fn save_simulation_live_matrix_task(
-    runtime: Arc<RuntimeManager>,
-    project_service: ProjectService,
-    project_name: String,
-    matrix: MatrixKey,
-    row_index: usize,
-    col_index: usize,
-    value: f64,
-) -> Task<Message> {
-    Task::perform(
-        async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
-            cfg.normalize_simulation_config();
-            let cells = match matrix {
-                MatrixKey::A => &mut cfg.simulation.a_scale_pct,
-                MatrixKey::B => &mut cfg.simulation.b_scale_pct,
-                MatrixKey::C | MatrixKey::D => {
-                    return Err("Nur A/B-Skalierung ist für die Simulation erlaubt".to_string());
-                }
-            };
-            let Some(row) = cells.get_mut(row_index) else {
-                return Err("Live-Skalierungszeile außerhalb des Modells".to_string());
-            };
-            let Some(cell) = row.get_mut(col_index) else {
-                return Err("Live-Skalierungsspalte außerhalb des Modells".to_string());
-            };
-            *cell = value;
-
-            project_service
-                .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Live-Skalierung konnte nicht gespeichert werden: {err}"))?;
-            runtime
-                .apply_simulation_live_config(cfg.simulation.clone())
-                .await
-                .map_err(|err| format!("Live-Skalierung konnte nicht übernommen werden: {err}"))?;
-
-            Ok("Live-Skalierung aktualisiert".to_string())
         },
         Message::SimulationLiveUpdated,
     )
@@ -6368,27 +6224,6 @@ fn parse_named_value_rows(
         values.insert(row.name.clone(), parsed);
     }
     Ok(values)
-}
-
-fn parse_live_simulation_scalar(
-    field: &SimulationLiveScalarField,
-    raw: &str,
-) -> Result<f64, String> {
-    let parsed = raw
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "draft value is not yet a valid number".to_string())?;
-    if !parsed.is_finite() {
-        return Err("draft value must be finite".to_string());
-    }
-    match field {
-        SimulationLiveScalarField::CvNoiseStd(_) | SimulationLiveScalarField::MvNoiseStd(_)
-            if parsed < 0.0 =>
-        {
-            Err("noise std must be >= 0".to_string())
-        }
-        _ => Ok(parsed),
-    }
 }
 
 fn parse_live_simulation_matrix_value(raw: &str) -> Result<f64, String> {

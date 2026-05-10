@@ -89,7 +89,16 @@ impl SqliteStorage {
     }
 
     pub fn store_signal(&self, direction: &str, signal: &str, value: &SignalValue) -> Result<()> {
-        let now = now_ms();
+        self.store_signal_at(now_ms(), direction, signal, value)
+    }
+
+    pub fn store_signal_at(
+        &self,
+        timestamp_ms: i64,
+        direction: &str,
+        signal: &str,
+        value: &SignalValue,
+    ) -> Result<()> {
         let (v_f64, v_bool): (Option<f64>, Option<i64>) = match value {
             SignalValue::F64(v) => (Some(*v), None),
             SignalValue::Bool(v) => (None, Some(i64::from(*v))),
@@ -98,7 +107,7 @@ impl SqliteStorage {
         self.conn.lock().execute(
             "INSERT INTO signal_samples(timestamp_ms, direction, signal, value_f64, value_bool)
             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![now, direction, signal, v_f64, v_bool],
+            params![timestamp_ms, direction, signal, v_f64, v_bool],
         )?;
         Ok(())
     }
@@ -108,9 +117,31 @@ impl SqliteStorage {
         direction: &str,
         values: &HashMap<String, SignalValue>,
     ) -> Result<()> {
-        for (signal, value) in values {
-            self.store_signal(direction, signal, value)?;
+        self.store_signal_map_at(now_ms(), direction, values)
+    }
+
+    pub fn store_signal_map_at(
+        &self,
+        timestamp_ms: i64,
+        direction: &str,
+        values: &HashMap<String, SignalValue>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO signal_samples(timestamp_ms, direction, signal, value_f64, value_bool)
+                VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (signal, value) in values {
+                let (v_f64, v_bool): (Option<f64>, Option<i64>) = match value {
+                    SignalValue::F64(v) => (Some(*v), None),
+                    SignalValue::Bool(v) => (None, Some(i64::from(*v))),
+                };
+                stmt.execute(params![timestamp_ms, direction, signal, v_f64, v_bool])?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -183,6 +214,21 @@ impl SqliteStorage {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    pub fn read_latest_samples_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
+        let conn = self.conn.lock();
+        let latest_timestamp_ms: Option<i64> =
+            conn.query_row("SELECT MAX(timestamp_ms) FROM signal_samples", [], |row| {
+                row.get(0)
+            })?;
+        drop(conn);
+
+        let Some(latest_timestamp_ms) = latest_timestamp_ms else {
+            return Ok(Vec::new());
+        };
+        let since = latest_timestamp_ms.saturating_sub(window_ms as i64);
+        self.read_samples_since(since)
     }
 
     pub fn read_series_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {

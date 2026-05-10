@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::Write,
+    io::{BufWriter, Write},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -38,7 +38,8 @@ pub(crate) struct SimulationCore {
     simulation: SimulationConfig,
     logic: Box<dyn ControlLogic>,
     storage: SqliteStorage,
-    log_file: File,
+    log_file: BufWriter<File>,
+    pending_log_records: usize,
     rng: SmallRng,
     state: RuntimeState,
     plant_state: Vec<f64>,
@@ -103,7 +104,8 @@ impl SimulationCore {
             limits,
             logic,
             storage,
-            log_file,
+            log_file: BufWriter::with_capacity(64 * 1024, log_file),
+            pending_log_records: 0,
         };
         core.initialize_steady_state()?;
         core.last_inputs = core.build_inputs();
@@ -158,6 +160,7 @@ impl SimulationCore {
     }
 
     pub(crate) fn apply_live_config(&mut self, config: &SimulationConfig) {
+        self.simulation.speed = config.speed;
         self.simulation.cv_setpoints = config.cv_setpoints.clone();
         self.simulation.cv_noise_std = config.cv_noise_std.clone();
         self.simulation.mv_noise_std = config.mv_noise_std.clone();
@@ -167,13 +170,16 @@ impl SimulationCore {
         self.simulation.b_scale_pct = config.b_scale_pct.clone();
     }
 
+    pub(crate) fn target_cycle_duration(&self) -> Option<Duration> {
+        wall_cycle_duration(self.simulation.speed, self.config.runtime.cycle_ms)
+    }
+
     pub(crate) fn read_plot_samples(&self, limit: usize) -> Result<Vec<SignalSample>> {
         self.storage.read_recent_samples(limit)
     }
 
     pub(crate) fn read_plot_samples_window(&self, window_ms: u64) -> Result<Vec<SignalSample>> {
-        let since = now_ms().saturating_sub(window_ms as i64);
-        self.storage.read_samples_since(since)
+        self.storage.read_latest_samples_window(window_ms)
     }
 
     pub(crate) fn read_plot_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
@@ -183,9 +189,11 @@ impl SimulationCore {
     pub(crate) fn tick_once(&mut self, target_cycle: Option<Duration>) -> Result<()> {
         let cycle_start = Instant::now();
         let dt_s = self.config.runtime.cycle_ms as f64 / 1000.0;
+        let sample_timestamp_ms = simulation_timestamp_ms(self.simulation_time_s);
 
         let inputs = self.build_inputs();
-        self.storage.store_signal_map("input", &inputs)?;
+        self.storage
+            .store_signal_map_at(sample_timestamp_ms, "input", &inputs)?;
         self.last_inputs = inputs.clone();
 
         let mut outputs = self.logic.step(&inputs, RuntimeState::Running)?;
@@ -201,9 +209,10 @@ impl SimulationCore {
         }
 
         self.last_outputs = outputs.clone();
-        self.storage.store_signal_map("output", &outputs)?;
-        self.store_online_param_samples()?;
-        self.store_user_log_samples(&user_logs)?;
+        self.storage
+            .store_signal_map_at(sample_timestamp_ms, "output", &outputs)?;
+        self.store_online_param_samples(sample_timestamp_ms)?;
+        self.store_user_log_samples(sample_timestamp_ms, &user_logs)?;
         self.append_cycle_log(&inputs, &outputs, &user_logs)?;
 
         let (a_scaled, b_scaled) = self.scaled_model_matrices();
@@ -386,19 +395,21 @@ impl SimulationCore {
         self.append_log_record(record)
     }
 
-    fn store_online_param_samples(&self) -> Result<()> {
+    fn store_online_param_samples(&self, timestamp_ms: i64) -> Result<()> {
         let params = self.logic.current_params();
         let mut values = HashMap::new();
         for (key, value) in params {
             values.insert(key, SignalValue::from(value));
         }
-        self.storage.store_signal_map("online_param", &values)
+        self.storage
+            .store_signal_map_at(timestamp_ms, "online_param", &values)
     }
 
-    fn store_user_log_samples(&self, user_logs: &[LogicUserLog]) -> Result<()> {
+    fn store_user_log_samples(&self, timestamp_ms: i64, user_logs: &[LogicUserLog]) -> Result<()> {
         for entry in user_logs {
             for (signal, value) in &entry.values {
-                self.storage.store_signal("user_log", signal, value)?;
+                self.storage
+                    .store_signal_at(timestamp_ms, "user_log", signal, value)?;
             }
         }
         Ok(())
@@ -437,10 +448,20 @@ impl SimulationCore {
     fn append_log_record(&mut self, record: serde_json::Value) -> Result<()> {
         let encoded = serde_json::to_string(&record).context("failed to encode simulation log")?;
         writeln!(self.log_file, "{encoded}").context("failed writing simulation log line")?;
-        self.log_file
-            .flush()
-            .context("failed flushing simulation log")?;
+        self.pending_log_records += 1;
+        if self.pending_log_records >= 64 {
+            self.log_file
+                .flush()
+                .context("failed flushing simulation log")?;
+            self.pending_log_records = 0;
+        }
         Ok(())
+    }
+}
+
+impl Drop for SimulationCore {
+    fn drop(&mut self) {
+        let _ = self.log_file.flush();
     }
 }
 
@@ -495,6 +516,10 @@ fn simulation_cv_scalar(
 
 fn prefix_from_suffix(suffix: &str) -> &'static str {
     if suffix == "sollband" { "cv" } else { "mv" }
+}
+
+fn simulation_timestamp_ms(simulation_time_s: f64) -> i64 {
+    (simulation_time_s.max(0.0) * 1000.0).round() as i64
 }
 
 fn initial_u_vector(
