@@ -231,10 +231,14 @@ impl SimulationCore {
     }
 
     fn initialize_steady_state(&mut self) -> Result<()> {
+        let offsets =
+            derive_initial_cv_offsets(&self.model, &self.simulation, &self.config.variables)?;
         let (a_scaled, b_scaled) = self.scaled_model_matrices();
         let u = initial_u_vector(&self.model, &self.simulation, &self.config.variables);
         let y_target = initial_y_vector(&self.simulation, &self.model.y_order);
-        self.plant_state = solve_steady_state(&a_scaled, &b_scaled, &self.model, &u, &y_target)?;
+        self.plant_state =
+            solve_initial_plant_state(&a_scaled, &b_scaled, &self.model, &u, &y_target)?;
+        self.simulation.cv_offsets = offsets;
         Ok(())
     }
 
@@ -292,22 +296,7 @@ impl SimulationCore {
     }
 
     fn scaled_model_matrices(&self) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
-        let mut a = self.model.a.clone();
-        let mut b = self.model.b.clone();
-
-        for (row_index, row) in a.iter_mut().enumerate() {
-            for (col_index, value) in row.iter_mut().enumerate() {
-                *value *= self.simulation.a_scale_pct[row_index][col_index] / 100.0;
-            }
-        }
-
-        for (row_index, row) in b.iter_mut().enumerate() {
-            for (col_index, value) in row.iter_mut().enumerate() {
-                *value *= self.simulation.b_scale_pct[row_index][col_index] / 100.0;
-            }
-        }
-
-        (a, b)
+        scaled_model_matrices_for_simulation(&self.model, &self.simulation)
     }
 
     fn current_u_vector(
@@ -522,6 +511,65 @@ fn simulation_timestamp_ms(simulation_time_s: f64) -> i64 {
     (simulation_time_s.max(0.0) * 1000.0).round() as i64
 }
 
+fn scaled_model_matrices_for_simulation(
+    model: &LinearStateSpaceModelConfig,
+    simulation: &SimulationConfig,
+) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let mut a = model.a.clone();
+    let mut b = model.b.clone();
+
+    for (row_index, row) in a.iter_mut().enumerate() {
+        for (col_index, value) in row.iter_mut().enumerate() {
+            let scale_pct = simulation
+                .a_scale_pct
+                .get(row_index)
+                .and_then(|values| values.get(col_index))
+                .copied()
+                .unwrap_or(100.0);
+            *value *= scale_pct / 100.0;
+        }
+    }
+
+    for (row_index, row) in b.iter_mut().enumerate() {
+        for (col_index, value) in row.iter_mut().enumerate() {
+            let scale_pct = simulation
+                .b_scale_pct
+                .get(row_index)
+                .and_then(|values| values.get(col_index))
+                .copied()
+                .unwrap_or(100.0);
+            *value *= scale_pct / 100.0;
+        }
+    }
+
+    (a, b)
+}
+
+// Before a run starts, the entered initial CVs are treated as measurements.
+// The corresponding constant CV offsets are derived from the steady-state plant
+// output for the configured initial MV/DV values and A/B scaling.
+pub(crate) fn derive_initial_cv_offsets(
+    model: &LinearStateSpaceModelConfig,
+    simulation: &SimulationConfig,
+    vars: &crate::project_config::VariableCatalogConfig,
+) -> Result<HashMap<String, f64>> {
+    let (a_scaled, b_scaled) = scaled_model_matrices_for_simulation(model, simulation);
+    let u = initial_u_vector(model, simulation, vars);
+    let y_target = initial_y_vector(simulation, &model.y_order);
+    let x_ss = solve_initial_plant_state(&a_scaled, &b_scaled, model, &u, &y_target)?;
+    let y_model = output_vector(model, &x_ss, &u);
+
+    Ok(model
+        .y_order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let cv_initial = simulation.cv_initials.get(name).copied().unwrap_or(0.0);
+            (name.clone(), cv_initial - y_model[index])
+        })
+        .collect())
+}
+
 fn initial_u_vector(
     model: &LinearStateSpaceModelConfig,
     simulation: &SimulationConfig,
@@ -541,43 +589,44 @@ fn initial_u_vector(
 fn initial_y_vector(simulation: &SimulationConfig, y_order: &[String]) -> Vec<f64> {
     y_order
         .iter()
-        .map(|name| {
-            simulation.cv_initials.get(name).copied().unwrap_or(0.0)
-                - simulation.cv_offsets.get(name).copied().unwrap_or(0.0)
-        })
+        .map(|name| simulation.cv_initials.get(name).copied().unwrap_or(0.0))
         .collect()
 }
 
-fn solve_steady_state(
+fn solve_initial_plant_state(
     a: &[Vec<f64>],
     b: &[Vec<f64>],
     model: &LinearStateSpaceModelConfig,
     u: &[f64],
     y_target: &[f64],
 ) -> Result<Vec<f64>> {
-    let nx = model.state_count;
-    let ny = model.y_order.len();
-    let mut matrix = Vec::with_capacity(nx + ny);
-    let mut rhs = Vec::with_capacity(nx + ny);
+    const DYNAMICS_WEIGHT: f64 = 1.0e6;
+    let mut matrix = Vec::with_capacity(a.len() + model.c.len());
+    let mut rhs = Vec::with_capacity(a.len() + model.c.len());
 
-    for row_index in 0..nx {
-        matrix.push(a[row_index].clone());
-        rhs.push(-dot(&b[row_index], u));
+    for row_index in 0..a.len() {
+        matrix.push(
+            a[row_index]
+                .iter()
+                .map(|value| value * DYNAMICS_WEIGHT)
+                .collect(),
+        );
+        rhs.push(-dot(&b[row_index], u) * DYNAMICS_WEIGHT);
     }
 
-    for row_index in 0..ny {
+    for row_index in 0..model.c.len() {
         matrix.push(model.c[row_index].clone());
         rhs.push(y_target[row_index] - dot(&model.d[row_index], u));
     }
 
     let solution = solve_least_squares(&matrix, &rhs)?;
-    let residual = max_residual(&matrix, &solution, &rhs);
-    let scale = rhs
+    let dynamics_residual = max_residual(&matrix[..a.len()], &solution, &rhs[..a.len()]);
+    let scale = rhs[..a.len()]
         .iter()
         .copied()
         .fold(1.0_f64, |max, value| max.max(value.abs()));
-    if residual > 1e-6 * scale.max(1.0) {
-        bail!("simulation initial condition is inconsistent with the configured steady state");
+    if dynamics_residual > 1e-6 * scale.max(1.0) {
+        bail!("simulation initial condition is inconsistent with the configured model dynamics");
     }
     Ok(solution)
 }
@@ -816,7 +865,15 @@ mod tests {
             c: vec![vec![0.0]],
             d: vec![vec![0.0]],
         };
-        let err = solve_steady_state(&model.a, &model.b, &model, &[0.0], &[1.0])
+        let mut simulation = SimulationConfig::default();
+        simulation.cv_initials.insert("y1".to_string(), 1.0);
+        let vars = VariableCatalogConfig {
+            mvs: vec!["u1".to_string()],
+            cvs: vec!["y1".to_string()],
+            dvs: Vec::new(),
+        };
+
+        let err = derive_initial_cv_offsets(&model, &simulation, &vars)
             .expect_err("expected singular solve");
         assert!(err.to_string().contains("singular"));
     }
@@ -827,6 +884,76 @@ mod tests {
         let b = vec![vec![1.0]];
         let next = rk4_step(&a, &b, &[0.0], &[1.0], 1.0);
         assert!((next[0] - 0.625).abs() < 0.01);
+    }
+
+    #[test]
+    fn simulation_core_derives_offsets_from_initial_mv_and_cv() {
+        let temp = tempdir().expect("tempdir");
+        let mut cfg = ProjectConfig::new("offset_demo");
+        cfg.variables = VariableCatalogConfig {
+            mvs: vec!["u1".to_string()],
+            cvs: vec!["y1".to_string()],
+            dvs: Vec::new(),
+        };
+        cfg.io_definition = IoDefinitionConfig {
+            mvs: vec![MvIoDefinition {
+                name: "u1".to_string(),
+                mv_write: String::new(),
+                mv_read: String::new(),
+                hl_opc: None,
+                ll_opc: None,
+                hl: Some(10.0),
+                ll: Some(-10.0),
+                enable: None,
+            }],
+            cvs: vec![CvIoDefinition {
+                name: "y1".to_string(),
+                soll: String::new(),
+                ist: String::new(),
+                sollband_opc: None,
+                sollband_value: Some(0.05),
+                enable: None,
+            }],
+            dvs: Vec::new(),
+        };
+        cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.simulation.cv_initials.insert("y1".to_string(), 5.0);
+        cfg.simulation.mv_initials.insert("u1".to_string(), 2.0);
+        cfg.normalize_model_config();
+        cfg.normalize_simulation_config();
+        cfg.sync_active_online_params();
+
+        let (sim_io, limits) = cfg.build_simulation_io_and_limits().expect("sim io");
+        let logic = build_logic(&cfg, &sim_io, temp.path()).expect("logic");
+        let storage = SqliteStorage::new(temp.path().join("simulation.sqlite")).expect("storage");
+        let log_file = File::create(temp.path().join("simulation.log")).expect("log");
+        let core = SimulationCore::new(cfg, sim_io, limits, logic, storage, log_file)
+            .expect("core should derive startup offsets");
+
+        assert!((core.plant_state[0] - 2.0).abs() < 1e-6);
+        assert!(
+            (core
+                .simulation
+                .cv_offsets
+                .get("y1")
+                .copied()
+                .unwrap_or_default()
+                - 3.0)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(core.current_cv.get("y1").copied(), Some(5.0));
     }
 
     #[test]

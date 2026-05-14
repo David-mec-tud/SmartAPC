@@ -32,6 +32,7 @@ use crate::{
         VariableCatalogConfig, WatchdogConfig,
     },
     runtime::{ExecutionSnapshot, RuntimeManager},
+    simulation::derive_initial_cv_offsets,
     storage::SignalSample,
     types::SignalValue,
     web::{AppState, build_router},
@@ -605,15 +606,17 @@ impl SimulationEditorState {
             return;
         };
 
-        self.a_scale_cells = resize_string_matrix(
+        self.a_scale_cells = resize_string_matrix_with_default(
             std::mem::take(&mut self.a_scale_cells),
             model.state_count,
             model.state_count,
+            "100.0",
         );
-        self.b_scale_cells = resize_string_matrix(
+        self.b_scale_cells = resize_string_matrix_with_default(
             std::mem::take(&mut self.b_scale_cells),
             model.state_count,
             model.u_order.len(),
+            "100.0",
         );
 
         fill_empty_cells(&mut self.a_scale_cells, "100.0");
@@ -1140,6 +1143,43 @@ impl DesktopApp {
         matches!(self.active_snapshot, Some(ExecutionSnapshot::Simulation(_)))
     }
 
+    fn sync_stopped_simulation_cv_offsets(&mut self) {
+        if self.simulation_running() {
+            return;
+        }
+
+        let model_preview = build_model_preview(&self.model_editor, &self.variables);
+        let Ok(config) = build_simulation_config_from_editor(
+            &self.simulation_editor,
+            &self.variables,
+            model_preview.as_ref(),
+            false,
+        ) else {
+            return;
+        };
+
+        self.simulation_editor.cv_offsets =
+            named_value_rows(&self.variables.cvs, &config.cv_offsets);
+    }
+
+    fn simulation_cv_offset_rows_for_view(
+        &self,
+        model_preview: Option<&ModelConfig>,
+    ) -> Vec<SimulationNamedValueRow> {
+        if self.simulation_running() {
+            return self.simulation_editor.cv_offsets.clone();
+        }
+
+        build_simulation_config_from_editor(
+            &self.simulation_editor,
+            &self.variables,
+            model_preview,
+            false,
+        )
+        .map(|config| named_value_rows(&self.variables.cvs, &config.cv_offsets))
+        .unwrap_or_else(|_| self.simulation_editor.cv_offsets.clone())
+    }
+
     fn linear_mpc_available(&self) -> bool {
         if self.model_editor.selected_kind != ModelKindChoice::LinearStateSpace {
             return false;
@@ -1190,6 +1230,7 @@ impl DesktopApp {
             &self.simulation_editor,
             &self.variables,
             model_preview.as_ref(),
+            self.simulation_running(),
         )
         .is_err()
         {
@@ -2233,10 +2274,12 @@ impl DesktopApp {
                     self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
                     return Task::none();
                 };
+                self.sync_stopped_simulation_cv_offsets();
                 start_simulation_task(
                     Arc::clone(&self.runtime),
                     self.project_service.clone(),
                     project_name,
+                    self.simulation_editor.clone(),
                 )
             }
             Message::StopSimulationPressed => stop_simulation_task(Arc::clone(&self.runtime)),
@@ -2673,6 +2716,7 @@ impl DesktopApp {
                 .padding(12),
             );
         } else {
+            let cv_offset_rows = self.simulation_cv_offset_rows_for_view(model_preview.as_ref());
             let speed_control: Element<'_, Message> = if structural_editable || live_editable {
                 pick_list(
                     SIMULATION_SPEED_OPTIONS,
@@ -2694,7 +2738,7 @@ impl DesktopApp {
                     text(if simulation_running {
                         "Live edits allowed: speed, setpoints, disturbances, offsets, noise, A/B scales"
                     } else {
-                        "Speed, initial conditions, disturbances, noise and A/B scales are saved immediately"
+                        "Initial conditions save immediately. CV offsets are derived from the initial MV/CV values until the simulation starts."
                     })
                     .size(13),
                 ]
@@ -2747,8 +2791,8 @@ impl DesktopApp {
                     "CV offsets",
                     "cv",
                     "offset",
-                    &self.simulation_editor.cv_offsets,
-                    structural_editable || live_editable,
+                    &cv_offset_rows,
+                    live_editable,
                     Message::SimulationCvOffsetChanged,
                 ))
                 .push(self.simulation_named_rows_section(
@@ -4309,9 +4353,24 @@ fn start_simulation_task(
     runtime: Arc<RuntimeManager>,
     project_service: ProjectService,
     project_name: String,
+    editor: SimulationEditorState,
 ) -> Task<Message> {
     Task::perform(
         async move {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            cfg.simulation = build_simulation_config_from_editor(
+                &editor,
+                &cfg.variables,
+                cfg.model.as_ref(),
+                false,
+            )?;
+            project_service
+                .save_config(&project_name, &cfg)
+                .map_err(|err| {
+                    format!("Simulationseinstellungen konnten nicht gespeichert werden: {err}")
+                })?;
             runtime
                 .start_simulation(&project_service, &project_name)
                 .await
@@ -4833,8 +4892,12 @@ fn sync_simulation_editor_task(
             let mut cfg = project_service.load_config(&project_name).map_err(|err| {
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
-            cfg.simulation =
-                build_simulation_config_from_editor(&editor, &cfg.variables, cfg.model.as_ref())?;
+            cfg.simulation = build_simulation_config_from_editor(
+                &editor,
+                &cfg.variables,
+                cfg.model.as_ref(),
+                apply_live,
+            )?;
             project_service
                 .save_config(&project_name, &cfg)
                 .map_err(|err| {
@@ -4898,8 +4961,9 @@ fn build_model_config_from_editor(
 
 fn build_simulation_config_from_editor(
     editor: &SimulationEditorState,
-    _vars: &VariableCatalogConfig,
+    vars: &VariableCatalogConfig,
     model: Option<&ModelConfig>,
+    allow_manual_cv_offsets: bool,
 ) -> Result<SimulationConfig, String> {
     let linear_model = model.and_then(ModelConfig::linear_state_space);
     let (a_rows, a_cols, b_rows, b_cols) = match linear_model {
@@ -4912,7 +4976,7 @@ fn build_simulation_config_from_editor(
         None => (0, 0, 0, 0),
     };
 
-    Ok(SimulationConfig {
+    let mut config = SimulationConfig {
         speed: editor.speed.into(),
         cv_setpoints: parse_named_value_rows("cv setpoint", &editor.cv_setpoints, false)?,
         cv_initials: parse_named_value_rows("cv initial", &editor.cv_initials, false)?,
@@ -4921,10 +4985,24 @@ fn build_simulation_config_from_editor(
         cv_noise_std: parse_named_value_rows("cv noise", &editor.cv_noise_std, true)?,
         mv_noise_std: parse_named_value_rows("mv noise", &editor.mv_noise_std, true)?,
         dv_disturbances: parse_named_value_rows("dv disturbance", &editor.dv_disturbances, false)?,
-        cv_offsets: parse_named_value_rows("cv offset", &editor.cv_offsets, false)?,
+        cv_offsets: if allow_manual_cv_offsets {
+            parse_named_value_rows("cv offset", &editor.cv_offsets, false)?
+        } else {
+            HashMap::new()
+        },
         a_scale_pct: parse_numeric_matrix("A scale", &editor.a_scale_cells, a_rows, a_cols)?,
         b_scale_pct: parse_numeric_matrix("B scale", &editor.b_scale_cells, b_rows, b_cols)?,
-    })
+    };
+
+    if !allow_manual_cv_offsets {
+        if let Some(model) = linear_model {
+            config.cv_offsets = derive_initial_cv_offsets(model, &config, vars).map_err(|err| {
+                format!("CV offsets konnten nicht aus den Initialwerten berechnet werden: {err}")
+            })?;
+        }
+    }
+
+    Ok(config)
 }
 
 fn parse_numeric_matrix(
@@ -6150,7 +6228,16 @@ fn matrix_to_string_cells(matrix: &[Vec<f64>]) -> Vec<Vec<String>> {
 }
 
 fn resize_string_matrix(matrix: Vec<Vec<String>>, rows: usize, cols: usize) -> Vec<Vec<String>> {
-    let mut resized = vec![vec![String::from("0.0"); cols]; rows];
+    resize_string_matrix_with_default(matrix, rows, cols, "0.0")
+}
+
+fn resize_string_matrix_with_default(
+    matrix: Vec<Vec<String>>,
+    rows: usize,
+    cols: usize,
+    default_value: &str,
+) -> Vec<Vec<String>> {
+    let mut resized = vec![vec![default_value.to_string(); cols]; rows];
 
     for (row_index, row) in matrix.into_iter().enumerate().take(rows) {
         for (col_index, value) in row.into_iter().enumerate().take(cols) {
@@ -6316,13 +6403,14 @@ fn split_import_row(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use crate::project_config::{
-        CvIoDefinition, LogicParamValue, MvIoDefinition, ProjectConfig, VariableCatalogConfig,
-        WatchdogConfig,
+        CvIoDefinition, LinearStateSpaceModelConfig, LogicParamValue, ModelConfig, MvIoDefinition,
+        ProjectConfig, VariableCatalogConfig, WatchdogConfig,
     };
 
     use super::{
-        ModelEditorState, ModelKindChoice, build_model_config_from_editor,
-        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
+        ModelEditorState, ModelKindChoice, SimulationEditorState, build_model_config_from_editor,
+        build_simulation_config_from_editor, parse_matrix_import_text, resize_string_matrix,
+        sync_io_initial_value_online_params,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -6459,5 +6547,34 @@ mod tests {
             .expect_err("invalid numeric cell should fail");
 
         assert!(err.contains("A[1, 2]"));
+    }
+
+    #[test]
+    fn stopped_simulation_editor_derives_cv_offsets_from_initials() {
+        let vars = VariableCatalogConfig {
+            mvs: vec!["u1".to_string()],
+            cvs: vec!["y1".to_string()],
+            dvs: Vec::new(),
+        };
+        let model = ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        };
+        let mut editor = SimulationEditorState::blank(&vars, Some(&model));
+        editor.cv_initials[0].value = "5.0".to_string();
+        editor.mv_initials[0].value = "2.0".to_string();
+        editor.cv_offsets[0].value = "not-a-number".to_string();
+
+        let config = build_simulation_config_from_editor(&editor, &vars, Some(&model), false)
+            .expect("stopped simulation should derive offsets");
+
+        assert!((config.cv_offsets.get("y1").copied().unwrap_or_default() - 3.0).abs() < 1e-6);
     }
 }
