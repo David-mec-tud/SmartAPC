@@ -80,6 +80,7 @@ impl SimulationCore {
             .and_then(|model| model.linear_state_space())
             .cloned()
             .ok_or_else(|| anyhow!("simulation requires a linear state-space model"))?;
+        reset_startup_scale_matrices(&mut config.simulation, &model);
 
         let mut core = Self {
             current_cv: config.simulation.cv_initials.clone(),
@@ -235,9 +236,7 @@ impl SimulationCore {
             derive_initial_cv_offsets(&self.model, &self.simulation, &self.config.variables)?;
         let (a_scaled, b_scaled) = self.scaled_model_matrices();
         let u = initial_u_vector(&self.model, &self.simulation, &self.config.variables);
-        let y_target = initial_y_vector(&self.simulation, &self.model.y_order);
-        self.plant_state =
-            solve_initial_plant_state(&a_scaled, &b_scaled, &self.model, &u, &y_target)?;
+        self.plant_state = solve_state_steady_state(&a_scaled, &b_scaled, &u)?;
         self.simulation.cv_offsets = offsets;
         Ok(())
     }
@@ -511,6 +510,14 @@ fn simulation_timestamp_ms(simulation_time_s: f64) -> i64 {
     (simulation_time_s.max(0.0) * 1000.0).round() as i64
 }
 
+fn reset_startup_scale_matrices(
+    simulation: &mut SimulationConfig,
+    model: &LinearStateSpaceModelConfig,
+) {
+    simulation.a_scale_pct = vec![vec![100.0; model.state_count]; model.state_count];
+    simulation.b_scale_pct = vec![vec![100.0; model.u_order.len()]; model.state_count];
+}
+
 fn scaled_model_matrices_for_simulation(
     model: &LinearStateSpaceModelConfig,
     simulation: &SimulationConfig,
@@ -547,7 +554,7 @@ fn scaled_model_matrices_for_simulation(
 
 // Before a run starts, the entered initial CVs are treated as measurements.
 // The corresponding constant CV offsets are derived from the steady-state plant
-// output for the configured initial MV/DV values and A/B scaling.
+// output for the configured initial MV/DV values on the unscaled base model.
 pub(crate) fn derive_initial_cv_offsets(
     model: &LinearStateSpaceModelConfig,
     simulation: &SimulationConfig,
@@ -555,8 +562,7 @@ pub(crate) fn derive_initial_cv_offsets(
 ) -> Result<HashMap<String, f64>> {
     let (a_scaled, b_scaled) = scaled_model_matrices_for_simulation(model, simulation);
     let u = initial_u_vector(model, simulation, vars);
-    let y_target = initial_y_vector(simulation, &model.y_order);
-    let x_ss = solve_initial_plant_state(&a_scaled, &b_scaled, model, &u, &y_target)?;
+    let x_ss = solve_state_steady_state(&a_scaled, &b_scaled, &u)?;
     let y_model = output_vector(model, &x_ss, &u);
 
     Ok(model
@@ -586,66 +592,25 @@ fn initial_u_vector(
     u
 }
 
-fn initial_y_vector(simulation: &SimulationConfig, y_order: &[String]) -> Vec<f64> {
-    y_order
-        .iter()
-        .map(|name| simulation.cv_initials.get(name).copied().unwrap_or(0.0))
-        .collect()
-}
-
-fn solve_initial_plant_state(
-    a: &[Vec<f64>],
-    b: &[Vec<f64>],
-    model: &LinearStateSpaceModelConfig,
-    u: &[f64],
-    y_target: &[f64],
-) -> Result<Vec<f64>> {
-    const DYNAMICS_WEIGHT: f64 = 1.0e6;
-    let mut matrix = Vec::with_capacity(a.len() + model.c.len());
-    let mut rhs = Vec::with_capacity(a.len() + model.c.len());
+fn solve_state_steady_state(a: &[Vec<f64>], b: &[Vec<f64>], u: &[f64]) -> Result<Vec<f64>> {
+    let mut matrix = Vec::with_capacity(a.len());
+    let mut rhs = Vec::with_capacity(a.len());
 
     for row_index in 0..a.len() {
-        matrix.push(
-            a[row_index]
-                .iter()
-                .map(|value| value * DYNAMICS_WEIGHT)
-                .collect(),
-        );
-        rhs.push(-dot(&b[row_index], u) * DYNAMICS_WEIGHT);
+        matrix.push(a[row_index].clone());
+        rhs.push(-dot(&b[row_index], u));
     }
 
-    for row_index in 0..model.c.len() {
-        matrix.push(model.c[row_index].clone());
-        rhs.push(y_target[row_index] - dot(&model.d[row_index], u));
-    }
-
-    let solution = solve_least_squares(&matrix, &rhs)?;
-    let dynamics_residual = max_residual(&matrix[..a.len()], &solution, &rhs[..a.len()]);
-    let scale = rhs[..a.len()]
+    let solution = solve_linear_system(matrix.clone(), rhs.clone())?;
+    let residual = max_residual(&matrix, &solution, &rhs);
+    let scale = rhs
         .iter()
         .copied()
         .fold(1.0_f64, |max, value| max.max(value.abs()));
-    if dynamics_residual > 1e-6 * scale.max(1.0) {
+    if residual > 1e-6 * scale.max(1.0) {
         bail!("simulation initial condition is inconsistent with the configured model dynamics");
     }
     Ok(solution)
-}
-
-fn solve_least_squares(matrix: &[Vec<f64>], rhs: &[f64]) -> Result<Vec<f64>> {
-    let cols = matrix.first().map_or(0, Vec::len);
-    let mut normal = vec![vec![0.0; cols]; cols];
-    let mut normal_rhs = vec![0.0; cols];
-
-    for (row, value) in matrix.iter().zip(rhs.iter()) {
-        for col_i in 0..cols {
-            normal_rhs[col_i] += row[col_i] * value;
-            for col_j in 0..cols {
-                normal[col_i][col_j] += row[col_i] * row[col_j];
-            }
-        }
-    }
-
-    solve_linear_system(normal, normal_rhs)
 }
 
 fn solve_linear_system(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Result<Vec<f64>> {
@@ -887,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn simulation_core_derives_offsets_from_initial_mv_and_cv() {
+    fn simulation_core_derives_offsets_from_initial_mv_and_cv_on_base_model() {
         let temp = tempdir().expect("tempdir");
         let mut cfg = ProjectConfig::new("offset_demo");
         cfg.variables = VariableCatalogConfig {
@@ -928,8 +893,10 @@ mod tests {
                 d: vec![vec![0.0]],
             },
         });
-        cfg.simulation.cv_initials.insert("y1".to_string(), 5.0);
+        cfg.simulation.cv_initials.insert("y1".to_string(), 7.0);
         cfg.simulation.mv_initials.insert("u1".to_string(), 2.0);
+        cfg.simulation.a_scale_pct = vec![vec![50.0]];
+        cfg.simulation.b_scale_pct = vec![vec![25.0]];
         cfg.normalize_model_config();
         cfg.normalize_simulation_config();
         cfg.sync_active_online_params();
@@ -942,6 +909,8 @@ mod tests {
             .expect("core should derive startup offsets");
 
         assert!((core.plant_state[0] - 2.0).abs() < 1e-6);
+        assert_eq!(core.simulation.a_scale_pct, vec![vec![100.0]]);
+        assert_eq!(core.simulation.b_scale_pct, vec![vec![100.0]]);
         assert!(
             (core
                 .simulation
@@ -949,11 +918,11 @@ mod tests {
                 .get("y1")
                 .copied()
                 .unwrap_or_default()
-                - 3.0)
+                - 5.0)
                 .abs()
                 < 1e-6
         );
-        assert_eq!(core.current_cv.get("y1").copied(), Some(5.0));
+        assert_eq!(core.current_cv.get("y1").copied(), Some(7.0));
     }
 
     #[test]

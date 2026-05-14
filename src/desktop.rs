@@ -1143,12 +1143,22 @@ impl DesktopApp {
         matches!(self.active_snapshot, Some(ExecutionSnapshot::Simulation(_)))
     }
 
-    fn sync_stopped_simulation_cv_offsets(&mut self) {
+    fn sync_stopped_simulation_startup_state(&mut self) {
         if self.simulation_running() {
             return;
         }
 
         let model_preview = build_model_preview(&self.model_editor, &self.variables);
+        if let Some(model) = model_preview
+            .as_ref()
+            .and_then(ModelConfig::linear_state_space)
+        {
+            self.simulation_editor.a_scale_cells =
+                startup_scale_cells(model.state_count, model.state_count);
+            self.simulation_editor.b_scale_cells =
+                startup_scale_cells(model.state_count, model.u_order.len());
+        }
+
         let Ok(config) = build_simulation_config_from_editor(
             &self.simulation_editor,
             &self.variables,
@@ -1178,6 +1188,30 @@ impl DesktopApp {
         )
         .map(|config| named_value_rows(&self.variables.cvs, &config.cv_offsets))
         .unwrap_or_else(|_| self.simulation_editor.cv_offsets.clone())
+    }
+
+    fn simulation_scale_cells_for_view(
+        &self,
+        model_preview: Option<&ModelConfig>,
+        matrix: MatrixKey,
+    ) -> Vec<Vec<String>> {
+        if self.simulation_running() {
+            return match matrix {
+                MatrixKey::A => self.simulation_editor.a_scale_cells.clone(),
+                MatrixKey::B => self.simulation_editor.b_scale_cells.clone(),
+                MatrixKey::C | MatrixKey::D => Vec::new(),
+            };
+        }
+
+        let Some(model) = model_preview.and_then(ModelConfig::linear_state_space) else {
+            return Vec::new();
+        };
+
+        match matrix {
+            MatrixKey::A => startup_scale_cells(model.state_count, model.state_count),
+            MatrixKey::B => startup_scale_cells(model.state_count, model.u_order.len()),
+            MatrixKey::C | MatrixKey::D => Vec::new(),
+        }
     }
 
     fn linear_mpc_available(&self) -> bool {
@@ -2274,7 +2308,7 @@ impl DesktopApp {
                     self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
                     return Task::none();
                 };
-                self.sync_stopped_simulation_cv_offsets();
+                self.sync_stopped_simulation_startup_state();
                 start_simulation_task(
                     Arc::clone(&self.runtime),
                     self.project_service.clone(),
@@ -2717,6 +2751,10 @@ impl DesktopApp {
             );
         } else {
             let cv_offset_rows = self.simulation_cv_offset_rows_for_view(model_preview.as_ref());
+            let a_scale_cells =
+                self.simulation_scale_cells_for_view(model_preview.as_ref(), MatrixKey::A);
+            let b_scale_cells =
+                self.simulation_scale_cells_for_view(model_preview.as_ref(), MatrixKey::B);
             let speed_control: Element<'_, Message> = if structural_editable || live_editable {
                 pick_list(
                     SIMULATION_SPEED_OPTIONS,
@@ -2738,7 +2776,7 @@ impl DesktopApp {
                     text(if simulation_running {
                         "Live edits allowed: speed, setpoints, disturbances, offsets, noise, A/B scales"
                     } else {
-                        "Initial conditions save immediately. CV offsets are derived from the initial MV/CV values until the simulation starts."
+                        "Initial conditions save immediately. CV offsets are derived from the initial MV/CV values, and A/B scaling stays at 100% until the simulation starts."
                     })
                     .size(13),
                 ]
@@ -2815,8 +2853,8 @@ impl DesktopApp {
                     self.simulation_scale_matrix_view(
                         MatrixKey::A,
                         "A scale (%)",
-                        &self.simulation_editor.a_scale_cells,
-                        structural_editable || live_editable,
+                        &a_scale_cells,
+                        live_editable,
                         build_state_labels(
                             model_preview
                                 .as_ref()
@@ -2837,8 +2875,8 @@ impl DesktopApp {
                     self.simulation_scale_matrix_view(
                         MatrixKey::B,
                         "B scale (%)",
-                        &self.simulation_editor.b_scale_cells,
-                        structural_editable || live_editable,
+                        &b_scale_cells,
+                        live_editable,
                         build_state_labels(
                             model_preview
                                 .as_ref()
@@ -4990,8 +5028,16 @@ fn build_simulation_config_from_editor(
         } else {
             HashMap::new()
         },
-        a_scale_pct: parse_numeric_matrix("A scale", &editor.a_scale_cells, a_rows, a_cols)?,
-        b_scale_pct: parse_numeric_matrix("B scale", &editor.b_scale_cells, b_rows, b_cols)?,
+        a_scale_pct: if allow_manual_cv_offsets {
+            parse_numeric_matrix("A scale", &editor.a_scale_cells, a_rows, a_cols)?
+        } else {
+            vec![vec![100.0; a_cols]; a_rows]
+        },
+        b_scale_pct: if allow_manual_cv_offsets {
+            parse_numeric_matrix("B scale", &editor.b_scale_cells, b_rows, b_cols)?
+        } else {
+            vec![vec![100.0; b_cols]; b_rows]
+        },
     };
 
     if !allow_manual_cv_offsets {
@@ -6227,6 +6273,10 @@ fn matrix_to_string_cells(matrix: &[Vec<f64>]) -> Vec<Vec<String>> {
         .collect()
 }
 
+fn startup_scale_cells(rows: usize, cols: usize) -> Vec<Vec<String>> {
+    vec![vec!["100.0".to_string(); cols]; rows]
+}
+
 fn resize_string_matrix(matrix: Vec<Vec<String>>, rows: usize, cols: usize) -> Vec<Vec<String>> {
     resize_string_matrix_with_default(matrix, rows, cols, "0.0")
 }
@@ -6550,7 +6600,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_simulation_editor_derives_cv_offsets_from_initials() {
+    fn stopped_simulation_editor_derives_offsets_from_cv_and_mv_initials_on_base_model() {
         let vars = VariableCatalogConfig {
             mvs: vec!["u1".to_string()],
             cvs: vec!["y1".to_string()],
@@ -6568,13 +6618,17 @@ mod tests {
             },
         };
         let mut editor = SimulationEditorState::blank(&vars, Some(&model));
-        editor.cv_initials[0].value = "5.0".to_string();
+        editor.cv_initials[0].value = "7.0".to_string();
         editor.mv_initials[0].value = "2.0".to_string();
         editor.cv_offsets[0].value = "not-a-number".to_string();
+        editor.a_scale_cells[0][0] = "50.0".to_string();
+        editor.b_scale_cells[0][0] = "25.0".to_string();
 
         let config = build_simulation_config_from_editor(&editor, &vars, Some(&model), false)
             .expect("stopped simulation should derive offsets");
 
-        assert!((config.cv_offsets.get("y1").copied().unwrap_or_default() - 3.0).abs() < 1e-6);
+        assert_eq!(config.a_scale_pct, vec![vec![100.0]]);
+        assert_eq!(config.b_scale_pct, vec![vec![100.0]]);
+        assert!((config.cv_offsets.get("y1").copied().unwrap_or_default() - 5.0).abs() < 1e-6);
     }
 }
