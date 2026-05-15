@@ -177,6 +177,7 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
   - CV-Tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
   - MV-Tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
   - Kalman-Filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`, `mpc.kalman.cv.<cv>.bias_q`
+- Im Reiter **Regellogik** können diese `mpc.*`-Startwerte vor dem Speichern gesetzt werden; danach erscheinen sie unter **Online Parameter** und sind live änderbar.
 - CV-Bänder sind relativ zum Live-Sollwert. Innerhalb des Bandes wird kein CV-Fehler bestraft; außerhalb wird auf die nächste Bandkante optimiert.
 - Pro CV wird ein Ausgangs-Bias geschätzt. Dieser Bias kompensiert konstante Messoffsets und stationäre Modellabweichungen in den MPC-Vorhersagen.
 - MV-Grenzen kommen aus `io.mv.<mv>.ll` und `io.mv.<mv>.hl`, sofern statisch oder als OPC-Eingang verfügbar.

@@ -23,12 +23,13 @@ use crate::{
         ControlFunctionTestReport, DefaultSweepDimension, NumericSweepConfig, SweepExecutionMode,
         SweepSelection, SweepValueKind, default_sweep_dimensions, run_control_function_tests,
     },
+    linear_mpc::linear_mpc_default_params,
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
     project::ProjectService,
     project_config::{
         CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
         LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
-        PControllerPairConfig, SidebarTask, SimulationConfig, SimulationSpeedMode,
+        PControllerPairConfig, ProjectConfig, SidebarTask, SimulationConfig, SimulationSpeedMode,
         VariableCatalogConfig, WatchdogConfig,
     },
     runtime::{ExecutionSnapshot, RuntimeManager},
@@ -690,9 +691,16 @@ impl PPairEditorRow {
 }
 
 #[derive(Debug, Clone)]
+struct MpcParamEditorRow {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
 struct LogicEditorState {
     selected_kind: LogicKindChoice,
     p_pairs: Vec<PPairEditorRow>,
+    mpc_params: Vec<MpcParamEditorRow>,
     custom_strategy_name: String,
     custom_source_path: String,
     custom_artifact_path: String,
@@ -701,27 +709,33 @@ struct LogicEditorState {
 }
 
 impl LogicEditorState {
-    fn from_config(
-        cfg: &crate::project_config::LogicConfig,
-        io: &crate::project_config::IoConfig,
-    ) -> Self {
-        let p_pairs = if cfg.p_controller.pairs.is_empty() {
+    fn from_config(cfg: &ProjectConfig) -> Self {
+        let p_pairs = if cfg.logic.p_controller.pairs.is_empty() {
             vec![PPairEditorRow::blank()]
         } else {
-            cfg.p_controller
+            cfg.logic
+                .p_controller
                 .pairs
                 .iter()
                 .map(PPairEditorRow::from_pair)
                 .collect()
         };
+        let mpc_params = linear_mpc_editor_rows(
+            cfg.model.as_ref().and_then(ModelConfig::linear_state_space),
+            &cfg.variables,
+            &cfg.static_cv_band_defaults(),
+            &cfg.logic.params,
+            &[],
+        );
         Self {
-            selected_kind: cfg.kind.into(),
+            selected_kind: cfg.logic.kind.into(),
             p_pairs,
-            custom_strategy_name: cfg.custom_rust.strategy_name.clone(),
-            custom_source_path: cfg.custom_rust.source_path.clone(),
-            custom_artifact_path: cfg.custom_rust.artifact_path.clone(),
-            custom_compatible: cfg.custom_rust.is_compatible_with(io),
-            custom_status: cfg.custom_rust.last_build_message.clone(),
+            mpc_params,
+            custom_strategy_name: cfg.logic.custom_rust.strategy_name.clone(),
+            custom_source_path: cfg.logic.custom_rust.source_path.clone(),
+            custom_artifact_path: cfg.logic.custom_rust.artifact_path.clone(),
+            custom_compatible: cfg.logic.custom_rust.is_compatible_with(&cfg.io),
+            custom_status: cfg.logic.custom_rust.last_build_message.clone(),
         }
     }
 
@@ -729,6 +743,7 @@ impl LogicEditorState {
         Self {
             selected_kind: LogicKindChoice::PController,
             p_pairs: vec![PPairEditorRow::blank()],
+            mpc_params: Vec::new(),
             custom_strategy_name: String::new(),
             custom_source_path: String::new(),
             custom_artifact_path: String::new(),
@@ -1016,6 +1031,7 @@ enum Message {
     PPairMvChanged(usize, String),
     PPairKpChanged(usize, String),
     PPairBiasChanged(usize, String),
+    MpcParamChanged(usize, String),
     CustomStrategyNameChanged(String),
     CustomSourcePathChanged(String),
     CustomArtifactPathChanged(String),
@@ -1255,6 +1271,19 @@ impl DesktopApp {
         true
     }
 
+    fn refresh_linear_mpc_editor_params(&mut self) {
+        let model_preview = build_model_preview(&self.model_editor, &self.variables);
+        self.logic_editor.mpc_params = linear_mpc_editor_rows(
+            model_preview
+                .as_ref()
+                .and_then(ModelConfig::linear_state_space),
+            &self.variables,
+            &cv_band_defaults_from_editor_rows(&self.cv_io_rows),
+            &self.logic_params,
+            &self.logic_editor.mpc_params,
+        );
+    }
+
     fn maybe_autosave_simulation_editor(&self) -> Task<Message> {
         let Some(project_name) = self.selected_project.clone() else {
             return Task::none();
@@ -1368,6 +1397,9 @@ impl DesktopApp {
             }
             Message::LogicKindChanged(kind) => {
                 self.logic_editor.selected_kind = kind;
+                if kind == LogicKindChoice::LinearMpc {
+                    self.refresh_linear_mpc_editor_params();
+                }
                 Task::none()
             }
             Message::AddPControllerPair => {
@@ -1395,6 +1427,12 @@ impl DesktopApp {
             Message::PPairBiasChanged(index, value) => {
                 if let Some(row) = self.logic_editor.p_pairs.get_mut(index) {
                     row.bias = value;
+                }
+                Task::none()
+            }
+            Message::MpcParamChanged(index, value) => {
+                if let Some(row) = self.logic_editor.mpc_params.get_mut(index) {
+                    row.value = value;
                 }
                 Task::none()
             }
@@ -3833,9 +3871,38 @@ impl DesktopApp {
                 );
             }
         } else if selected_kind == LogicKindChoice::LinearMpc {
+            content = content.push(text("Linear MPC Startwerte").size(16));
             content = content.push(text(
-                "Linear MPC ist aktiv. Tuning, CV-Bänder, MV-Gewichte und Kalman-Parameter werden als Online-Parameter bearbeitet.",
+                "Diese Werte werden beim Speichern als Online-Parameter angelegt und bleiben später live änderbar.",
             ).size(14));
+
+            if self.logic_editor.mpc_params.is_empty() {
+                content = content.push(text(
+                    "Keine Linear-MPC-Parameter verfügbar. Bitte zuerst Modell, Variablen und I/O speichern.",
+                ).size(14));
+            } else {
+                content = content.push(
+                    row![
+                        text("Parameter").width(Length::FillPortion(2)),
+                        text("Startwert").width(Length::FillPortion(1)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+
+                for (index, row_data) in self.logic_editor.mpc_params.iter().enumerate() {
+                    content = content.push(
+                        row![
+                            text(row_data.key.clone()).width(Length::FillPortion(2)),
+                            text_input("Wert", &row_data.value)
+                                .on_input(move |value| Message::MpcParamChanged(index, value))
+                                .width(Length::FillPortion(1)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    );
+                }
+            }
         } else {
             content = content.push(text("Eigene Regellogik ist aktiv.").size(14));
         }
@@ -4158,6 +4225,60 @@ fn format_logic_param_value(value: &LogicParamValue) -> String {
     }
 }
 
+fn linear_mpc_editor_rows(
+    model: Option<&LinearStateSpaceModelConfig>,
+    vars: &VariableCatalogConfig,
+    cv_band_defaults: &HashMap<String, f64>,
+    params: &HashMap<String, LogicParamValue>,
+    edited_rows: &[MpcParamEditorRow],
+) -> Vec<MpcParamEditorRow> {
+    let Some(model) = model else {
+        return Vec::new();
+    };
+    if vars.mvs.is_empty() || vars.cvs.is_empty() {
+        return Vec::new();
+    }
+
+    let edited_values: HashMap<_, _> = edited_rows
+        .iter()
+        .map(|row| (row.key.clone(), row.value.clone()))
+        .collect();
+    let defaults = linear_mpc_default_params(model, vars, cv_band_defaults);
+    let mut keys: Vec<_> = defaults.keys().cloned().collect();
+    keys.sort();
+
+    keys.into_iter()
+        .map(|key| {
+            let value = edited_values
+                .get(&key)
+                .cloned()
+                .or_else(|| params.get(&key).map(format_logic_param_value))
+                .unwrap_or_else(|| {
+                    format_logic_param_value(
+                        defaults
+                            .get(&key)
+                            .expect("linear MPC default key was collected from defaults"),
+                    )
+                });
+            MpcParamEditorRow { key, value }
+        })
+        .collect()
+}
+
+fn cv_band_defaults_from_editor_rows(rows: &[CvIoEditorRow]) -> HashMap<String, f64> {
+    let mut defaults = HashMap::new();
+    for row in rows {
+        let name = row.name.trim();
+        if name.is_empty() || !row.sollband_opc.trim().is_empty() {
+            continue;
+        }
+        if let Ok(value) = row.sollband_value.trim().parse::<f64>() {
+            defaults.insert(name.to_string(), value);
+        }
+    }
+    defaults
+}
+
 fn parse_logic_param_input(
     current: &LogicParamValue,
     raw: &str,
@@ -4268,7 +4389,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 &cfg.variables,
                 cfg.model.as_ref(),
             );
-            let logic_editor = LogicEditorState::from_config(&cfg.logic, &cfg.io);
+            let logic_editor = LogicEditorState::from_config(&cfg);
             let control_function_tests =
                 ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
 
@@ -5170,6 +5291,23 @@ fn save_logic_task(
                     format!("p.{}.{}.bias", pair.cv, pair.mv),
                     LogicParamValue::F64(pair.bias),
                 );
+            }
+            if cfg.logic.kind == LogicKind::LinearMpc {
+                if editor.mpc_params.is_empty() {
+                    return Err(
+                        "Linear MPC braucht gespeicherte Startwerte. Bitte Modell, Variablen und I/O prüfen."
+                            .to_string(),
+                    );
+                }
+                for row in editor.mpc_params {
+                    let key = row.key.trim();
+                    let value = row.value.trim().parse::<f64>().map_err(|_| {
+                        format!("Ungültiger Linear-MPC-Startwert für '{}'", row.key)
+                    })?;
+                    cfg.logic
+                        .params
+                        .insert(key.to_string(), LogicParamValue::F64(value));
+                }
             }
             cfg.sync_active_online_params();
 
@@ -6453,14 +6591,14 @@ fn split_import_row(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use crate::project_config::{
-        CvIoDefinition, LinearStateSpaceModelConfig, LogicParamValue, ModelConfig, MvIoDefinition,
-        ProjectConfig, VariableCatalogConfig, WatchdogConfig,
+        CvIoDefinition, LinearStateSpaceModelConfig, LogicKind, LogicParamValue, ModelConfig,
+        MvIoDefinition, ProjectConfig, VariableCatalogConfig, WatchdogConfig,
     };
 
     use super::{
-        ModelEditorState, ModelKindChoice, SimulationEditorState, build_model_config_from_editor,
-        build_simulation_config_from_editor, parse_matrix_import_text, resize_string_matrix,
-        sync_io_initial_value_online_params,
+        LogicEditorState, ModelEditorState, ModelKindChoice, SimulationEditorState,
+        build_model_config_from_editor, build_simulation_config_from_editor,
+        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -6508,6 +6646,55 @@ mod tests {
             cfg.logic.params.get("io.cv.y1.sollband"),
             Some(&LogicParamValue::F64(0.5))
         );
+    }
+
+    #[test]
+    fn logic_editor_initializes_linear_mpc_start_values() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables = VariableCatalogConfig {
+            mvs: vec!["u1".to_string()],
+            cvs: vec!["y1".to_string()],
+            dvs: Vec::new(),
+        };
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 2,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![0.0, 1.0], vec![-1.0, -1.0]],
+                b: vec![vec![0.0], vec![1.0]],
+                c: vec![vec![1.0, 0.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            soll: "cv.y1.soll".to_string(),
+            ist: "cv.y1.ist".to_string(),
+            sollband_opc: None,
+            sollband_value: Some(0.25),
+            enable: None,
+        });
+        cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.logic
+            .params
+            .insert("mpc.cv.y1.q".to_string(), LogicParamValue::F64(4.2));
+
+        let editor = LogicEditorState::from_config(&cfg);
+        let value_for = |key: &str| {
+            editor
+                .mpc_params
+                .iter()
+                .find(|row| row.key == key)
+                .map(|row| row.value.as_str())
+                .expect("expected Linear MPC editor row")
+        };
+
+        assert_eq!(value_for("mpc.cv.y1.q"), "4.2000");
+        assert_eq!(value_for("mpc.cv.y1.band_low"), "-0.2500");
+        assert_eq!(value_for("mpc.cv.y1.band_high"), "0.2500");
+        assert_eq!(value_for("mpc.mv.u1.max_delta_u"), "1.0000");
+        assert_eq!(value_for("mpc.kalman.state.2.q"), "0.0001");
     }
 
     #[test]
