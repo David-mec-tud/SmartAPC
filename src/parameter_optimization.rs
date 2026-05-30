@@ -32,6 +32,8 @@ pub struct OptimizationProgress {
     pub iteration: usize,
     pub max_iterations: usize,
     pub best_score: Option<f64>,
+    pub best_mean_score: Option<f64>,
+    pub convergence_history: Vec<(usize, f64)>,
     pub converged: bool,
     pub cancelled: bool,
     pub status: String,
@@ -43,12 +45,14 @@ pub struct OptimizationProgress {
 #[derive(Debug, Clone)]
 pub struct OptimizationReport {
     pub best_score: f64,
+    pub best_mean_score: f64,
     pub best_params: HashMap<String, f64>,
     pub iteration_count: usize,
     pub converged: bool,
     pub cancelled: bool,
     pub warnings: Vec<String>,
     pub curves: OptimizationCurveFamily,
+    pub convergence_history: Vec<(usize, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +158,8 @@ pub fn run_parameter_optimization(
     let mut no_improvement = 0usize;
     let mut converged = false;
     let mut completed_iterations = 0usize;
+    let objective_normalizer = optimization_objective_normalizer(&config.optimization);
+    let mut convergence_history = Vec::new();
 
     for iteration in 0..max_iterations {
         if cancel.load(Ordering::Relaxed) {
@@ -198,6 +204,10 @@ pub fn run_parameter_optimization(
         } else {
             no_improvement += 1;
         }
+        let best_mean_score = best_score / objective_normalizer;
+        if best_mean_score.is_finite() {
+            convergence_history.push((completed_iterations, best_mean_score));
+        }
 
         let should_send_curves = completed_iterations == 1
             || completed_iterations % config.optimization.plot_interval == 0
@@ -208,6 +218,8 @@ pub fn run_parameter_optimization(
                 iteration: completed_iterations,
                 max_iterations,
                 best_score: best_score.is_finite().then_some(best_score),
+                best_mean_score: best_mean_score.is_finite().then_some(best_mean_score),
+                convergence_history: convergence_history.clone(),
                 converged,
                 cancelled: false,
                 status: format!("iteration {} / {}", completed_iterations, max_iterations),
@@ -240,6 +252,7 @@ pub fn run_parameter_optimization(
         best_score = result.score;
         best_curves = result.curves;
     }
+    let best_mean_score = best_score / objective_normalizer;
 
     send_progress(
         &progress_tx,
@@ -247,6 +260,8 @@ pub fn run_parameter_optimization(
             iteration: completed_iterations,
             max_iterations,
             best_score: best_score.is_finite().then_some(best_score),
+            best_mean_score: best_mean_score.is_finite().then_some(best_mean_score),
+            convergence_history: convergence_history.clone(),
             converged,
             cancelled,
             status: if cancelled {
@@ -264,12 +279,14 @@ pub fn run_parameter_optimization(
 
     Ok(OptimizationReport {
         best_score,
+        best_mean_score,
         best_params,
         iteration_count: completed_iterations,
         converged,
         cancelled,
         warnings: tail_warnings(&warnings),
         curves: best_curves,
+        convergence_history,
     })
 }
 
@@ -541,6 +558,16 @@ fn weighted_score(
                 + config.metric_weights.itae * metric.itae);
     }
     score
+}
+
+fn optimization_objective_normalizer(config: &ParameterOptimizationConfig) -> f64 {
+    let total_weight = config
+        .cv_weights
+        .values()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum::<f64>();
+    total_weight.max(1.0)
 }
 
 fn sample_scenarios(

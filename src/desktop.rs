@@ -1491,35 +1491,45 @@ impl DesktopApp {
 
     fn poll_optimization_job(&mut self) {
         let mut finished = false;
+        let mut events = Vec::new();
         if let Some(job) = self.optimization_job.as_mut() {
             while let Ok(event) = job.rx.try_recv() {
-                match event {
-                    OptimizationEvent::Progress(progress) => {
-                        self.optimization_editor.last_progress = Some(progress);
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                OptimizationEvent::Progress(progress) => {
+                    let previous_curves = self.current_optimization_curves();
+                    let mut progress = progress;
+                    if progress.curves.is_none() {
+                        progress.curves = previous_curves;
                     }
-                    OptimizationEvent::Finished(result) => {
-                        finished = true;
-                        match result {
-                            Ok(report) => {
-                                self.status_message = if report.cancelled {
-                                    "Parameteroptimierung abgebrochen".to_string()
-                                } else if report.converged {
-                                    format!(
-                                        "Parameteroptimierung konvergiert: Score {:.6}",
-                                        report.best_score
-                                    )
-                                } else {
-                                    format!(
-                                        "Parameteroptimierung abgeschlossen: Score {:.6}",
-                                        report.best_score
-                                    )
-                                };
-                                self.optimization_editor.last_report = Some(report);
-                                self.error_message = None;
-                            }
-                            Err(err) => {
-                                self.error_message = Some(err);
-                            }
+                    self.optimization_editor.last_progress = Some(progress);
+                }
+                OptimizationEvent::Finished(result) => {
+                    finished = true;
+                    match result {
+                        Ok(report) => {
+                            self.status_message = if report.cancelled {
+                                "Parameteroptimierung abgebrochen".to_string()
+                            } else if report.converged {
+                                format!(
+                                    "Parameteroptimierung konvergiert: Score {:.6}",
+                                    report.best_score
+                                )
+                            } else {
+                                format!(
+                                    "Parameteroptimierung abgeschlossen: Score {:.6}",
+                                    report.best_score
+                                )
+                            };
+                            self.optimization_editor.last_report = Some(report);
+                            self.error_message = None;
+                        }
+                        Err(err) => {
+                            self.error_message = Some(err);
                         }
                     }
                 }
@@ -1533,6 +1543,33 @@ impl DesktopApp {
                 }
             }
         }
+    }
+
+    fn current_optimization_curves(&self) -> Option<OptimizationCurveFamily> {
+        self.optimization_editor
+            .last_progress
+            .as_ref()
+            .and_then(|progress| progress.curves.clone())
+            .or_else(|| {
+                self.optimization_editor
+                    .last_report
+                    .as_ref()
+                    .map(|report| report.curves.clone())
+            })
+    }
+
+    fn optimization_convergence_history(&self) -> Vec<(usize, f64)> {
+        self.optimization_editor
+            .last_progress
+            .as_ref()
+            .map(|progress| progress.convergence_history.clone())
+            .or_else(|| {
+                self.optimization_editor
+                    .last_report
+                    .as_ref()
+                    .map(|report| report.convergence_history.clone())
+            })
+            .unwrap_or_default()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -3481,10 +3518,10 @@ impl DesktopApp {
             .as_ref()
             .map(|progress| {
                 format!(
-                    "{} | best={}",
+                    "{} | best mean={}",
                     progress.status,
                     progress
-                        .best_score
+                        .best_mean_score
                         .map(|score| format!("{score:.6}"))
                         .unwrap_or_else(|| "-".to_string())
                 )
@@ -3492,8 +3529,8 @@ impl DesktopApp {
             .or_else(|| {
                 self.optimization_editor.last_report.as_ref().map(|report| {
                     format!(
-                        "Final | iterations={} | best={:.6}",
-                        report.iteration_count, report.best_score
+                        "Final | iterations={} | best mean={:.6}",
+                        report.iteration_count, report.best_mean_score
                     )
                 })
             })
@@ -3523,6 +3560,10 @@ impl DesktopApp {
         }
 
         content = content.push(text("Controller Parameters").size(18));
+        content = content.push(
+            text("Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles.")
+                .size(13),
+        );
         if self.optimization_editor.param_rows.is_empty() {
             content = content.push(text(
                 "Keine aktiven numerischen Controller-Parameter vorhanden.",
@@ -3583,6 +3624,10 @@ impl DesktopApp {
         content = content
             .push(text("Objective").size(18))
             .push(
+                text("ISE, IAE, and ITAE weights choose the tracking-error metric mix. CV channel weights make one controlled variable count more than another in the weighted mean target.")
+                    .size(13),
+            )
+            .push(
                 row![
                     text("ISE").width(Length::Fixed(50.0)),
                     opt_text_input(
@@ -3639,6 +3684,10 @@ impl DesktopApp {
 
         content = content
             .push(text("Robustness and Run Settings").size(18))
+            .push(
+                text("A/B scale ranges define model uncertainty in percent for nonzero matrix entries. Scenarios are fixed robust samples; Iterations is the Bayesian optimization budget; Initial is the random warm-up; Patience stops after no improvement; Plot N refreshes step curves every N iterations; Duration is simulated seconds per candidate.")
+                    .size(13),
+            )
             .push(
                 column![
                     row![
@@ -3731,24 +3780,29 @@ impl DesktopApp {
                 .spacing(8),
             );
 
+        let convergence_history = self.optimization_convergence_history();
         let curves = self
-            .optimization_editor
-            .last_progress
-            .as_ref()
-            .and_then(|progress| progress.curves.clone())
-            .or_else(|| {
-                self.optimization_editor
-                    .last_report
-                    .as_ref()
-                    .map(|report| report.curves.clone())
-            });
-        if let Some(curves) = curves {
-            content = content.push(text("Step Response Family").size(18)).push(
+            .current_optimization_curves()
+            .unwrap_or_else(|| blank_optimization_curves(&self.optimization_editor.cv_targets));
+        content = content
+            .push(text("Convergence").size(18))
+            .push(
+                text("Best robust objective as weighted mean over CV channels; lower is better.")
+                    .size(13),
+            )
+            .push(
+                canvas::Canvas::new(OptimizationConvergenceProgram {
+                    history: convergence_history,
+                })
+                .width(Length::Fill)
+                .height(Length::Fixed(220.0)),
+            )
+            .push(text("Step Response Family").size(18))
+            .push(
                 canvas::Canvas::new(OptimizationPlotProgram { curves })
                     .width(Length::Fill)
                     .height(Length::Fixed(360.0)),
             );
-        }
 
         let warnings = self
             .optimization_editor
@@ -5041,6 +5095,19 @@ fn optimization_named_rows(
                 .unwrap_or_else(|| "0".to_string()),
         })
         .collect()
+}
+
+fn blank_optimization_curves(rows: &[OptimizationNamedRowState]) -> OptimizationCurveFamily {
+    OptimizationCurveFamily {
+        cvs: rows
+            .iter()
+            .map(|row| crate::parameter_optimization::CvCurveFamily {
+                cv: row.name.clone(),
+                target: row.value.trim().parse::<f64>().unwrap_or(0.0),
+                scenarios: Vec::new(),
+            })
+            .collect(),
+    }
 }
 
 fn opt_text_input<'a, F>(
@@ -7202,6 +7269,98 @@ fn start_web_task(
 }
 
 #[derive(Debug, Clone)]
+struct OptimizationConvergenceProgram {
+    history: Vec<(usize, f64)>,
+}
+
+impl canvas::Program<Message> for OptimizationConvergenceProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        draw_plot_background(&mut frame, bounds.size());
+
+        let plot_left = 54.0;
+        let plot_top = 18.0;
+        let plot_w = (bounds.width - 74.0).max(20.0);
+        let plot_h = (bounds.height - 44.0).max(20.0);
+        draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
+        frame.fill_text(canvas::Text {
+            content: "best weighted mean target".to_string(),
+            position: Point::new(10.0, 2.0),
+            size: iced::Pixels(13.0),
+            color: Color::from_rgb(0.10, 0.10, 0.10),
+            ..Default::default()
+        });
+
+        if self.history.is_empty() {
+            frame.fill_text(canvas::Text {
+                content: "No optimization data yet".to_string(),
+                position: Point::new(plot_left + 12.0, plot_top + 16.0),
+                size: iced::Pixels(13.0),
+                color: Color::from_rgb(0.45, 0.45, 0.45),
+                ..Default::default()
+            });
+            return vec![frame.into_geometry()];
+        }
+
+        let min_iter = self.history.first().map(|(i, _)| *i).unwrap_or(0) as f32;
+        let max_iter = self.history.last().map(|(i, _)| *i).unwrap_or(1) as f32;
+        let mut min_score = self
+            .history
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::INFINITY, f64::min);
+        let mut max_score = self
+            .history
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if (max_score - min_score).abs() < f64::EPSILON {
+            min_score -= 1.0;
+            max_score += 1.0;
+        }
+
+        let path = canvas::Path::new(|builder| {
+            for (index, (iteration, score)) in self.history.iter().enumerate() {
+                let x = map_x(*iteration as f64, min_iter, max_iter, plot_left, plot_w);
+                let y = map_y(*score, min_score as f32, max_score as f32, plot_top, plot_h);
+                if index == 0 {
+                    builder.move_to(Point::new(x, y));
+                } else {
+                    builder.line_to(Point::new(x, y));
+                }
+            }
+        });
+        frame.stroke(
+            &path,
+            canvas::Stroke::default()
+                .with_width(2.0)
+                .with_color(Color::from_rgb(0.10, 0.32, 0.70)),
+        );
+
+        if let Some((iteration, score)) = self.history.last() {
+            frame.fill_text(canvas::Text {
+                content: format!("iter {} | {:.6}", iteration, score),
+                position: Point::new(plot_left + 8.0, plot_top + plot_h - 18.0),
+                size: iced::Pixels(12.0),
+                color: Color::from_rgb(0.20, 0.20, 0.20),
+                ..Default::default()
+            });
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+#[derive(Debug, Clone)]
 struct OptimizationPlotProgram {
     curves: OptimizationCurveFamily,
 }
@@ -7218,8 +7377,7 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let background = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
-        frame.fill(&background, Color::from_rgb(0.98, 0.98, 0.98));
+        draw_plot_background(&mut frame, bounds.size());
 
         let count = self.curves.cvs.len().max(1);
         let cols = (count as f32).sqrt().ceil() as usize;
@@ -7244,14 +7402,7 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
             let plot_top = y0 + 22.0;
             let plot_w = (cell_w - 54.0).max(20.0);
             let plot_h = (cell_h - 40.0).max(20.0);
-            let plot_rect =
-                canvas::Path::rectangle(Point::new(plot_left, plot_top), Size::new(plot_w, plot_h));
-            frame.stroke(
-                &plot_rect,
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(Color::from_rgb(0.72, 0.72, 0.72)),
-            );
+            draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
             frame.fill_text(canvas::Text {
                 content: family.cv.clone(),
                 position: Point::new(x0, y0),
@@ -7319,6 +7470,27 @@ fn curve_bounds(family: &crate::parameter_optimization::CvCurveFamily) -> (f32, 
         max_y += 1.0;
     }
     (min_t as f32, max_t as f32, min_y as f32, max_y as f32)
+}
+
+fn draw_plot_background(frame: &mut canvas::Frame<Renderer>, size: Size) {
+    let background = canvas::Path::rectangle(Point::ORIGIN, size);
+    frame.fill(&background, Color::from_rgb(0.98, 0.98, 0.98));
+}
+
+fn draw_plot_rect(
+    frame: &mut canvas::Frame<Renderer>,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+) {
+    let plot_rect = canvas::Path::rectangle(Point::new(left, top), Size::new(width, height));
+    frame.stroke(
+        &plot_rect,
+        canvas::Stroke::default()
+            .with_width(1.0)
+            .with_color(Color::from_rgb(0.72, 0.72, 0.72)),
+    );
 }
 
 fn map_x(value: f64, min: f32, max: f32, left: f32, width: f32) -> f32 {
