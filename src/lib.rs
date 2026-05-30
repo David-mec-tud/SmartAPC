@@ -5,6 +5,7 @@ pub mod desktop;
 pub mod linear_mpc;
 pub mod logic;
 pub mod model;
+pub mod parameter_optimization;
 pub mod project;
 pub mod project_config;
 pub mod runtime;

@@ -24,6 +24,8 @@ pub struct ProjectConfig {
     pub model: Option<ModelConfig>,
     #[serde(default)]
     pub simulation: SimulationConfig,
+    #[serde(default)]
+    pub optimization: ParameterOptimizationConfig,
     pub runtime: RuntimeConfig,
     pub alarms: AlarmConfig,
     pub deployment: DeploymentConfig,
@@ -46,6 +48,7 @@ impl ProjectConfig {
             logic: LogicConfig::default(),
             model: None,
             simulation: SimulationConfig::default(),
+            optimization: ParameterOptimizationConfig::default(),
             runtime: RuntimeConfig::default(),
             alarms: AlarmConfig::default(),
             plots: PlotConfig::default(),
@@ -67,6 +70,11 @@ impl ProjectConfig {
         }
         self.simulation
             .validate(self.model.as_ref(), &self.variables)?;
+        self.optimization.validate(
+            self.model.as_ref(),
+            &self.variables,
+            &self.active_controller_f64_param_defaults(),
+        )?;
         self.plots.validate()?;
 
         if self.runtime.cycle_ms < 1_000 {
@@ -141,6 +149,16 @@ impl ProjectConfig {
         self.simulation = simulation.normalized_for(&self.variables, self.model.as_ref());
     }
 
+    pub fn normalize_optimization_config(&mut self) {
+        let optimization = std::mem::take(&mut self.optimization);
+        self.optimization = optimization.normalized_for(
+            &self.variables,
+            self.model.as_ref(),
+            &self.simulation,
+            &self.active_controller_f64_param_defaults(),
+        );
+    }
+
     pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
         let (io, limits) = self
             .io_definition
@@ -205,7 +223,7 @@ impl ProjectConfig {
         Ok(())
     }
 
-    fn build_simulation_logic_io(&self) -> Result<IoConfig> {
+    pub(crate) fn build_simulation_logic_io(&self) -> Result<IoConfig> {
         let has_runtime_contract = !self.io.inputs.is_empty() || !self.io.outputs.is_empty();
         if has_runtime_contract {
             let configured = if self.logic.kind == LogicKind::LinearMpc {
@@ -426,6 +444,21 @@ impl ProjectConfig {
         defaults
     }
 
+    pub fn active_controller_f64_param_defaults(&self) -> HashMap<String, f64> {
+        self.active_online_param_defaults()
+            .into_iter()
+            .filter_map(|(key, value)| {
+                if key.starts_with("io.") {
+                    return None;
+                }
+                match value {
+                    LogicParamValue::F64(value) => Some((key, value)),
+                    LogicParamValue::Bool(_) => None,
+                }
+            })
+            .collect()
+    }
+
     pub fn linear_mpc_is_configured_for(&self, io: &IoConfig) -> bool {
         self.linear_mpc_config_error(io).is_none()
     }
@@ -534,6 +567,7 @@ impl ProjectConfig {
             SidebarTask::new("limits", "I/O definieren", io_definition_configured),
             SidebarTask::new("model", "Define Model (optional)", true),
             SidebarTask::new("logic", "Regellogik hinterlegen", logic_configured),
+            SidebarTask::new("optimization", "Parameter Optimization", logic_configured),
             SidebarTask::new("timing", "Control Function Tests", logic_configured),
             SidebarTask::new("simulation", "Simulate Controller (optional)", true),
             SidebarTask::new(
@@ -1568,6 +1602,294 @@ pub enum SimulationSpeedMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterOptimizationConfig {
+    #[serde(default)]
+    pub parameters: Vec<ParameterOptimizationParamConfig>,
+    #[serde(default)]
+    pub cv_target_steps: HashMap<String, f64>,
+    #[serde(default)]
+    pub cv_weights: HashMap<String, f64>,
+    #[serde(default)]
+    pub cv_noise_std: HashMap<String, f64>,
+    #[serde(default)]
+    pub mv_noise_std: HashMap<String, f64>,
+    #[serde(default)]
+    pub metric_weights: ParameterOptimizationMetricWeights,
+    #[serde(default = "default_a_scale_min_pct")]
+    pub a_scale_min_pct: f64,
+    #[serde(default = "default_a_scale_max_pct")]
+    pub a_scale_max_pct: f64,
+    #[serde(default = "default_b_scale_min_pct")]
+    pub b_scale_min_pct: f64,
+    #[serde(default = "default_b_scale_max_pct")]
+    pub b_scale_max_pct: f64,
+    #[serde(default = "default_optimization_scenario_count")]
+    pub scenario_count: usize,
+    #[serde(default = "default_optimization_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_optimization_initial_samples")]
+    pub initial_samples: usize,
+    #[serde(default = "default_optimization_convergence_patience")]
+    pub convergence_patience: usize,
+    #[serde(default = "default_optimization_plot_interval")]
+    pub plot_interval: usize,
+    #[serde(default = "default_optimization_duration_s")]
+    pub simulation_duration_s: f64,
+}
+
+impl Default for ParameterOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            parameters: Vec::new(),
+            cv_target_steps: HashMap::new(),
+            cv_weights: HashMap::new(),
+            cv_noise_std: HashMap::new(),
+            mv_noise_std: HashMap::new(),
+            metric_weights: ParameterOptimizationMetricWeights::default(),
+            a_scale_min_pct: default_a_scale_min_pct(),
+            a_scale_max_pct: default_a_scale_max_pct(),
+            b_scale_min_pct: default_b_scale_min_pct(),
+            b_scale_max_pct: default_b_scale_max_pct(),
+            scenario_count: default_optimization_scenario_count(),
+            max_iterations: default_optimization_max_iterations(),
+            initial_samples: default_optimization_initial_samples(),
+            convergence_patience: default_optimization_convergence_patience(),
+            plot_interval: default_optimization_plot_interval(),
+            simulation_duration_s: default_optimization_duration_s(),
+        }
+    }
+}
+
+impl ParameterOptimizationConfig {
+    fn normalized_for(
+        self,
+        vars: &VariableCatalogConfig,
+        model: Option<&ModelConfig>,
+        simulation: &SimulationConfig,
+        active_params: &HashMap<String, f64>,
+    ) -> Self {
+        let mut existing_by_key: HashMap<_, _> = self
+            .parameters
+            .into_iter()
+            .map(|row| (row.key.clone(), row))
+            .collect();
+
+        let mut keys: Vec<_> = active_params.keys().cloned().collect();
+        keys.sort();
+        let parameters = keys
+            .into_iter()
+            .map(|key| {
+                let default = active_params.get(&key).copied().unwrap_or(0.0);
+                existing_by_key
+                    .remove(&key)
+                    .map(|row| row.normalized_for_default(default))
+                    .unwrap_or_else(|| ParameterOptimizationParamConfig::from_default(key, default))
+            })
+            .collect();
+
+        let cv_target_steps =
+            normalize_named_f64_map_with(self.cv_target_steps, &vars.cvs, |name| {
+                simulation.cv_setpoints.get(name).copied().unwrap_or(1.0)
+            });
+        let cv_weights = normalize_named_f64_map(self.cv_weights, &vars.cvs, 1.0);
+        let cv_noise_std = normalize_named_f64_map(self.cv_noise_std, &vars.cvs, 0.0);
+        let mv_noise_std = normalize_named_f64_map(self.mv_noise_std, &vars.mvs, 0.0);
+
+        let has_model = model.and_then(ModelConfig::linear_state_space).is_some();
+        Self {
+            parameters,
+            cv_target_steps,
+            cv_weights,
+            cv_noise_std,
+            mv_noise_std,
+            metric_weights: self.metric_weights.normalized(),
+            a_scale_min_pct: finite_or(self.a_scale_min_pct, default_a_scale_min_pct()),
+            a_scale_max_pct: finite_or(self.a_scale_max_pct, default_a_scale_max_pct()),
+            b_scale_min_pct: finite_or(self.b_scale_min_pct, default_b_scale_min_pct()),
+            b_scale_max_pct: finite_or(self.b_scale_max_pct, default_b_scale_max_pct()),
+            scenario_count: self.scenario_count.clamp(1, 256),
+            max_iterations: self.max_iterations.clamp(1, 10_000),
+            initial_samples: self.initial_samples.clamp(1, 1_000),
+            convergence_patience: self.convergence_patience.clamp(1, 1_000),
+            plot_interval: self.plot_interval.clamp(1, 1_000),
+            simulation_duration_s: if has_model {
+                finite_or(
+                    self.simulation_duration_s,
+                    default_optimization_duration_s(),
+                )
+                .max(1.0)
+            } else {
+                default_optimization_duration_s()
+            },
+        }
+    }
+
+    fn validate(
+        &self,
+        model: Option<&ModelConfig>,
+        vars: &VariableCatalogConfig,
+        active_params: &HashMap<String, f64>,
+    ) -> Result<()> {
+        validate_named_f64_values(
+            "optimization.cv_target_steps",
+            &self.cv_target_steps,
+            &vars.cvs,
+            false,
+        )?;
+        validate_named_f64_values("optimization.cv_weights", &self.cv_weights, &vars.cvs, true)?;
+        validate_named_f64_values(
+            "optimization.cv_noise_std",
+            &self.cv_noise_std,
+            &vars.cvs,
+            true,
+        )?;
+        validate_named_f64_values(
+            "optimization.mv_noise_std",
+            &self.mv_noise_std,
+            &vars.mvs,
+            true,
+        )?;
+        self.metric_weights.validate()?;
+
+        if model.and_then(ModelConfig::linear_state_space).is_none() {
+            return Ok(());
+        }
+        if self.simulation_duration_s <= 0.0 || !self.simulation_duration_s.is_finite() {
+            bail!("optimization.simulation_duration_s must be a finite value > 0");
+        }
+        validate_range_pair(
+            "optimization.a_scale_pct",
+            self.a_scale_min_pct,
+            self.a_scale_max_pct,
+        )?;
+        validate_range_pair(
+            "optimization.b_scale_pct",
+            self.b_scale_min_pct,
+            self.b_scale_max_pct,
+        )?;
+        if self.scenario_count == 0
+            || self.max_iterations == 0
+            || self.initial_samples == 0
+            || self.convergence_patience == 0
+            || self.plot_interval == 0
+        {
+            bail!("optimization counts and intervals must be > 0");
+        }
+
+        let active_keys: HashSet<_> = active_params.keys().map(|key| key.as_str()).collect();
+        let mut seen = HashSet::new();
+        for row in &self.parameters {
+            if !active_keys.contains(row.key.as_str()) {
+                bail!("optimization parameter '{}' is not active", row.key);
+            }
+            if !seen.insert(row.key.as_str()) {
+                bail!("duplicate optimization parameter '{}'", row.key);
+            }
+            row.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterOptimizationParamConfig {
+    pub key: String,
+    #[serde(default)]
+    pub fixed: bool,
+    pub start: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl ParameterOptimizationParamConfig {
+    fn from_default(key: String, default: f64) -> Self {
+        let width = default.abs().max(1.0);
+        Self {
+            key,
+            fixed: false,
+            start: default,
+            min: default - width,
+            max: default + width,
+        }
+    }
+
+    fn normalized_for_default(mut self, default: f64) -> Self {
+        if !self.start.is_finite() {
+            self.start = default;
+        }
+        if !self.min.is_finite() {
+            self.min = self.start - self.start.abs().max(1.0);
+        }
+        if !self.max.is_finite() {
+            self.max = self.start + self.start.abs().max(1.0);
+        }
+        if self.min > self.max {
+            std::mem::swap(&mut self.min, &mut self.max);
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.key.trim().is_empty() {
+            bail!("optimization parameter key must not be empty");
+        }
+        if !self.start.is_finite() || !self.min.is_finite() || !self.max.is_finite() {
+            bail!(
+                "optimization parameter '{}' values must be finite",
+                self.key
+            );
+        }
+        if !self.fixed && self.min > self.max {
+            bail!("optimization parameter '{}' has min > max", self.key);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ParameterOptimizationMetricWeights {
+    #[serde(default = "default_metric_weight")]
+    pub ise: f64,
+    #[serde(default)]
+    pub iae: f64,
+    #[serde(default)]
+    pub itae: f64,
+}
+
+impl Default for ParameterOptimizationMetricWeights {
+    fn default() -> Self {
+        Self {
+            ise: default_metric_weight(),
+            iae: 0.0,
+            itae: 0.0,
+        }
+    }
+}
+
+impl ParameterOptimizationMetricWeights {
+    fn normalized(self) -> Self {
+        Self {
+            ise: finite_or(self.ise, default_metric_weight()).max(0.0),
+            iae: finite_or(self.iae, 0.0).max(0.0),
+            itae: finite_or(self.itae, 0.0).max(0.0),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.ise.is_finite() || !self.iae.is_finite() || !self.itae.is_finite() {
+            bail!("optimization.metric_weights must be finite");
+        }
+        if self.ise < 0.0 || self.iae < 0.0 || self.itae < 0.0 {
+            bail!("optimization.metric_weights must be >= 0");
+        }
+        if self.ise == 0.0 && self.iae == 0.0 && self.itae == 0.0 {
+            bail!("at least one optimization metric weight must be > 0");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationConfig {
     #[serde(default)]
     pub speed: SimulationSpeedMode,
@@ -1800,6 +2122,28 @@ fn normalize_named_f64_map(
     normalized
 }
 
+fn normalize_named_f64_map_with<F>(
+    values: HashMap<String, f64>,
+    names: &[String],
+    mut default_for: F,
+) -> HashMap<String, f64>
+where
+    F: FnMut(&str) -> f64,
+{
+    let mut normalized = HashMap::new();
+    for name in names {
+        normalized.insert(
+            name.clone(),
+            values
+                .get(name)
+                .copied()
+                .filter(|value| value.is_finite())
+                .unwrap_or_else(|| default_for(name)),
+        );
+    }
+    normalized
+}
+
 fn validate_named_f64_values(
     field: &str,
     values: &HashMap<String, f64>,
@@ -1819,6 +2163,64 @@ fn validate_named_f64_values(
         }
     }
     Ok(())
+}
+
+fn validate_range_pair(name: &str, min: f64, max: f64) -> Result<()> {
+    if !min.is_finite() || !max.is_finite() {
+        bail!("{name} range values must be finite");
+    }
+    if min > max {
+        bail!("{name} min must be <= max");
+    }
+    Ok(())
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() { value } else { fallback }
+}
+
+fn default_a_scale_min_pct() -> f64 {
+    90.0
+}
+
+fn default_a_scale_max_pct() -> f64 {
+    110.0
+}
+
+fn default_b_scale_min_pct() -> f64 {
+    90.0
+}
+
+fn default_b_scale_max_pct() -> f64 {
+    110.0
+}
+
+fn default_optimization_scenario_count() -> usize {
+    8
+}
+
+fn default_optimization_max_iterations() -> usize {
+    30
+}
+
+fn default_optimization_initial_samples() -> usize {
+    8
+}
+
+fn default_optimization_convergence_patience() -> usize {
+    10
+}
+
+fn default_optimization_plot_interval() -> usize {
+    5
+}
+
+fn default_optimization_duration_s() -> f64 {
+    120.0
+}
+
+fn default_metric_weight() -> f64 {
+    1.0
 }
 
 fn remap_matrix_rows(
@@ -1971,6 +2373,7 @@ pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
     let mut cfg: ProjectConfig = toml::from_str(input).context("failed to parse project TOML")?;
     cfg.normalize_model_config();
     cfg.normalize_simulation_config();
+    cfg.normalize_optimization_config();
     cfg.validate()?;
     Ok(cfg)
 }
@@ -1980,6 +2383,7 @@ pub fn to_toml_string(cfg: &ProjectConfig) -> Result<String> {
     normalized.normalize_plot_config();
     normalized.normalize_model_config();
     normalized.normalize_simulation_config();
+    normalized.normalize_optimization_config();
     normalized.validate()?;
     toml::to_string_pretty(&normalized).context("failed to encode project TOML")
 }
@@ -2082,6 +2486,45 @@ mod tests {
 
         assert!(encoded.contains("kind = \"linear_state_space\""));
         assert_eq!(decoded.model, Some(sample_linear_model()));
+    }
+
+    #[test]
+    fn optimization_config_roundtrip_and_normalization() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+        cfg.sync_active_online_params();
+        cfg.normalize_optimization_config();
+        cfg.optimization.metric_weights.ise = 0.0;
+        cfg.optimization.metric_weights.iae = 1.0;
+        cfg.optimization.scenario_count = 3;
+
+        let encoded = to_toml_string(&cfg).expect("toml encode");
+        let decoded = from_toml_str(&encoded).expect("toml decode");
+
+        assert_eq!(decoded.optimization.scenario_count, 3);
+        assert_eq!(decoded.optimization.metric_weights.iae, 1.0);
+        assert!(
+            decoded
+                .optimization
+                .parameters
+                .iter()
+                .any(|row| row.key == "p.y1.u1.kp")
+        );
+    }
+
+    #[test]
+    fn sidebar_places_optimization_after_logic() {
+        let cfg = valid_config_with_variables();
+        let tasks = cfg.sidebar_tasks();
+        let logic_index = tasks
+            .iter()
+            .position(|task| task.id == "logic")
+            .expect("logic task");
+        let optimization_index = tasks
+            .iter()
+            .position(|task| task.id == "optimization")
+            .expect("optimization task");
+        assert_eq!(optimization_index, logic_index + 1);
     }
 
     #[test]

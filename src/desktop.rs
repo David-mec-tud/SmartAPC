@@ -4,15 +4,21 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::Duration,
 };
 
 use anyhow::anyhow;
 use iced::{
-    Element, Length, Subscription, Task, Theme, application, time,
+    Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
+    application, mouse, time,
     widget::{
-        button, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
+        button, canvas, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
         text_input,
     },
 };
@@ -25,12 +31,17 @@ use crate::{
     },
     linear_mpc::linear_mpc_default_params,
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
+    parameter_optimization::{
+        OptimizationCurveFamily, OptimizationEvent, OptimizationProgress, OptimizationReport,
+        apply_optimized_parameters, run_parameter_optimization,
+    },
     project::ProjectService,
     project_config::{
         CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
         LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
-        PControllerPairConfig, ProjectConfig, SidebarTask, SimulationConfig, SimulationSpeedMode,
-        VariableCatalogConfig, WatchdogConfig,
+        PControllerPairConfig, ParameterOptimizationConfig, ParameterOptimizationMetricWeights,
+        ParameterOptimizationParamConfig, ProjectConfig, SidebarTask, SimulationConfig,
+        SimulationSpeedMode, VariableCatalogConfig, WatchdogConfig,
     },
     runtime::{ExecutionSnapshot, RuntimeManager},
     simulation::derive_initial_cv_offsets,
@@ -823,6 +834,114 @@ impl ControlFunctionTestState {
 }
 
 #[derive(Debug, Clone)]
+struct OptimizationParamRowState {
+    key: String,
+    fixed: bool,
+    start: String,
+    min: String,
+    max: String,
+}
+
+#[derive(Debug, Clone)]
+struct OptimizationNamedRowState {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParameterOptimizationState {
+    param_rows: Vec<OptimizationParamRowState>,
+    cv_targets: Vec<OptimizationNamedRowState>,
+    cv_weights: Vec<OptimizationNamedRowState>,
+    cv_noise: Vec<OptimizationNamedRowState>,
+    mv_noise: Vec<OptimizationNamedRowState>,
+    metric_ise: String,
+    metric_iae: String,
+    metric_itae: String,
+    a_scale_min_pct: String,
+    a_scale_max_pct: String,
+    b_scale_min_pct: String,
+    b_scale_max_pct: String,
+    scenario_count: String,
+    max_iterations: String,
+    initial_samples: String,
+    convergence_patience: String,
+    plot_interval: String,
+    simulation_duration_s: String,
+    last_progress: Option<OptimizationProgress>,
+    last_report: Option<OptimizationReport>,
+}
+
+impl ParameterOptimizationState {
+    fn from_config(cfg: &ProjectConfig) -> Self {
+        let optimization = &cfg.optimization;
+        Self {
+            param_rows: optimization
+                .parameters
+                .iter()
+                .map(|row| OptimizationParamRowState {
+                    key: row.key.clone(),
+                    fixed: row.fixed,
+                    start: format_numeric(row.start),
+                    min: format_numeric(row.min),
+                    max: format_numeric(row.max),
+                })
+                .collect(),
+            cv_targets: optimization_named_rows(&cfg.variables.cvs, &optimization.cv_target_steps),
+            cv_weights: optimization_named_rows(&cfg.variables.cvs, &optimization.cv_weights),
+            cv_noise: optimization_named_rows(&cfg.variables.cvs, &optimization.cv_noise_std),
+            mv_noise: optimization_named_rows(&cfg.variables.mvs, &optimization.mv_noise_std),
+            metric_ise: format_numeric(optimization.metric_weights.ise),
+            metric_iae: format_numeric(optimization.metric_weights.iae),
+            metric_itae: format_numeric(optimization.metric_weights.itae),
+            a_scale_min_pct: format_numeric(optimization.a_scale_min_pct),
+            a_scale_max_pct: format_numeric(optimization.a_scale_max_pct),
+            b_scale_min_pct: format_numeric(optimization.b_scale_min_pct),
+            b_scale_max_pct: format_numeric(optimization.b_scale_max_pct),
+            scenario_count: optimization.scenario_count.to_string(),
+            max_iterations: optimization.max_iterations.to_string(),
+            initial_samples: optimization.initial_samples.to_string(),
+            convergence_patience: optimization.convergence_patience.to_string(),
+            plot_interval: optimization.plot_interval.to_string(),
+            simulation_duration_s: format_numeric(optimization.simulation_duration_s),
+            last_progress: None,
+            last_report: None,
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            param_rows: Vec::new(),
+            cv_targets: Vec::new(),
+            cv_weights: Vec::new(),
+            cv_noise: Vec::new(),
+            mv_noise: Vec::new(),
+            metric_ise: "1".to_string(),
+            metric_iae: "0".to_string(),
+            metric_itae: "0".to_string(),
+            a_scale_min_pct: "90".to_string(),
+            a_scale_max_pct: "110".to_string(),
+            b_scale_min_pct: "90".to_string(),
+            b_scale_max_pct: "110".to_string(),
+            scenario_count: "8".to_string(),
+            max_iterations: "30".to_string(),
+            initial_samples: "8".to_string(),
+            convergence_patience: "10".to_string(),
+            plot_interval: "5".to_string(),
+            simulation_duration_s: "120".to_string(),
+            last_progress: None,
+            last_report: None,
+        }
+    }
+}
+
+struct OptimizationJob {
+    cancel: Arc<AtomicBool>,
+    rx: mpsc::Receiver<OptimizationEvent>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
 enum WebStatus {
     Disabled,
     Starting(String),
@@ -838,6 +957,7 @@ enum SetupPage {
     Limits,
     Model,
     Logic,
+    Optimization,
     Timing,
     Simulation,
     Deployment,
@@ -854,6 +974,7 @@ impl SetupPage {
             "limits" => Some(Self::Limits),
             "model" => Some(Self::Model),
             "logic" => Some(Self::Logic),
+            "optimization" => Some(Self::Optimization),
             "timing" => Some(Self::Timing),
             "simulation" => Some(Self::Simulation),
             "deployment" => Some(Self::Deployment),
@@ -869,6 +990,7 @@ impl SetupPage {
             Self::Limits => "I/O definieren",
             Self::Model => "Define Model",
             Self::Logic => "Regellogik",
+            Self::Optimization => "Parameter Optimization",
             Self::Timing => "Control Function Tests",
             Self::Simulation => "Simulate Controller",
             Self::Deployment => "Deployment",
@@ -885,6 +1007,7 @@ struct ProjectPanelData {
     logic_editor: LogicEditorState,
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
+    optimization_editor: ParameterOptimizationState,
     control_function_tests: ControlFunctionTestState,
     communication: CommunicationEditorState,
     variables: VariableCatalogConfig,
@@ -1025,6 +1148,33 @@ enum Message {
     StopSimulationPressed,
     SimulationActionFinished(Result<String, String>),
     SimulationLiveUpdated(Result<String, String>),
+    OptimizationParamFixedToggled(usize, bool),
+    OptimizationParamStartChanged(usize, String),
+    OptimizationParamMinChanged(usize, String),
+    OptimizationParamMaxChanged(usize, String),
+    OptimizationCvTargetChanged(usize, String),
+    OptimizationCvWeightChanged(usize, String),
+    OptimizationCvNoiseChanged(usize, String),
+    OptimizationMvNoiseChanged(usize, String),
+    OptimizationMetricIseChanged(String),
+    OptimizationMetricIaeChanged(String),
+    OptimizationMetricItaeChanged(String),
+    OptimizationAScaleMinChanged(String),
+    OptimizationAScaleMaxChanged(String),
+    OptimizationBScaleMinChanged(String),
+    OptimizationBScaleMaxChanged(String),
+    OptimizationScenarioCountChanged(String),
+    OptimizationMaxIterationsChanged(String),
+    OptimizationInitialSamplesChanged(String),
+    OptimizationConvergencePatienceChanged(String),
+    OptimizationPlotIntervalChanged(String),
+    OptimizationDurationChanged(String),
+    SaveOptimizationPressed,
+    OptimizationSaved(Result<String, String>),
+    StartOptimizationPressed,
+    CancelOptimizationPressed,
+    UseOptimizedParametersPressed,
+    OptimizedParametersApplied(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     AddPControllerPair,
     PPairCvChanged(usize, String),
@@ -1073,6 +1223,8 @@ struct DesktopApp {
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
     logic_editor: LogicEditorState,
+    optimization_editor: ParameterOptimizationState,
+    optimization_job: Option<OptimizationJob>,
     control_function_tests: ControlFunctionTestState,
     variables: VariableCatalogConfig,
     mv_name_rows: Vec<VariableNameRow>,
@@ -1118,6 +1270,8 @@ impl DesktopApp {
                 None,
             ),
             logic_editor: LogicEditorState::blank(),
+            optimization_editor: ParameterOptimizationState::blank(),
+            optimization_job: None,
             control_function_tests: ControlFunctionTestState::blank(),
             variables: VariableCatalogConfig::default(),
             mv_name_rows: vec![VariableNameRow::blank()],
@@ -1335,6 +1489,52 @@ impl DesktopApp {
         self.maybe_autosave_simulation_editor()
     }
 
+    fn poll_optimization_job(&mut self) {
+        let mut finished = false;
+        if let Some(job) = self.optimization_job.as_mut() {
+            while let Ok(event) = job.rx.try_recv() {
+                match event {
+                    OptimizationEvent::Progress(progress) => {
+                        self.optimization_editor.last_progress = Some(progress);
+                    }
+                    OptimizationEvent::Finished(result) => {
+                        finished = true;
+                        match result {
+                            Ok(report) => {
+                                self.status_message = if report.cancelled {
+                                    "Parameteroptimierung abgebrochen".to_string()
+                                } else if report.converged {
+                                    format!(
+                                        "Parameteroptimierung konvergiert: Score {:.6}",
+                                        report.best_score
+                                    )
+                                } else {
+                                    format!(
+                                        "Parameteroptimierung abgeschlossen: Score {:.6}",
+                                        report.best_score
+                                    )
+                                };
+                                self.optimization_editor.last_report = Some(report);
+                                self.error_message = None;
+                            }
+                            Err(err) => {
+                                self.error_message = Some(err);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if finished {
+            if let Some(mut job) = self.optimization_job.take() {
+                if let Some(handle) = job.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ProjectsLoaded(result) => match result {
@@ -1368,6 +1568,7 @@ impl DesktopApp {
                     self.model_editor = panel.model_editor;
                     self.simulation_editor = panel.simulation_editor;
                     self.logic_editor = panel.logic_editor;
+                    self.optimization_editor = panel.optimization_editor;
                     self.control_function_tests = panel.control_function_tests;
                     self.variables = panel.variables;
                     self.mv_name_rows = panel.mv_names;
@@ -1658,7 +1859,10 @@ impl DesktopApp {
                     Task::none()
                 }
             },
-            Message::Tick => refresh_task(Arc::clone(&self.runtime)),
+            Message::Tick => {
+                self.poll_optimization_job();
+                refresh_task(Arc::clone(&self.runtime))
+            }
             Message::Refreshed(result) => match result {
                 Ok(data) => {
                     self.active_snapshot = data.snapshot;
@@ -2377,6 +2581,231 @@ impl DesktopApp {
                     Task::none()
                 }
             },
+            Message::OptimizationParamFixedToggled(index, fixed) => {
+                if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
+                    row.fixed = fixed;
+                }
+                Task::none()
+            }
+            Message::OptimizationParamStartChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
+                    row.start = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationParamMinChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
+                    row.min = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationParamMaxChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
+                    row.max = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationCvTargetChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.cv_targets.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationCvWeightChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.cv_weights.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationCvNoiseChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.cv_noise.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationMvNoiseChanged(index, value) => {
+                if let Some(row) = self.optimization_editor.mv_noise.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::OptimizationMetricIseChanged(value) => {
+                self.optimization_editor.metric_ise = value;
+                Task::none()
+            }
+            Message::OptimizationMetricIaeChanged(value) => {
+                self.optimization_editor.metric_iae = value;
+                Task::none()
+            }
+            Message::OptimizationMetricItaeChanged(value) => {
+                self.optimization_editor.metric_itae = value;
+                Task::none()
+            }
+            Message::OptimizationAScaleMinChanged(value) => {
+                self.optimization_editor.a_scale_min_pct = value;
+                Task::none()
+            }
+            Message::OptimizationAScaleMaxChanged(value) => {
+                self.optimization_editor.a_scale_max_pct = value;
+                Task::none()
+            }
+            Message::OptimizationBScaleMinChanged(value) => {
+                self.optimization_editor.b_scale_min_pct = value;
+                Task::none()
+            }
+            Message::OptimizationBScaleMaxChanged(value) => {
+                self.optimization_editor.b_scale_max_pct = value;
+                Task::none()
+            }
+            Message::OptimizationScenarioCountChanged(value) => {
+                self.optimization_editor.scenario_count = value;
+                Task::none()
+            }
+            Message::OptimizationMaxIterationsChanged(value) => {
+                self.optimization_editor.max_iterations = value;
+                Task::none()
+            }
+            Message::OptimizationInitialSamplesChanged(value) => {
+                self.optimization_editor.initial_samples = value;
+                Task::none()
+            }
+            Message::OptimizationConvergencePatienceChanged(value) => {
+                self.optimization_editor.convergence_patience = value;
+                Task::none()
+            }
+            Message::OptimizationPlotIntervalChanged(value) => {
+                self.optimization_editor.plot_interval = value;
+                Task::none()
+            }
+            Message::OptimizationDurationChanged(value) => {
+                self.optimization_editor.simulation_duration_s = value;
+                Task::none()
+            }
+            Message::SaveOptimizationPressed => {
+                if self.execution_active() {
+                    self.error_message = Some(
+                        "Ausführung läuft. Für Parameteroptimierung bitte erst stoppen."
+                            .to_string(),
+                    );
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                save_optimization_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.optimization_editor.clone(),
+                )
+            }
+            Message::OptimizationSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::StartOptimizationPressed => {
+                if self.execution_active() {
+                    self.error_message = Some(
+                        "Ausführung läuft. Für Parameteroptimierung bitte erst stoppen."
+                            .to_string(),
+                    );
+                    return Task::none();
+                }
+                if self.optimization_job.is_some() {
+                    self.error_message = Some("Parameteroptimierung läuft bereits".to_string());
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                match save_optimization_config_now(
+                    &self.project_service,
+                    &project_name,
+                    &self.optimization_editor,
+                ) {
+                    Ok(()) => {
+                        self.optimization_editor.last_report = None;
+                        self.optimization_editor.last_progress = None;
+                        let (tx, rx) = mpsc::channel();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        let thread_cancel = Arc::clone(&cancel);
+                        let service = self.project_service.clone();
+                        let thread_project = project_name.clone();
+                        let handle = thread::spawn(move || {
+                            let result = run_parameter_optimization(
+                                &service,
+                                &thread_project,
+                                thread_cancel,
+                                Some(tx.clone()),
+                            )
+                            .map_err(|err| err.to_string());
+                            let _ = tx.send(OptimizationEvent::Finished(result));
+                        });
+                        self.optimization_job = Some(OptimizationJob {
+                            cancel,
+                            rx,
+                            handle: Some(handle),
+                        });
+                        self.status_message =
+                            format!("Parameteroptimierung für '{}' gestartet", project_name);
+                        self.error_message = None;
+                        Task::none()
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
+                        Task::none()
+                    }
+                }
+            }
+            Message::CancelOptimizationPressed => {
+                if let Some(job) = self.optimization_job.as_ref() {
+                    job.cancel.store(true, Ordering::Relaxed);
+                    self.status_message = "Parameteroptimierung wird abgebrochen".to_string();
+                }
+                Task::none()
+            }
+            Message::UseOptimizedParametersPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                let Some(report) = self.optimization_editor.last_report.clone() else {
+                    self.error_message = Some("Keine optimierten Parameter vorhanden".to_string());
+                    return Task::none();
+                };
+                apply_optimized_parameters_task(
+                    self.project_service.clone(),
+                    project_name,
+                    report.best_params,
+                )
+            }
+            Message::OptimizedParametersApplied(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    if let Some(project_name) = self.selected_project.clone() {
+                        load_project_panel_task(self.project_service.clone(), project_name)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
         }
     }
 
@@ -2558,6 +2987,7 @@ impl DesktopApp {
             SetupPage::Limits => self.limits_editor_view(execution_active),
             SetupPage::Model => self.model_editor_view(execution_active),
             SetupPage::Logic => self.logic_editor_view(execution_active),
+            SetupPage::Optimization => self.parameter_optimization_view(execution_active),
             SetupPage::Timing => self.control_function_tests_view(execution_active),
             SetupPage::Simulation => self.simulation_editor_view(),
             SetupPage::Deployment => self.placeholder_page_view(
@@ -3016,6 +3446,369 @@ impl DesktopApp {
         container(column![text(title.to_string()).size(18), scrollable(grid)].spacing(10))
             .padding(12)
             .into()
+    }
+
+    fn parameter_optimization_view(&self, execution_active: bool) -> Element<'_, Message> {
+        let optimization_running = self.optimization_job.is_some();
+        let can_edit = !execution_active && !optimization_running;
+        let can_start = self.selected_project.is_some() && can_edit;
+        let can_use = self.optimization_editor.last_report.is_some() && !optimization_running;
+
+        let save_button = if can_edit {
+            button("Save Settings").on_press(Message::SaveOptimizationPressed)
+        } else {
+            button("Save Settings")
+        };
+        let start_button = if can_start {
+            button("Start Optimization").on_press(Message::StartOptimizationPressed)
+        } else {
+            button("Start Optimization")
+        };
+        let cancel_button = if optimization_running {
+            button("Cancel").on_press(Message::CancelOptimizationPressed)
+        } else {
+            button("Cancel")
+        };
+        let use_button = if can_use {
+            button("Use Parameters").on_press(Message::UseOptimizedParametersPressed)
+        } else {
+            button("Use Parameters")
+        };
+
+        let progress_line = self
+            .optimization_editor
+            .last_progress
+            .as_ref()
+            .map(|progress| {
+                format!(
+                    "{} | best={}",
+                    progress.status,
+                    progress
+                        .best_score
+                        .map(|score| format!("{score:.6}"))
+                        .unwrap_or_else(|| "-".to_string())
+                )
+            })
+            .or_else(|| {
+                self.optimization_editor.last_report.as_ref().map(|report| {
+                    format!(
+                        "Final | iterations={} | best={:.6}",
+                        report.iteration_count, report.best_score
+                    )
+                })
+            })
+            .unwrap_or_else(|| "Noch kein Optimierungslauf gestartet.".to_string());
+
+        let mut content = column![
+            text("Parameter Optimization").size(24),
+            text("Offline robust step-response tuning for active numeric controller parameters.")
+                .size(14),
+            row![
+                save_button,
+                start_button,
+                cancel_button,
+                use_button,
+                text(progress_line).size(13)
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(12);
+
+        if execution_active {
+            content = content.push(
+                text("Runtime oder Simulation läuft: Für Parameteroptimierung erst stoppen.")
+                    .size(13),
+            );
+        }
+
+        content = content.push(text("Controller Parameters").size(18));
+        if self.optimization_editor.param_rows.is_empty() {
+            content = content.push(text(
+                "Keine aktiven numerischen Controller-Parameter vorhanden.",
+            ));
+        } else {
+            content = content.push(
+                row![
+                    text("Parameter").width(Length::FillPortion(3)),
+                    text("Fixed").width(Length::FillPortion(1)),
+                    text("Start").width(Length::FillPortion(1)),
+                    text("Min").width(Length::FillPortion(1)),
+                    text("Max").width(Length::FillPortion(1)),
+                ]
+                .spacing(8),
+            );
+            for (index, row_data) in self.optimization_editor.param_rows.iter().enumerate() {
+                let fixed_toggle = if can_edit {
+                    checkbox(row_data.fixed)
+                        .on_toggle(move |value| {
+                            Message::OptimizationParamFixedToggled(index, value)
+                        })
+                        .width(Length::FillPortion(1))
+                } else {
+                    checkbox(row_data.fixed).width(Length::FillPortion(1))
+                };
+                let start_input = if can_edit {
+                    text_input("start", &row_data.start)
+                        .on_input(move |value| Message::OptimizationParamStartChanged(index, value))
+                } else {
+                    text_input("start", &row_data.start)
+                };
+                let min_input = if can_edit && !row_data.fixed {
+                    text_input("min", &row_data.min)
+                        .on_input(move |value| Message::OptimizationParamMinChanged(index, value))
+                } else {
+                    text_input("min", &row_data.min)
+                };
+                let max_input = if can_edit && !row_data.fixed {
+                    text_input("max", &row_data.max)
+                        .on_input(move |value| Message::OptimizationParamMaxChanged(index, value))
+                } else {
+                    text_input("max", &row_data.max)
+                };
+                content = content.push(
+                    row![
+                        text(row_data.key.clone()).width(Length::FillPortion(3)),
+                        fixed_toggle,
+                        start_input.width(Length::FillPortion(1)),
+                        min_input.width(Length::FillPortion(1)),
+                        max_input.width(Length::FillPortion(1)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+        }
+
+        content = content
+            .push(text("Objective").size(18))
+            .push(
+                row![
+                    text("ISE").width(Length::Fixed(50.0)),
+                    opt_text_input(
+                        "ISE",
+                        &self.optimization_editor.metric_ise,
+                        can_edit,
+                        Message::OptimizationMetricIseChanged,
+                    )
+                    .width(Length::Fixed(120.0)),
+                    text("IAE").width(Length::Fixed(50.0)),
+                    opt_text_input(
+                        "IAE",
+                        &self.optimization_editor.metric_iae,
+                        can_edit,
+                        Message::OptimizationMetricIaeChanged,
+                    )
+                    .width(Length::Fixed(120.0)),
+                    text("ITAE").width(Length::Fixed(50.0)),
+                    opt_text_input(
+                        "ITAE",
+                        &self.optimization_editor.metric_itae,
+                        can_edit,
+                        Message::OptimizationMetricItaeChanged,
+                    )
+                    .width(Length::Fixed(120.0)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .push(self.optimization_named_rows_section(
+                "CV target step",
+                &self.optimization_editor.cv_targets,
+                can_edit,
+                Message::OptimizationCvTargetChanged,
+            ))
+            .push(self.optimization_named_rows_section(
+                "CV channel weight",
+                &self.optimization_editor.cv_weights,
+                can_edit,
+                Message::OptimizationCvWeightChanged,
+            ))
+            .push(self.optimization_named_rows_section(
+                "CV output noise std",
+                &self.optimization_editor.cv_noise,
+                can_edit,
+                Message::OptimizationCvNoiseChanged,
+            ))
+            .push(self.optimization_named_rows_section(
+                "MV input noise std",
+                &self.optimization_editor.mv_noise,
+                can_edit,
+                Message::OptimizationMvNoiseChanged,
+            ));
+
+        content = content
+            .push(text("Robustness and Run Settings").size(18))
+            .push(
+                column![
+                    row![
+                        text("A scale min/max (%)").width(Length::Fixed(160.0)),
+                        opt_text_input(
+                            "min",
+                            &self.optimization_editor.a_scale_min_pct,
+                            can_edit,
+                            Message::OptimizationAScaleMinChanged,
+                        )
+                        .width(Length::Fixed(100.0)),
+                        opt_text_input(
+                            "max",
+                            &self.optimization_editor.a_scale_max_pct,
+                            can_edit,
+                            Message::OptimizationAScaleMaxChanged,
+                        )
+                        .width(Length::Fixed(100.0)),
+                        text("B scale min/max (%)").width(Length::Fixed(160.0)),
+                        opt_text_input(
+                            "min",
+                            &self.optimization_editor.b_scale_min_pct,
+                            can_edit,
+                            Message::OptimizationBScaleMinChanged,
+                        )
+                        .width(Length::Fixed(100.0)),
+                        opt_text_input(
+                            "max",
+                            &self.optimization_editor.b_scale_max_pct,
+                            can_edit,
+                            Message::OptimizationBScaleMaxChanged,
+                        )
+                        .width(Length::Fixed(100.0)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Scenarios").width(Length::Fixed(110.0)),
+                        opt_text_input(
+                            "scenarios",
+                            &self.optimization_editor.scenario_count,
+                            can_edit,
+                            Message::OptimizationScenarioCountChanged,
+                        )
+                        .width(Length::Fixed(90.0)),
+                        text("Iterations").width(Length::Fixed(110.0)),
+                        opt_text_input(
+                            "iterations",
+                            &self.optimization_editor.max_iterations,
+                            can_edit,
+                            Message::OptimizationMaxIterationsChanged,
+                        )
+                        .width(Length::Fixed(90.0)),
+                        text("Initial").width(Length::Fixed(80.0)),
+                        opt_text_input(
+                            "initial",
+                            &self.optimization_editor.initial_samples,
+                            can_edit,
+                            Message::OptimizationInitialSamplesChanged,
+                        )
+                        .width(Length::Fixed(90.0)),
+                        text("Patience").width(Length::Fixed(80.0)),
+                        opt_text_input(
+                            "patience",
+                            &self.optimization_editor.convergence_patience,
+                            can_edit,
+                            Message::OptimizationConvergencePatienceChanged,
+                        )
+                        .width(Length::Fixed(90.0)),
+                        text("Plot N").width(Length::Fixed(70.0)),
+                        opt_text_input(
+                            "plot",
+                            &self.optimization_editor.plot_interval,
+                            can_edit,
+                            Message::OptimizationPlotIntervalChanged,
+                        )
+                        .width(Length::Fixed(90.0)),
+                        text("Duration s").width(Length::Fixed(90.0)),
+                        opt_text_input(
+                            "duration",
+                            &self.optimization_editor.simulation_duration_s,
+                            can_edit,
+                            Message::OptimizationDurationChanged,
+                        )
+                        .width(Length::Fixed(100.0)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(8),
+            );
+
+        let curves = self
+            .optimization_editor
+            .last_progress
+            .as_ref()
+            .and_then(|progress| progress.curves.clone())
+            .or_else(|| {
+                self.optimization_editor
+                    .last_report
+                    .as_ref()
+                    .map(|report| report.curves.clone())
+            });
+        if let Some(curves) = curves {
+            content = content.push(text("Step Response Family").size(18)).push(
+                canvas::Canvas::new(OptimizationPlotProgram { curves })
+                    .width(Length::Fill)
+                    .height(Length::Fixed(360.0)),
+            );
+        }
+
+        let warnings = self
+            .optimization_editor
+            .last_progress
+            .as_ref()
+            .map(|progress| progress.warnings.clone())
+            .or_else(|| {
+                self.optimization_editor
+                    .last_report
+                    .as_ref()
+                    .map(|report| report.warnings.clone())
+            })
+            .unwrap_or_default();
+        for warning in warnings {
+            content = content.push(text(format!("Warnung: {warning}")).size(13));
+        }
+
+        container(
+            scrollable(content)
+                .direction(iced::widget::scrollable::Direction::Both {
+                    vertical: iced::widget::scrollable::Scrollbar::new(),
+                    horizontal: iced::widget::scrollable::Scrollbar::new(),
+                })
+                .height(Length::Fill),
+        )
+        .padding(12)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn optimization_named_rows_section<F>(
+        &self,
+        title: &'static str,
+        rows: &[OptimizationNamedRowState],
+        editable: bool,
+        message: F,
+    ) -> Element<'_, Message>
+    where
+        F: Fn(usize, String) -> Message + Copy + 'static,
+    {
+        let mut content = column![text(title).size(16)].spacing(6);
+        if rows.is_empty() {
+            content = content.push(text("Keine Kanäle vorhanden.").size(13));
+        }
+        for (index, row_data) in rows.iter().enumerate() {
+            let input = if editable {
+                text_input("value", &row_data.value).on_input(move |value| message(index, value))
+            } else {
+                text_input("value", &row_data.value)
+            };
+            content = content.push(
+                row![
+                    text(row_data.name.clone()).width(Length::Fixed(180.0)),
+                    input.width(Length::Fixed(160.0)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        container(content).padding(8).into()
     }
 
     fn matrix_editor_card_view(
@@ -4225,6 +5018,48 @@ fn format_logic_param_value(value: &LogicParamValue) -> String {
     }
 }
 
+fn format_numeric(value: f64) -> String {
+    if value.abs() >= 1_000.0 || (value != 0.0 && value.abs() < 0.001) {
+        format!("{value:.4e}")
+    } else {
+        format!("{value:.4}")
+    }
+}
+
+fn optimization_named_rows(
+    names: &[String],
+    values: &HashMap<String, f64>,
+) -> Vec<OptimizationNamedRowState> {
+    names
+        .iter()
+        .map(|name| OptimizationNamedRowState {
+            name: name.clone(),
+            value: values
+                .get(name)
+                .copied()
+                .map(format_numeric)
+                .unwrap_or_else(|| "0".to_string()),
+        })
+        .collect()
+}
+
+fn opt_text_input<'a, F>(
+    placeholder: &'static str,
+    value: &'a str,
+    editable: bool,
+    message: F,
+) -> iced::widget::TextInput<'a, Message>
+where
+    F: Fn(String) -> Message + 'static,
+{
+    let input = text_input(placeholder, value);
+    if editable {
+        input.on_input(message)
+    } else {
+        input
+    }
+}
+
 fn linear_mpc_editor_rows(
     model: Option<&LinearStateSpaceModelConfig>,
     vars: &VariableCatalogConfig,
@@ -4379,9 +5214,12 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             let sidebar_tasks = project_service
                 .sidebar_tasks(&project_name)
                 .map_err(|err| format!("Sidebar-Aufgaben konnten nicht geladen werden: {err}"))?;
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
+            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
                 format!("Projektkonfiguration konnte nicht geladen werden: {err}")
             })?;
+            cfg.sync_active_online_params();
+            cfg.normalize_simulation_config();
+            cfg.normalize_optimization_config();
             let communication = CommunicationEditorState::from_config(&cfg.communication);
             let model_editor = ModelEditorState::from_config(cfg.model.as_ref(), &cfg.variables);
             let simulation_editor = SimulationEditorState::from_config(
@@ -4390,6 +5228,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 cfg.model.as_ref(),
             );
             let logic_editor = LogicEditorState::from_config(&cfg);
+            let optimization_editor = ParameterOptimizationState::from_config(&cfg);
             let control_function_tests =
                 ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
 
@@ -4448,6 +5287,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 sidebar_tasks,
                 config_params: cfg.logic.params.clone(),
                 logic_editor,
+                optimization_editor,
                 model_editor,
                 simulation_editor,
                 control_function_tests,
@@ -5081,6 +5921,58 @@ fn sync_simulation_editor_task(
     )
 }
 
+fn save_optimization_config_now(
+    project_service: &ProjectService,
+    project_name: &str,
+    editor: &ParameterOptimizationState,
+) -> Result<(), String> {
+    let mut cfg = project_service
+        .load_config(project_name)
+        .map_err(|err| format!("Projektkonfiguration konnte nicht geladen werden: {err}"))?;
+    cfg.sync_active_online_params();
+    cfg.optimization = build_optimization_config_from_editor(editor)?;
+    cfg.normalize_optimization_config();
+    project_service
+        .save_config(project_name, &cfg)
+        .map_err(|err| format!("Optimierungseinstellungen konnten nicht gespeichert werden: {err}"))
+}
+
+fn save_optimization_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: ParameterOptimizationState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            save_optimization_config_now(&project_service, &project_name, &editor)?;
+            Ok(format!(
+                "Optimierungseinstellungen für '{}' gespeichert",
+                project_name
+            ))
+        },
+        Message::OptimizationSaved,
+    )
+}
+
+fn apply_optimized_parameters_task(
+    project_service: ProjectService,
+    project_name: String,
+    updates: HashMap<String, f64>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            apply_optimized_parameters(&project_service, &project_name, &updates).map_err(
+                |err| format!("Optimierte Parameter konnten nicht übernommen werden: {err}"),
+            )?;
+            Ok(format!(
+                "Optimierte Parameter für '{}' übernommen",
+                project_name
+            ))
+        },
+        Message::OptimizedParametersApplied,
+    )
+}
+
 fn build_model_config_from_editor(
     editor: &ModelEditorState,
     vars: &VariableCatalogConfig,
@@ -5236,6 +6128,109 @@ fn parse_numeric_matrix(
     }
 
     Ok(out)
+}
+
+fn build_optimization_config_from_editor(
+    editor: &ParameterOptimizationState,
+) -> Result<ParameterOptimizationConfig, String> {
+    let mut parameters = Vec::new();
+    for row in &editor.param_rows {
+        parameters.push(ParameterOptimizationParamConfig {
+            key: row.key.clone(),
+            fixed: row.fixed,
+            start: parse_finite_f64("parameter start", &row.start)?,
+            min: parse_finite_f64("parameter min", &row.min)?,
+            max: parse_finite_f64("parameter max", &row.max)?,
+        });
+    }
+
+    Ok(ParameterOptimizationConfig {
+        parameters,
+        cv_target_steps: parse_optimization_named_rows(
+            "CV target step",
+            &editor.cv_targets,
+            false,
+        )?,
+        cv_weights: parse_optimization_named_rows("CV weight", &editor.cv_weights, true)?,
+        cv_noise_std: parse_optimization_named_rows("CV noise", &editor.cv_noise, true)?,
+        mv_noise_std: parse_optimization_named_rows("MV noise", &editor.mv_noise, true)?,
+        metric_weights: ParameterOptimizationMetricWeights {
+            ise: parse_non_negative_f64("ISE weight", &editor.metric_ise)?,
+            iae: parse_non_negative_f64("IAE weight", &editor.metric_iae)?,
+            itae: parse_non_negative_f64("ITAE weight", &editor.metric_itae)?,
+        },
+        a_scale_min_pct: parse_finite_f64("A scale min", &editor.a_scale_min_pct)?,
+        a_scale_max_pct: parse_finite_f64("A scale max", &editor.a_scale_max_pct)?,
+        b_scale_min_pct: parse_finite_f64("B scale min", &editor.b_scale_min_pct)?,
+        b_scale_max_pct: parse_finite_f64("B scale max", &editor.b_scale_max_pct)?,
+        scenario_count: parse_positive_usize("scenario count", &editor.scenario_count)?,
+        max_iterations: parse_positive_usize("max iterations", &editor.max_iterations)?,
+        initial_samples: parse_positive_usize("initial samples", &editor.initial_samples)?,
+        convergence_patience: parse_positive_usize(
+            "convergence patience",
+            &editor.convergence_patience,
+        )?,
+        plot_interval: parse_positive_usize("plot interval", &editor.plot_interval)?,
+        simulation_duration_s: parse_positive_f64(
+            "simulation duration",
+            &editor.simulation_duration_s,
+        )?,
+    })
+}
+
+fn parse_optimization_named_rows(
+    label: &str,
+    rows: &[OptimizationNamedRowState],
+    non_negative: bool,
+) -> Result<HashMap<String, f64>, String> {
+    let mut out = HashMap::new();
+    for row in rows {
+        let value = if non_negative {
+            parse_non_negative_f64(label, &row.value)?
+        } else {
+            parse_finite_f64(label, &row.value)?
+        };
+        out.insert(row.name.clone(), value);
+    }
+    Ok(out)
+}
+
+fn parse_finite_f64(label: &str, raw: &str) -> Result<f64, String> {
+    let value = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{label} is not a valid number: '{raw}'"))?;
+    if !value.is_finite() {
+        return Err(format!("{label} must be finite"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_f64(label: &str, raw: &str) -> Result<f64, String> {
+    let value = parse_finite_f64(label, raw)?;
+    if value <= 0.0 {
+        return Err(format!("{label} must be > 0"));
+    }
+    Ok(value)
+}
+
+fn parse_non_negative_f64(label: &str, raw: &str) -> Result<f64, String> {
+    let value = parse_finite_f64(label, raw)?;
+    if value < 0.0 {
+        return Err(format!("{label} must be >= 0"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_usize(label: &str, raw: &str) -> Result<usize, String> {
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{label} is not a valid integer: '{raw}'"))?;
+    if value == 0 {
+        return Err(format!("{label} must be > 0"));
+    }
+    Ok(value)
 }
 
 fn save_logic_task(
@@ -6204,6 +7199,136 @@ fn start_web_task(
         },
         Message::WebStarted,
     )
+}
+
+#[derive(Debug, Clone)]
+struct OptimizationPlotProgram {
+    curves: OptimizationCurveFamily,
+}
+
+impl canvas::Program<Message> for OptimizationPlotProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let background = canvas::Path::rectangle(Point::ORIGIN, bounds.size());
+        frame.fill(&background, Color::from_rgb(0.98, 0.98, 0.98));
+
+        let count = self.curves.cvs.len().max(1);
+        let cols = (count as f32).sqrt().ceil() as usize;
+        let rows = count.div_ceil(cols);
+        let gap = 16.0_f32;
+        let cell_w = ((bounds.width - gap * (cols as f32 + 1.0)) / cols as f32).max(80.0);
+        let cell_h = ((bounds.height - gap * (rows as f32 + 1.0)) / rows as f32).max(80.0);
+        let colors = [
+            Color::from_rgb(0.10, 0.32, 0.70),
+            Color::from_rgb(0.78, 0.24, 0.16),
+            Color::from_rgb(0.10, 0.55, 0.32),
+            Color::from_rgb(0.55, 0.24, 0.65),
+            Color::from_rgb(0.70, 0.50, 0.10),
+        ];
+
+        for (index, family) in self.curves.cvs.iter().enumerate() {
+            let col = index % cols;
+            let row = index / cols;
+            let x0 = gap + col as f32 * (cell_w + gap);
+            let y0 = gap + row as f32 * (cell_h + gap);
+            let plot_left = x0 + 42.0;
+            let plot_top = y0 + 22.0;
+            let plot_w = (cell_w - 54.0).max(20.0);
+            let plot_h = (cell_h - 40.0).max(20.0);
+            let plot_rect =
+                canvas::Path::rectangle(Point::new(plot_left, plot_top), Size::new(plot_w, plot_h));
+            frame.stroke(
+                &plot_rect,
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(Color::from_rgb(0.72, 0.72, 0.72)),
+            );
+            frame.fill_text(canvas::Text {
+                content: family.cv.clone(),
+                position: Point::new(x0, y0),
+                size: iced::Pixels(14.0),
+                color: Color::from_rgb(0.10, 0.10, 0.10),
+                ..Default::default()
+            });
+
+            let (min_t, max_t, min_y, max_y) = curve_bounds(family);
+            let target_y = map_y(family.target, min_y, max_y, plot_top, plot_h);
+            let target_path = canvas::Path::line(
+                Point::new(plot_left, target_y),
+                Point::new(plot_left + plot_w, target_y),
+            );
+            frame.stroke(
+                &target_path,
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(Color::from_rgb(0.25, 0.25, 0.25)),
+            );
+
+            for scenario in &family.scenarios {
+                let color = colors[scenario.scenario_index % colors.len()];
+                let path = canvas::Path::new(|builder| {
+                    for (point_index, (t, y)) in scenario.points.iter().enumerate() {
+                        let x = map_x(*t, min_t, max_t, plot_left, plot_w);
+                        let y = map_y(*y, min_y, max_y, plot_top, plot_h);
+                        if point_index == 0 {
+                            builder.move_to(Point::new(x, y));
+                        } else {
+                            builder.line_to(Point::new(x, y));
+                        }
+                    }
+                });
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default().with_width(1.2).with_color(color),
+                );
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+fn curve_bounds(family: &crate::parameter_optimization::CvCurveFamily) -> (f32, f32, f32, f32) {
+    let mut min_t = f64::INFINITY;
+    let mut max_t = f64::NEG_INFINITY;
+    let mut min_y = family.target;
+    let mut max_y = family.target;
+    for scenario in &family.scenarios {
+        for (t, y) in &scenario.points {
+            min_t = min_t.min(*t);
+            max_t = max_t.max(*t);
+            min_y = min_y.min(*y);
+            max_y = max_y.max(*y);
+        }
+    }
+    if !min_t.is_finite() || !max_t.is_finite() || (max_t - min_t).abs() < f64::EPSILON {
+        min_t = 0.0;
+        max_t = 1.0;
+    }
+    if (max_y - min_y).abs() < f64::EPSILON {
+        min_y -= 1.0;
+        max_y += 1.0;
+    }
+    (min_t as f32, max_t as f32, min_y as f32, max_y as f32)
+}
+
+fn map_x(value: f64, min: f32, max: f32, left: f32, width: f32) -> f32 {
+    let span = (max - min).max(f32::EPSILON);
+    left + (((value as f32 - min) / span).clamp(0.0, 1.0) * width)
+}
+
+fn map_y(value: f64, min: f32, max: f32, top: f32, height: f32) -> f32 {
+    let span = (max - min).max(f32::EPSILON);
+    top + height - (((value as f32 - min) / span).clamp(0.0, 1.0) * height)
 }
 
 fn build_plot_lines(samples: &[SignalSample], width: usize) -> Vec<String> {
