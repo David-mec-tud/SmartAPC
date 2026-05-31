@@ -84,6 +84,7 @@ pub struct StepMetrics {
     pub ise: f64,
     pub iae: f64,
     pub itae: f64,
+    pub overshoot: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -391,7 +392,11 @@ fn evaluate_candidate(
             logic,
             scenario.noise_seed,
         )?;
-        let scenario_score = weighted_score(&scenario_config.optimization, &response.metrics);
+        let scenario_score = weighted_score(
+            &scenario_config.optimization,
+            &response.metrics,
+            response.actuator,
+        );
         if !scenario_score.is_finite() {
             warnings.push(format!(
                 "scenario {} produced a non-finite score",
@@ -426,6 +431,7 @@ fn evaluate_candidate(
 struct StepResponseResult {
     metrics: HashMap<String, StepMetrics>,
     curves: HashMap<String, Vec<(f64, f64)>>,
+    actuator: f64,
 }
 
 fn run_step_response(
@@ -459,6 +465,7 @@ fn run_step_response(
     let mut current_dv = simulation.dv_initials.clone();
     let mut applied_mv = simulation.mv_initials.clone();
     let mut metrics: HashMap<String, StepMetrics> = HashMap::new();
+    let mut actuator = 0.0;
     let mut curves: HashMap<String, Vec<(f64, f64)>> = config
         .variables
         .cvs
@@ -474,12 +481,10 @@ fn run_step_response(
                 points.push((t, value));
             }
             let target = *simulation.cv_setpoints.get(cv).unwrap_or(&0.0);
-            accumulate_metric(
-                metrics.entry(cv.clone()).or_default(),
-                target - value,
-                t,
-                dt_s,
-            );
+            let initial = *simulation.cv_initials.get(cv).unwrap_or(&0.0);
+            let metric = metrics.entry(cv.clone()).or_default();
+            accumulate_metric(metric, target - value, t, dt_s);
+            accumulate_overshoot_metric(metric, value, initial, target, dt_s);
         }
 
         if step == steps {
@@ -501,6 +506,10 @@ fn run_step_response(
         for mv in &config.variables.mvs {
             let key = format!("mv.{mv}.write");
             if let Some(value) = outputs.get(&key).and_then(SignalValue::as_f64) {
+                let previous = applied_mv.get(mv).copied().unwrap_or(0.0);
+                let delta = value - previous;
+                // Match the Linear MPC R term: penalize actuator movement, not noisy readback.
+                actuator += delta * delta * dt_s;
                 applied_mv.insert(mv.clone(), value);
             }
         }
@@ -531,7 +540,11 @@ fn run_step_response(
         }
     }
 
-    Ok(StepResponseResult { metrics, curves })
+    Ok(StepResponseResult {
+        metrics,
+        curves,
+        actuator,
+    })
 }
 
 pub fn accumulate_metric(metrics: &mut StepMetrics, error: f64, t: f64, dt: f64) {
@@ -541,6 +554,25 @@ pub fn accumulate_metric(metrics: &mut StepMetrics, error: f64, t: f64, dt: f64)
     metrics.itae += t * abs * dt;
 }
 
+fn accumulate_overshoot_metric(
+    metrics: &mut StepMetrics,
+    value: f64,
+    initial: f64,
+    target: f64,
+    dt: f64,
+) {
+    let step_delta = target - initial;
+    // Overshoot is measured only beyond the final target in the direction of the requested step.
+    let overshoot = if step_delta > f64::EPSILON {
+        (value - target).max(0.0)
+    } else if step_delta < -f64::EPSILON {
+        (target - value).max(0.0)
+    } else {
+        (value - target).abs()
+    };
+    metrics.overshoot += overshoot * overshoot * dt;
+}
+
 pub fn robust_worst_score(scores: &[f64]) -> f64 {
     scores.iter().copied().fold(f64::NEG_INFINITY, f64::max)
 }
@@ -548,6 +580,7 @@ pub fn robust_worst_score(scores: &[f64]) -> f64 {
 fn weighted_score(
     config: &ParameterOptimizationConfig,
     metrics: &HashMap<String, StepMetrics>,
+    actuator: f64,
 ) -> f64 {
     let mut score = 0.0;
     for (cv, metric) in metrics {
@@ -555,8 +588,10 @@ fn weighted_score(
         score += channel_weight
             * (config.metric_weights.ise * metric.ise
                 + config.metric_weights.iae * metric.iae
-                + config.metric_weights.itae * metric.itae);
+                + config.metric_weights.itae * metric.itae
+                + config.metric_weights.overshoot * metric.overshoot);
     }
+    score += config.metric_weights.actuator * actuator;
     score
 }
 
@@ -1048,14 +1083,37 @@ mod tests {
         let mut metrics = StepMetrics::default();
         accumulate_metric(&mut metrics, 2.0, 0.0, 0.5);
         accumulate_metric(&mut metrics, -2.0, 0.5, 0.5);
+        accumulate_overshoot_metric(&mut metrics, 1.5, 0.0, 1.0, 0.5);
         assert!((metrics.ise - 4.0).abs() < 1.0e-9);
         assert!((metrics.iae - 2.0).abs() < 1.0e-9);
         assert!((metrics.itae - 0.5).abs() < 1.0e-9);
+        assert!((metrics.overshoot - 0.125).abs() < 1.0e-9);
     }
 
     #[test]
     fn robust_score_uses_worst_case() {
         assert_eq!(robust_worst_score(&[1.0, 4.0, 2.0]), 4.0);
+    }
+
+    #[test]
+    fn weighted_score_includes_overshoot_and_actuator() {
+        let mut config = ParameterOptimizationConfig::default();
+        config.metric_weights.ise = 0.0;
+        config.metric_weights.overshoot = 3.0;
+        config.metric_weights.actuator = 5.0;
+        config.cv_weights.insert("y1".to_string(), 2.0);
+
+        let mut metrics = HashMap::new();
+        metrics.insert(
+            "y1".to_string(),
+            StepMetrics {
+                overshoot: 4.0,
+                ..StepMetrics::default()
+            },
+        );
+
+        let score = weighted_score(&config, &metrics, 2.0);
+        assert!((score - 34.0).abs() < 1.0e-9);
     }
 
     #[test]

@@ -858,6 +858,8 @@ struct ParameterOptimizationState {
     metric_ise: String,
     metric_iae: String,
     metric_itae: String,
+    metric_overshoot: String,
+    metric_actuator: String,
     a_scale_min_pct: String,
     a_scale_max_pct: String,
     b_scale_min_pct: String,
@@ -894,6 +896,8 @@ impl ParameterOptimizationState {
             metric_ise: format_numeric(optimization.metric_weights.ise),
             metric_iae: format_numeric(optimization.metric_weights.iae),
             metric_itae: format_numeric(optimization.metric_weights.itae),
+            metric_overshoot: format_numeric(optimization.metric_weights.overshoot),
+            metric_actuator: format_numeric(optimization.metric_weights.actuator),
             a_scale_min_pct: format_numeric(optimization.a_scale_min_pct),
             a_scale_max_pct: format_numeric(optimization.a_scale_max_pct),
             b_scale_min_pct: format_numeric(optimization.b_scale_min_pct),
@@ -919,6 +923,8 @@ impl ParameterOptimizationState {
             metric_ise: "1".to_string(),
             metric_iae: "0".to_string(),
             metric_itae: "0".to_string(),
+            metric_overshoot: "0".to_string(),
+            metric_actuator: "0".to_string(),
             a_scale_min_pct: "90".to_string(),
             a_scale_max_pct: "110".to_string(),
             b_scale_min_pct: "90".to_string(),
@@ -1159,6 +1165,8 @@ enum Message {
     OptimizationMetricIseChanged(String),
     OptimizationMetricIaeChanged(String),
     OptimizationMetricItaeChanged(String),
+    OptimizationMetricOvershootChanged(String),
+    OptimizationMetricActuatorChanged(String),
     OptimizationAScaleMinChanged(String),
     OptimizationAScaleMaxChanged(String),
     OptimizationBScaleMinChanged(String),
@@ -2678,6 +2686,14 @@ impl DesktopApp {
                 self.optimization_editor.metric_itae = value;
                 Task::none()
             }
+            Message::OptimizationMetricOvershootChanged(value) => {
+                self.optimization_editor.metric_overshoot = value;
+                Task::none()
+            }
+            Message::OptimizationMetricActuatorChanged(value) => {
+                self.optimization_editor.metric_actuator = value;
+                Task::none()
+            }
             Message::OptimizationAScaleMinChanged(value) => {
                 self.optimization_editor.a_scale_min_pct = value;
                 Task::none()
@@ -3624,7 +3640,7 @@ impl DesktopApp {
         content = content
             .push(text("Objective").size(18))
             .push(
-                text("ISE, IAE, and ITAE weights choose the tracking-error metric mix. CV channel weights make one controlled variable count more than another in the weighted mean target.")
+                text("ISE, IAE, ITAE, and overshoot weights choose the tracking-error metric mix. Actuator weight penalizes MV movement. CV channel weights make one controlled variable count more than another in the weighted mean target.")
                     .size(13),
             )
             .push(
@@ -3651,6 +3667,28 @@ impl DesktopApp {
                         &self.optimization_editor.metric_itae,
                         can_edit,
                         Message::OptimizationMetricItaeChanged,
+                    )
+                    .width(Length::Fixed(120.0)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .push(
+                row![
+                    text("Overshoot").width(Length::Fixed(90.0)),
+                    opt_text_input(
+                        "Overshoot",
+                        &self.optimization_editor.metric_overshoot,
+                        can_edit,
+                        Message::OptimizationMetricOvershootChanged,
+                    )
+                    .width(Length::Fixed(120.0)),
+                    text("Actuator").width(Length::Fixed(90.0)),
+                    opt_text_input(
+                        "Actuator",
+                        &self.optimization_editor.metric_actuator,
+                        can_edit,
+                        Message::OptimizationMetricActuatorChanged,
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -3685,7 +3723,7 @@ impl DesktopApp {
         content = content
             .push(text("Robustness and Run Settings").size(18))
             .push(
-                text("A/B scale ranges define model uncertainty in percent for nonzero matrix entries. Scenarios are fixed robust samples; Iterations is the Bayesian optimization budget; Initial is the random warm-up; Patience stops after no improvement; Plot N refreshes step curves every N iterations; Duration is simulated seconds per candidate.")
+                text("A/B scale ranges define model uncertainty in percent for nonzero matrix entries and are sampled uniformly inside the configured min/max range. Scenarios are fixed robust samples; Iterations is the Bayesian optimization budget; Initial is the random warm-up; Patience stops after no improvement; Plot N refreshes step curves every N iterations; Duration is simulated seconds per candidate.")
                     .size(13),
             )
             .push(
@@ -6225,6 +6263,8 @@ fn build_optimization_config_from_editor(
             ise: parse_non_negative_f64("ISE weight", &editor.metric_ise)?,
             iae: parse_non_negative_f64("IAE weight", &editor.metric_iae)?,
             itae: parse_non_negative_f64("ITAE weight", &editor.metric_itae)?,
+            overshoot: parse_non_negative_f64("overshoot weight", &editor.metric_overshoot)?,
+            actuator: parse_non_negative_f64("actuator weight", &editor.metric_actuator)?,
         },
         a_scale_min_pct: parse_finite_f64("A scale min", &editor.a_scale_min_pct)?,
         a_scale_max_pct: parse_finite_f64("A scale max", &editor.a_scale_max_pct)?,

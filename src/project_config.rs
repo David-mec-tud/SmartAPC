@@ -1854,6 +1854,10 @@ pub struct ParameterOptimizationMetricWeights {
     pub iae: f64,
     #[serde(default)]
     pub itae: f64,
+    #[serde(default)]
+    pub overshoot: f64,
+    #[serde(default)]
+    pub actuator: f64,
 }
 
 impl Default for ParameterOptimizationMetricWeights {
@@ -1862,6 +1866,8 @@ impl Default for ParameterOptimizationMetricWeights {
             ise: default_metric_weight(),
             iae: 0.0,
             itae: 0.0,
+            overshoot: 0.0,
+            actuator: 0.0,
         }
     }
 }
@@ -1872,17 +1878,34 @@ impl ParameterOptimizationMetricWeights {
             ise: finite_or(self.ise, default_metric_weight()).max(0.0),
             iae: finite_or(self.iae, 0.0).max(0.0),
             itae: finite_or(self.itae, 0.0).max(0.0),
+            overshoot: finite_or(self.overshoot, 0.0).max(0.0),
+            actuator: finite_or(self.actuator, 0.0).max(0.0),
         }
     }
 
     fn validate(&self) -> Result<()> {
-        if !self.ise.is_finite() || !self.iae.is_finite() || !self.itae.is_finite() {
+        if !self.ise.is_finite()
+            || !self.iae.is_finite()
+            || !self.itae.is_finite()
+            || !self.overshoot.is_finite()
+            || !self.actuator.is_finite()
+        {
             bail!("optimization.metric_weights must be finite");
         }
-        if self.ise < 0.0 || self.iae < 0.0 || self.itae < 0.0 {
+        if self.ise < 0.0
+            || self.iae < 0.0
+            || self.itae < 0.0
+            || self.overshoot < 0.0
+            || self.actuator < 0.0
+        {
             bail!("optimization.metric_weights must be >= 0");
         }
-        if self.ise == 0.0 && self.iae == 0.0 && self.itae == 0.0 {
+        if self.ise == 0.0
+            && self.iae == 0.0
+            && self.itae == 0.0
+            && self.overshoot == 0.0
+            && self.actuator == 0.0
+        {
             bail!("at least one optimization metric weight must be > 0");
         }
         Ok(())
@@ -2496,6 +2519,8 @@ mod tests {
         cfg.normalize_optimization_config();
         cfg.optimization.metric_weights.ise = 0.0;
         cfg.optimization.metric_weights.iae = 1.0;
+        cfg.optimization.metric_weights.overshoot = 2.0;
+        cfg.optimization.metric_weights.actuator = 0.5;
         cfg.optimization.scenario_count = 3;
 
         let encoded = to_toml_string(&cfg).expect("toml encode");
@@ -2503,6 +2528,8 @@ mod tests {
 
         assert_eq!(decoded.optimization.scenario_count, 3);
         assert_eq!(decoded.optimization.metric_weights.iae, 1.0);
+        assert_eq!(decoded.optimization.metric_weights.overshoot, 2.0);
+        assert_eq!(decoded.optimization.metric_weights.actuator, 0.5);
         assert!(
             decoded
                 .optimization
