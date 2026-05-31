@@ -7293,7 +7293,7 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
         let plot_h = (bounds.height - 44.0).max(20.0);
         draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
         frame.fill_text(canvas::Text {
-            content: "best weighted mean target".to_string(),
+            content: "best weighted mean target (log scale)".to_string(),
             position: Point::new(10.0, 2.0),
             size: iced::Pixels(13.0),
             color: Color::from_rgb(0.10, 0.10, 0.10),
@@ -7313,13 +7313,16 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
 
         let min_iter = self.history.first().map(|(i, _)| *i).unwrap_or(0) as f32;
         let max_iter = self.history.last().map(|(i, _)| *i).unwrap_or(1) as f32;
-        let mut min_score = self
+        let log_history: Vec<_> = self
             .history
+            .iter()
+            .map(|(iteration, score)| (*iteration, log_plot_value(*score)))
+            .collect();
+        let mut min_score = log_history
             .iter()
             .map(|(_, score)| *score)
             .fold(f64::INFINITY, f64::min);
-        let mut max_score = self
-            .history
+        let mut max_score = log_history
             .iter()
             .map(|(_, score)| *score)
             .fold(f64::NEG_INFINITY, f64::max);
@@ -7329,9 +7332,15 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
         }
 
         let path = canvas::Path::new(|builder| {
-            for (index, (iteration, score)) in self.history.iter().enumerate() {
+            for (index, (iteration, log_score)) in log_history.iter().enumerate() {
                 let x = map_x(*iteration as f64, min_iter, max_iter, plot_left, plot_w);
-                let y = map_y(*score, min_score as f32, max_score as f32, plot_top, plot_h);
+                let y = map_y(
+                    *log_score,
+                    min_score as f32,
+                    max_score as f32,
+                    plot_top,
+                    plot_h,
+                );
                 if index == 0 {
                     builder.move_to(Point::new(x, y));
                 } else {
@@ -7496,6 +7505,10 @@ fn draw_plot_rect(
 fn map_x(value: f64, min: f32, max: f32, left: f32, width: f32) -> f32 {
     let span = (max - min).max(f32::EPSILON);
     left + (((value as f32 - min) / span).clamp(0.0, 1.0) * width)
+}
+
+fn log_plot_value(value: f64) -> f64 {
+    value.max(1.0e-12).log10()
 }
 
 fn map_y(value: f64, min: f32, max: f32, top: f32, height: f32) -> f32 {
