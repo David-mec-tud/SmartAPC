@@ -7287,10 +7287,10 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         draw_plot_background(&mut frame, bounds.size());
 
-        let plot_left = 54.0;
+        let plot_left = 68.0;
         let plot_top = 18.0;
-        let plot_w = (bounds.width - 74.0).max(20.0);
-        let plot_h = (bounds.height - 44.0).max(20.0);
+        let plot_w = (bounds.width - 92.0).max(20.0);
+        let plot_h = (bounds.height - 58.0).max(20.0);
         draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
         frame.fill_text(canvas::Text {
             content: "best weighted mean target (log scale)".to_string(),
@@ -7312,7 +7312,10 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
         }
 
         let min_iter = self.history.first().map(|(i, _)| *i).unwrap_or(0) as f32;
-        let max_iter = self.history.last().map(|(i, _)| *i).unwrap_or(1) as f32;
+        let mut max_iter = self.history.last().map(|(i, _)| *i).unwrap_or(1) as f32;
+        if (max_iter - min_iter).abs() < f32::EPSILON {
+            max_iter = min_iter + 1.0;
+        }
         let log_history: Vec<_> = self
             .history
             .iter()
@@ -7330,6 +7333,23 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
             min_score -= 1.0;
             max_score += 1.0;
         }
+        draw_plot_axes(
+            &mut frame,
+            PlotArea {
+                left: plot_left,
+                top: plot_top,
+                width: plot_w,
+                height: plot_h,
+            },
+            AxisBounds {
+                x_min: min_iter as f64,
+                x_max: max_iter as f64,
+                y_min: min_score,
+                y_max: max_score,
+            },
+            "iteration",
+            "log10 objective",
+        );
 
         let path = canvas::Path::new(|builder| {
             for (index, (iteration, log_score)) in log_history.iter().enumerate() {
@@ -7407,10 +7427,10 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
             let row = index / cols;
             let x0 = gap + col as f32 * (cell_w + gap);
             let y0 = gap + row as f32 * (cell_h + gap);
-            let plot_left = x0 + 42.0;
-            let plot_top = y0 + 22.0;
-            let plot_w = (cell_w - 54.0).max(20.0);
-            let plot_h = (cell_h - 40.0).max(20.0);
+            let plot_left = x0 + 56.0;
+            let plot_top = y0 + 26.0;
+            let plot_w = (cell_w - 76.0).max(20.0);
+            let plot_h = (cell_h - 62.0).max(20.0);
             draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
             frame.fill_text(canvas::Text {
                 content: family.cv.clone(),
@@ -7421,6 +7441,23 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
             });
 
             let (min_t, max_t, min_y, max_y) = curve_bounds(family);
+            draw_plot_axes(
+                &mut frame,
+                PlotArea {
+                    left: plot_left,
+                    top: plot_top,
+                    width: plot_w,
+                    height: plot_h,
+                },
+                AxisBounds {
+                    x_min: min_t as f64,
+                    x_max: max_t as f64,
+                    y_min: min_y as f64,
+                    y_max: max_y as f64,
+                },
+                "time (s)",
+                "value",
+            );
             let target_y = map_y(family.target, min_y, max_y, plot_top, plot_h);
             let target_path = canvas::Path::line(
                 Point::new(plot_left, target_y),
@@ -7500,6 +7537,148 @@ fn draw_plot_rect(
             .with_width(1.0)
             .with_color(Color::from_rgb(0.72, 0.72, 0.72)),
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlotArea {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AxisBounds {
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+}
+
+fn draw_plot_axes(
+    frame: &mut canvas::Frame<Renderer>,
+    area: PlotArea,
+    bounds: AxisBounds,
+    x_label: &str,
+    y_label: &str,
+) {
+    let axis_color = Color::from_rgb(0.34, 0.34, 0.34);
+    let grid_color = Color::from_rgb(0.88, 0.88, 0.88);
+    let tick_color = Color::from_rgb(0.20, 0.20, 0.20);
+    let x_ticks = axis_ticks(bounds.x_min, bounds.x_max);
+    let y_ticks = axis_ticks(bounds.y_min, bounds.y_max);
+
+    for value in x_ticks {
+        let x = map_x(
+            value,
+            bounds.x_min as f32,
+            bounds.x_max as f32,
+            area.left,
+            area.width,
+        );
+        let grid = canvas::Path::line(
+            Point::new(x, area.top),
+            Point::new(x, area.top + area.height),
+        );
+        frame.stroke(
+            &grid,
+            canvas::Stroke::default()
+                .with_width(0.6)
+                .with_color(grid_color),
+        );
+        let tick = canvas::Path::line(
+            Point::new(x, area.top + area.height),
+            Point::new(x, area.top + area.height + 4.0),
+        );
+        frame.stroke(
+            &tick,
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(axis_color),
+        );
+        frame.fill_text(canvas::Text {
+            content: format_axis_tick(value),
+            position: Point::new(x - 16.0, area.top + area.height + 6.0),
+            size: iced::Pixels(10.0),
+            color: tick_color,
+            ..Default::default()
+        });
+    }
+
+    for value in y_ticks {
+        let y = map_y(
+            value,
+            bounds.y_min as f32,
+            bounds.y_max as f32,
+            area.top,
+            area.height,
+        );
+        let grid = canvas::Path::line(
+            Point::new(area.left, y),
+            Point::new(area.left + area.width, y),
+        );
+        frame.stroke(
+            &grid,
+            canvas::Stroke::default()
+                .with_width(0.6)
+                .with_color(grid_color),
+        );
+        let tick = canvas::Path::line(Point::new(area.left - 4.0, y), Point::new(area.left, y));
+        frame.stroke(
+            &tick,
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(axis_color),
+        );
+        frame.fill_text(canvas::Text {
+            content: format_axis_tick(value),
+            position: Point::new(area.left - 52.0, y - 6.0),
+            size: iced::Pixels(10.0),
+            color: tick_color,
+            ..Default::default()
+        });
+    }
+
+    frame.fill_text(canvas::Text {
+        content: x_label.to_string(),
+        position: Point::new(
+            area.left + area.width * 0.5 - 24.0,
+            area.top + area.height + 22.0,
+        ),
+        size: iced::Pixels(11.0),
+        color: axis_color,
+        ..Default::default()
+    });
+    frame.fill_text(canvas::Text {
+        content: y_label.to_string(),
+        position: Point::new(area.left - 52.0, area.top - 14.0),
+        size: iced::Pixels(11.0),
+        color: axis_color,
+        ..Default::default()
+    });
+}
+
+fn axis_ticks(min: f64, max: f64) -> [f64; 3] {
+    if !min.is_finite() || !max.is_finite() || (max - min).abs() < f64::EPSILON {
+        return [0.0, 0.5, 1.0];
+    }
+    [min, (min + max) * 0.5, max]
+}
+
+fn format_axis_tick(value: f64) -> String {
+    let abs = value.abs();
+    let raw = if value == 0.0 {
+        "0".to_string()
+    } else if abs >= 1_000.0 || abs < 0.01 {
+        format!("{value:.1e}")
+    } else if abs >= 100.0 {
+        format!("{value:.0}")
+    } else if abs >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    };
+    raw.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 fn map_x(value: f64, min: f32, max: f32, left: f32, width: f32) -> f32 {
