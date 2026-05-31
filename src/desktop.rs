@@ -7349,6 +7349,11 @@ impl canvas::Program<Message> for OptimizationConvergenceProgram {
             },
             "iteration",
             "log10 objective",
+            self.history
+                .iter()
+                .map(|(iteration, _)| *iteration as f64)
+                .collect(),
+            axis_ticks(min_score, max_score, 6),
         );
 
         let path = canvas::Path::new(|builder| {
@@ -7457,6 +7462,8 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
                 },
                 "time (s)",
                 "value",
+                axis_ticks(min_t as f64, max_t as f64, 10),
+                axis_ticks(min_y as f64, max_y as f64, 10),
             );
             let target_y = map_y(family.target, min_y, max_y, plot_top, plot_h);
             let target_path = canvas::Path::line(
@@ -7561,12 +7568,12 @@ fn draw_plot_axes(
     bounds: AxisBounds,
     x_label: &str,
     y_label: &str,
+    x_ticks: Vec<f64>,
+    y_ticks: Vec<f64>,
 ) {
     let axis_color = Color::from_rgb(0.34, 0.34, 0.34);
     let grid_color = Color::from_rgb(0.88, 0.88, 0.88);
     let tick_color = Color::from_rgb(0.20, 0.20, 0.20);
-    let x_ticks = axis_ticks(bounds.x_min, bounds.x_max);
-    let y_ticks = axis_ticks(bounds.y_min, bounds.y_max);
 
     for value in x_ticks {
         let x = map_x(
@@ -7651,18 +7658,26 @@ fn draw_plot_axes(
     });
     frame.fill_text(canvas::Text {
         content: y_label.to_string(),
-        position: Point::new(area.left - 52.0, area.top - 14.0),
+        position: Point::new(area.left, area.top - 14.0),
         size: iced::Pixels(11.0),
         color: axis_color,
         ..Default::default()
     });
 }
 
-fn axis_ticks(min: f64, max: f64) -> [f64; 3] {
+fn axis_ticks(min: f64, max: f64, count: usize) -> Vec<f64> {
+    let count = count.max(2);
     if !min.is_finite() || !max.is_finite() || (max - min).abs() < f64::EPSILON {
-        return [0.0, 0.5, 1.0];
+        return (0..count)
+            .map(|index| index as f64 / (count - 1) as f64)
+            .collect();
     }
-    [min, (min + max) * 0.5, max]
+    (0..count)
+        .map(|index| {
+            let ratio = index as f64 / (count - 1) as f64;
+            min + ratio * (max - min)
+        })
+        .collect()
 }
 
 fn format_axis_tick(value: f64) -> String {
