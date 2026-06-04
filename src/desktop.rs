@@ -3585,25 +3585,31 @@ impl DesktopApp {
                 "Keine aktiven numerischen Controller-Parameter vorhanden.",
             ));
         } else {
+            let parameter_col = Length::Fixed(320.0);
+            let fixed_col = Length::Fixed(130.0);
+            let numeric_col = Length::Fixed(120.0);
             content = content.push(
                 row![
-                    text("Parameter").width(Length::FillPortion(3)),
-                    text("Fixed").width(Length::FillPortion(1)),
-                    text("Start").width(Length::FillPortion(1)),
-                    text("Min").width(Length::FillPortion(1)),
-                    text("Max").width(Length::FillPortion(1)),
+                    text("Parameter").width(parameter_col),
+                    text("Fixed").width(fixed_col),
+                    text("Start").width(numeric_col),
+                    text("Min").width(numeric_col),
+                    text("Max").width(numeric_col),
+                    text("Best").width(numeric_col),
                 ]
-                .spacing(8),
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
             );
             for (index, row_data) in self.optimization_editor.param_rows.iter().enumerate() {
                 let fixed_toggle = if can_edit {
                     checkbox(row_data.fixed)
+                        .label("Fixed")
                         .on_toggle(move |value| {
                             Message::OptimizationParamFixedToggled(index, value)
                         })
-                        .width(Length::FillPortion(1))
+                        .width(fixed_col)
                 } else {
-                    checkbox(row_data.fixed).width(Length::FillPortion(1))
+                    checkbox(row_data.fixed).label("Fixed").width(fixed_col)
                 };
                 let start_input = if can_edit {
                     text_input("start", &row_data.start)
@@ -3623,15 +3629,18 @@ impl DesktopApp {
                 } else {
                     text_input("max", &row_data.max)
                 };
+                let best_value =
+                    self.optimization_parameter_display_value(&row_data.key, &row_data.start);
                 content = content.push(
                     row![
-                        text(row_data.key.clone()).width(Length::FillPortion(3)),
+                        text(row_data.key.clone()).width(parameter_col),
                         fixed_toggle,
-                        start_input.width(Length::FillPortion(1)),
-                        min_input.width(Length::FillPortion(1)),
-                        max_input.width(Length::FillPortion(1)),
+                        start_input.width(numeric_col),
+                        min_input.width(numeric_col),
+                        max_input.width(numeric_col),
+                        text_input("best", &best_value).width(numeric_col),
                     ]
-                    .spacing(8)
+                    .spacing(12)
                     .align_y(iced::Alignment::Center),
                 );
             }
@@ -3869,6 +3878,20 @@ impl DesktopApp {
         .padding(12)
         .height(Length::Fill)
         .into()
+    }
+
+    fn optimization_parameter_display_value(&self, key: &str, fallback: &str) -> String {
+        if let Some(report) = self.optimization_editor.last_report.as_ref() {
+            if let Some(value) = report.best_params.get(key) {
+                return format_numeric(*value);
+            }
+        }
+        if let Some(progress) = self.optimization_editor.last_progress.as_ref() {
+            if let Some(value) = progress.best_params.get(key) {
+                return format_numeric(*value);
+            }
+        }
+        fallback.to_string()
     }
 
     fn optimization_named_rows_section<F>(
