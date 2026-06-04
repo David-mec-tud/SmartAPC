@@ -64,12 +64,19 @@ pub enum OptimizationEvent {
 #[derive(Debug, Clone, Default)]
 pub struct OptimizationCurveFamily {
     pub cvs: Vec<CvCurveFamily>,
+    pub inputs: Vec<InputCurveFamily>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CvCurveFamily {
     pub cv: String,
     pub target: f64,
+    pub scenarios: Vec<StepResponseCurve>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InputCurveFamily {
+    pub input: String,
     pub scenarios: Vec<StepResponseCurve>,
 }
 
@@ -364,6 +371,14 @@ fn evaluate_candidate(
                 scenarios: Vec::new(),
             })
             .collect(),
+        inputs: model
+            .u_order
+            .iter()
+            .map(|input| InputCurveFamily {
+                input: input.clone(),
+                scenarios: Vec::new(),
+            })
+            .collect(),
     };
     let mut warnings = Vec::new();
 
@@ -414,6 +429,14 @@ fn evaluate_candidate(
                 });
             }
         }
+        for input_family in &mut family.inputs {
+            if let Some(points) = response.input_curves.get(&input_family.input) {
+                input_family.scenarios.push(StepResponseCurve {
+                    scenario_index,
+                    points: points.clone(),
+                });
+            }
+        }
     }
 
     Ok(CandidateResult {
@@ -431,6 +454,7 @@ fn evaluate_candidate(
 struct StepResponseResult {
     metrics: HashMap<String, StepMetrics>,
     curves: HashMap<String, Vec<(f64, f64)>>,
+    input_curves: HashMap<String, Vec<(f64, f64)>>,
     actuator: f64,
 }
 
@@ -472,6 +496,11 @@ fn run_step_response(
         .iter()
         .map(|cv| (cv.clone(), Vec::with_capacity(steps + 1)))
         .collect();
+    let mut input_curves: HashMap<String, Vec<(f64, f64)>> = model
+        .u_order
+        .iter()
+        .map(|input| (input.clone(), Vec::with_capacity(steps + 1)))
+        .collect();
 
     for step in 0..=steps {
         let t = step as f64 * dt_s;
@@ -485,6 +514,15 @@ fn run_step_response(
             let metric = metrics.entry(cv.clone()).or_default();
             accumulate_metric(metric, target - value, t, dt_s);
             accumulate_overshoot_metric(metric, value, initial, target, dt_s);
+        }
+        for input in &model.u_order {
+            if let Some(points) = input_curves.get_mut(input) {
+                let value = applied_mv
+                    .get(input)
+                    .copied()
+                    .unwrap_or_else(|| current_dv.get(input).copied().unwrap_or(0.0));
+                points.push((t, value));
+            }
         }
 
         if step == steps {
@@ -543,6 +581,7 @@ fn run_step_response(
     Ok(StepResponseResult {
         metrics,
         curves,
+        input_curves,
         actuator,
     })
 }
@@ -1287,5 +1326,7 @@ mod tests {
         assert!(report.best_params.contains_key("mpc.cv.y1.q"));
         assert_eq!(report.curves.cvs.len(), 1);
         assert_eq!(report.curves.cvs[0].scenarios.len(), 1);
+        assert_eq!(report.curves.inputs.len(), 1);
+        assert_eq!(report.curves.inputs[0].scenarios.len(), 1);
     }
 }

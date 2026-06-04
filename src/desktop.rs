@@ -3828,9 +3828,9 @@ impl DesktopApp {
             );
 
         let convergence_history = self.optimization_convergence_history();
-        let curves = self
-            .current_optimization_curves()
-            .unwrap_or_else(|| blank_optimization_curves(&self.optimization_editor.cv_targets));
+        let curves = self.current_optimization_curves().unwrap_or_else(|| {
+            blank_optimization_curves(&self.optimization_editor.cv_targets, &self.variables)
+        });
         content = content
             .push(text("Convergence").size(18))
             .push(
@@ -5158,13 +5158,25 @@ fn optimization_named_rows(
         .collect()
 }
 
-fn blank_optimization_curves(rows: &[OptimizationNamedRowState]) -> OptimizationCurveFamily {
+fn blank_optimization_curves(
+    rows: &[OptimizationNamedRowState],
+    variables: &VariableCatalogConfig,
+) -> OptimizationCurveFamily {
     OptimizationCurveFamily {
         cvs: rows
             .iter()
             .map(|row| crate::parameter_optimization::CvCurveFamily {
                 cv: row.name.clone(),
                 target: row.value.trim().parse::<f64>().unwrap_or(0.0),
+                scenarios: Vec::new(),
+            })
+            .collect(),
+        inputs: variables
+            .mvs
+            .iter()
+            .chain(variables.dvs.iter())
+            .map(|input| crate::parameter_optimization::InputCurveFamily {
+                input: input.clone(),
                 scenarios: Vec::new(),
             })
             .collect(),
@@ -7476,7 +7488,17 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         draw_plot_background(&mut frame, bounds.size());
 
-        let count = self.curves.cvs.len().max(1);
+        let count = self.curves.cvs.len() + self.curves.inputs.len();
+        if count == 0 {
+            frame.fill_text(canvas::Text {
+                content: "No optimization curves available".to_string(),
+                position: Point::new(16.0, 28.0),
+                size: iced::Pixels(14.0),
+                color: Color::from_rgb(0.20, 0.20, 0.20),
+                ..Default::default()
+            });
+            return vec![frame.into_geometry()];
+        }
         let cols = (count as f32).sqrt().ceil() as usize;
         let rows = count.div_ceil(cols);
         let gap = 16.0_f32;
@@ -7490,7 +7512,7 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
             Color::from_rgb(0.70, 0.50, 0.10),
         ];
 
-        for (index, family) in self.curves.cvs.iter().enumerate() {
+        for index in 0..count {
             let col = index % cols;
             let row = index / cols;
             let x0 = gap + col as f32 * (cell_w + gap);
@@ -7499,16 +7521,33 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
             let plot_top = y0 + 26.0;
             let plot_w = (cell_w - 76.0).max(20.0);
             let plot_h = (cell_h - 62.0).max(20.0);
+
+            let (name, target, scenarios) = if index < self.curves.cvs.len() {
+                let family = &self.curves.cvs[index];
+                (
+                    format!("y: {}", family.cv),
+                    Some(family.target),
+                    family.scenarios.as_slice(),
+                )
+            } else {
+                let family = &self.curves.inputs[index - self.curves.cvs.len()];
+                (
+                    format!("u: {}", family.input),
+                    None,
+                    family.scenarios.as_slice(),
+                )
+            };
+
             draw_plot_rect(&mut frame, plot_left, plot_top, plot_w, plot_h);
             frame.fill_text(canvas::Text {
-                content: family.cv.clone(),
+                content: name,
                 position: Point::new(x0, y0),
                 size: iced::Pixels(14.0),
                 color: Color::from_rgb(0.10, 0.10, 0.10),
                 ..Default::default()
             });
 
-            let (min_t, max_t, min_y, max_y) = curve_bounds(family);
+            let (min_t, max_t, min_y, max_y) = curve_bounds(target, scenarios);
             draw_plot_axes(
                 &mut frame,
                 PlotArea {
@@ -7528,19 +7567,21 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
                 axis_ticks(min_t as f64, max_t as f64, 10),
                 axis_ticks(min_y as f64, max_y as f64, 10),
             );
-            let target_y = map_y(family.target, min_y, max_y, plot_top, plot_h);
-            let target_path = canvas::Path::line(
-                Point::new(plot_left, target_y),
-                Point::new(plot_left + plot_w, target_y),
-            );
-            frame.stroke(
-                &target_path,
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(Color::from_rgb(0.25, 0.25, 0.25)),
-            );
+            if let Some(target) = target {
+                let target_y = map_y(target, min_y, max_y, plot_top, plot_h);
+                let target_path = canvas::Path::line(
+                    Point::new(plot_left, target_y),
+                    Point::new(plot_left + plot_w, target_y),
+                );
+                frame.stroke(
+                    &target_path,
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(Color::from_rgb(0.25, 0.25, 0.25)),
+                );
+            }
 
-            for scenario in &family.scenarios {
+            for scenario in scenarios {
                 let color = colors[scenario.scenario_index % colors.len()];
                 let path = canvas::Path::new(|builder| {
                     for (point_index, (t, y)) in scenario.points.iter().enumerate() {
@@ -7564,18 +7605,25 @@ impl canvas::Program<Message> for OptimizationPlotProgram {
     }
 }
 
-fn curve_bounds(family: &crate::parameter_optimization::CvCurveFamily) -> (f32, f32, f32, f32) {
+fn curve_bounds(
+    target: Option<f64>,
+    scenarios: &[crate::parameter_optimization::StepResponseCurve],
+) -> (f32, f32, f32, f32) {
     let mut min_t = f64::INFINITY;
     let mut max_t = f64::NEG_INFINITY;
-    let mut min_y = family.target;
-    let mut max_y = family.target;
-    for scenario in &family.scenarios {
+    let mut min_y = target.unwrap_or(f64::INFINITY);
+    let mut max_y = target.unwrap_or(f64::NEG_INFINITY);
+    for scenario in scenarios {
         for (t, y) in &scenario.points {
             min_t = min_t.min(*t);
             max_t = max_t.max(*t);
             min_y = min_y.min(*y);
             max_y = max_y.max(*y);
         }
+    }
+    if !min_y.is_finite() || !max_y.is_finite() {
+        min_y = -1.0;
+        max_y = 1.0;
     }
     if !min_t.is_finite() || !max_t.is_finite() || (max_t - min_t).abs() < f64::EPSILON {
         min_t = 0.0;
