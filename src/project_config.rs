@@ -115,6 +115,10 @@ impl ProjectConfig {
             .plots
             .window_sec
             .clamp(MIN_PLOT_WINDOW_SEC, MAX_PLOT_WINDOW_SEC);
+        self.plots.future_window_sec = self
+            .plots
+            .future_window_sec
+            .clamp(MIN_PLOT_FUTURE_WINDOW_SEC, MAX_PLOT_FUTURE_WINDOW_SEC);
         self.plots.mv_order = normalize_named_order(&self.plots.mv_order, &self.variables.mvs);
         self.plots.cv_order = normalize_named_order(&self.plots.cv_order, &self.variables.cvs);
         self.plots.dv_order = normalize_named_order(&self.plots.dv_order, &self.variables.dvs);
@@ -598,11 +602,15 @@ impl SidebarTask {
 
 pub const MIN_PLOT_WINDOW_SEC: u32 = 10;
 pub const MAX_PLOT_WINDOW_SEC: u32 = 3_600;
+pub const MIN_PLOT_FUTURE_WINDOW_SEC: u32 = 0;
+pub const MAX_PLOT_FUTURE_WINDOW_SEC: u32 = 3_600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlotConfig {
     #[serde(default = "default_plot_window_sec")]
     pub window_sec: u32,
+    #[serde(default = "default_plot_future_window_sec")]
+    pub future_window_sec: u32,
     #[serde(default)]
     pub mv_order: Vec<String>,
     #[serde(default)]
@@ -617,6 +625,7 @@ impl Default for PlotConfig {
     fn default() -> Self {
         Self {
             window_sec: default_plot_window_sec(),
+            future_window_sec: default_plot_future_window_sec(),
             mv_order: Vec::new(),
             cv_order: Vec::new(),
             dv_order: Vec::new(),
@@ -647,6 +656,10 @@ pub struct CustomPlotTraceConfig {
 
 const fn default_plot_window_sec() -> u32 {
     180
+}
+
+const fn default_plot_future_window_sec() -> u32 {
+    0
 }
 
 fn normalize_named_order(order: &[String], defaults: &[String]) -> Vec<String> {
@@ -3040,6 +3053,7 @@ description = "SmartAPC controller runtime"
         cfg.variables.dvs = vec!["d1".to_string(), "d2".to_string()];
 
         cfg.plots.window_sec = 8;
+        cfg.plots.future_window_sec = 4_000;
         cfg.plots.mv_order = vec![
             "u2".to_string(),
             "u2".to_string(),
@@ -3074,6 +3088,7 @@ description = "SmartAPC controller runtime"
         cfg.normalize_plot_config();
 
         assert_eq!(cfg.plots.window_sec, MIN_PLOT_WINDOW_SEC);
+        assert_eq!(cfg.plots.future_window_sec, MAX_PLOT_FUTURE_WINDOW_SEC);
         assert_eq!(cfg.plots.mv_order, vec!["u2", "u1"]);
         assert_eq!(cfg.plots.cv_order, vec!["y1"]);
         assert_eq!(cfg.plots.dv_order, vec!["d2", "d1"]);

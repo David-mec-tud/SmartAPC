@@ -650,13 +650,38 @@ impl LinearMpcLogic {
             for (cv_index, cv) in self.vars.cvs.iter().enumerate() {
                 let key_suffix = format!("{}.k{:02}", cv, step + 1);
                 let row = step * self.vars.cvs.len() + cv_index;
+                let free_prediction = data.free_prediction[row];
+                let controlled_prediction = solution.controlled_prediction[row];
                 values.insert(
                     format!("mpc.pred.free.{key_suffix}"),
-                    SignalValue::F64(data.free_prediction[row]),
+                    SignalValue::F64(free_prediction),
                 );
                 values.insert(
                     format!("mpc.pred.mpc.{key_suffix}"),
-                    SignalValue::F64(solution.controlled_prediction[row]),
+                    SignalValue::F64(controlled_prediction),
+                );
+                values.insert(
+                    format!("future_pred_without_control.cv.{key_suffix}"),
+                    SignalValue::F64(free_prediction),
+                );
+                values.insert(
+                    format!("future_pred_with_control.cv.{key_suffix}"),
+                    SignalValue::F64(controlled_prediction),
+                );
+            }
+        }
+        for (mv_index, mv) in self.vars.mvs.iter().enumerate() {
+            let mut predicted_mv = next_mv[mv_index];
+            for step in 0..horizon {
+                if step > 0 && step < horizon {
+                    let delta_index = step * self.vars.mvs.len() + mv_index;
+                    if let Some(delta) = solution.delta_u.get(delta_index) {
+                        predicted_mv += delta;
+                    }
+                }
+                values.insert(
+                    format!("future_pred_with_control.mv.{mv}.k{:02}", step + 1),
+                    SignalValue::F64(predicted_mv),
                 );
             }
         }
@@ -1027,6 +1052,33 @@ mod tests {
             .and_then(SignalValue::as_f64)
             .expect("u");
         assert!((u - 0.5).abs() < 1.0e-3, "u={u}");
+    }
+
+    #[test]
+    fn step_emits_canonical_future_prediction_logs() {
+        let mut logic = one_by_one_logic();
+        logic.params.insert(
+            "mpc.prediction_horizon".to_string(),
+            LogicParamValue::F64(3.0),
+        );
+        logic
+            .params
+            .insert("mpc.control_horizon".to_string(), LogicParamValue::F64(2.0));
+
+        let mut inputs = HashMap::new();
+        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(2.0));
+        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.0));
+
+        let _outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
+        let logs = logic.drain_user_logs();
+        let values = &logs.first().expect("prediction log").values;
+
+        assert!(values.contains_key("mpc.pred.free.y1.k01"));
+        assert!(values.contains_key("mpc.pred.mpc.y1.k01"));
+        assert!(values.contains_key("future_pred_without_control.cv.y1.k01"));
+        assert!(values.contains_key("future_pred_with_control.cv.y1.k01"));
+        assert!(values.contains_key("future_pred_with_control.mv.u1.k01"));
+        assert!(values.contains_key("future_pred_with_control.mv.u1.k03"));
     }
 
     #[test]

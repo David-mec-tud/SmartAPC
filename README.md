@@ -181,7 +181,8 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
 - CV-Bänder sind relativ zum Live-Sollwert. Innerhalb des Bandes wird kein CV-Fehler bestraft; außerhalb wird auf die nächste Bandkante optimiert.
 - Pro CV wird ein Ausgangs-Bias geschätzt. Dieser Bias kompensiert konstante Messoffsets und stationäre Modellabweichungen in den MPC-Vorhersagen.
 - MV-Grenzen kommen aus `io.mv.<mv>.ll` und `io.mv.<mv>.hl`, sofern statisch oder als OPC-Eingang verfügbar.
-- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*` und `mpc.status.*`.
+- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*`, `future_pred_*` und `mpc.status.*`.
+- `/plots` zeigt MPC-Zukunftswerte als gepunktete Linien, wenn im Plot-Toolbar **Future (seconds)** > 0 gesetzt ist.
 
 ## Guide: Eigene Rust-Regellogik (`custom_rust`)
 
@@ -253,6 +254,33 @@ Im Template stehen flexible Log-Helfer zur Verfügung:
 
 Diese Einträge landen im Runtime-Logfile (`data/runtime.log`) im Feld `user_logs`.
 Während der Offline-Simulation landen sie analog in `data/simulation.log`.
+
+### Optionale Zukunftsplots aus Custom-Logik
+
+Eigene Strategien können Vorhersagen für die gepunkteten Zukunftslinien bereitstellen. Dazu im `control(...)` pro Horizontschritt `F64`-Werte mit diesen Schlüsseln loggen:
+
+- `future_pred_without_control.cv.<cv>.kNN`
+- `future_pred_with_control.cv.<cv>.kNN`
+- `future_pred_with_control.mv.<mv>.kNN`
+
+`NN` ist der 1-basierte Horizontschritt mit zwei Stellen, z. B. `k01`, `k02`. Fehlende Schlüssel sind erlaubt; die jeweilige Zukunftslinie wird dann nicht gezeichnet.
+
+```rust
+let mut values = HashMap::new();
+values.insert(
+    "future_pred_without_control.cv.y1.k01".to_string(),
+    SignalValue::F64(y_free),
+);
+values.insert(
+    "future_pred_with_control.cv.y1.k01".to_string(),
+    SignalValue::F64(y_controlled),
+);
+values.insert(
+    "future_pred_with_control.mv.u1.k01".to_string(),
+    SignalValue::F64(u_controlled),
+);
+out.log_future_prediction_values(values);
+```
 
 ### Minimalbeispiel
 

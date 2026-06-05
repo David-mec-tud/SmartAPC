@@ -286,6 +286,10 @@ async fn plots_page() -> Html<&'static str> {
           <input id="windowSec" type="number" min="10" max="3600" value="180" />
         </div>
         <div class="field">
+          <label for="futureWindowSec">Future (seconds)</label>
+          <input id="futureWindowSec" type="number" min="0" max="3600" value="0" />
+        </div>
+        <div class="field">
           <label>Execution</label>
           <div id="executionState" class="muted">loading...</div>
         </div>
@@ -340,14 +344,17 @@ async fn plots_page() -> Html<&'static str> {
 (() => {
   const MIN_WINDOW = 10;
   const MAX_WINDOW = 3600;
+  const MIN_FUTURE_WINDOW = 0;
+  const MAX_FUTURE_WINDOW = 3600;
   const POLL_MS = 1000;
 
   const state = {
     projectName: null,
     executionMode: null,
+    runtimeCycleMs: 1000,
     projects: [],
     variables: { mvs: [], cvs: [], dvs: [] },
-    plotConfig: { window_sec: 180, mv_order: [], cv_order: [], dv_order: [], custom_plots: [] },
+    plotConfig: { window_sec: 180, future_window_sec: 0, mv_order: [], cv_order: [], dv_order: [], custom_plots: [] },
     catalog: [],
     catalogSig: "",
     draftTraces: [],
@@ -361,6 +368,7 @@ async fn plots_page() -> Html<&'static str> {
   const el = {
     projectSelect: document.getElementById("projectSelect"),
     windowSec: document.getElementById("windowSec"),
+    futureWindowSec: document.getElementById("futureWindowSec"),
     executionState: document.getElementById("executionState"),
     status: document.getElementById("status"),
     mvCards: document.getElementById("mvCards"),
@@ -391,6 +399,10 @@ async fn plots_page() -> Html<&'static str> {
 
   function clampWindow(sec) {
     return Math.max(MIN_WINDOW, Math.min(MAX_WINDOW, sec));
+  }
+
+  function clampFutureWindow(sec) {
+    return Math.max(MIN_FUTURE_WINDOW, Math.min(MAX_FUTURE_WINDOW, sec));
   }
 
   async function api(path, options) {
@@ -427,6 +439,7 @@ async fn plots_page() -> Html<&'static str> {
 
   function normalizePlotConfig() {
     state.plotConfig.window_sec = clampWindow(Number(state.plotConfig.window_sec || 180));
+    state.plotConfig.future_window_sec = clampFutureWindow(Number(state.plotConfig.future_window_sec || 0));
     state.plotConfig.mv_order = normalizeOrder(state.plotConfig.mv_order, state.variables.mvs);
     state.plotConfig.cv_order = normalizeOrder(state.plotConfig.cv_order, state.variables.cvs);
     state.plotConfig.dv_order = normalizeOrder(state.plotConfig.dv_order, state.variables.dvs);
@@ -466,6 +479,9 @@ async fn plots_page() -> Html<&'static str> {
       state.plotConfig = saved;
       if (document.activeElement !== el.windowSec) {
         el.windowSec.value = String(saved.window_sec);
+      }
+      if (document.activeElement !== el.futureWindowSec) {
+        el.futureWindowSec.value = String(saved.future_window_sec);
       }
       setStatus(`Plot config saved for ${state.projectName}.`);
     } catch (err) {
@@ -519,9 +535,11 @@ async fn plots_page() -> Html<&'static str> {
       api(`/api/projects/${encodeURIComponent(projectName)}/plots/config`),
     ]);
     state.variables = cfg.variables || { mvs: [], cvs: [], dvs: [] };
+    state.runtimeCycleMs = Math.max(1, Number((cfg.runtime || {}).cycle_ms || 1000));
     state.plotConfig = plotCfg;
     normalizePlotConfig();
     el.windowSec.value = String(state.plotConfig.window_sec);
+    el.futureWindowSec.value = String(state.plotConfig.future_window_sec);
     renderAllCards();
     setStatus(`Loaded plot configuration for ${projectName}.`);
   }
@@ -791,6 +809,132 @@ async fn plots_page() -> Html<&'static str> {
     return out;
   }
 
+  function latestPoint(direction, signal) {
+    const row = state.latestSeries.get(seriesKey(direction, signal));
+    if (!row || row.points.length === 0) return null;
+    return row.points[row.points.length - 1];
+  }
+
+  function firstAvailableFutureValue(signals) {
+    for (const signal of signals) {
+      const point = latestPoint("user_log", signal);
+      if (point) return point.y;
+    }
+    return null;
+  }
+
+  function futureXValues(pointCount, latestTimestampMs) {
+    const cycleMs = Math.max(1, Number(state.runtimeCycleMs || 1000));
+    const simulationMode = state.executionMode === "simulation";
+    const out = [];
+    for (let idx = 1; idx <= pointCount; idx += 1) {
+      const t = latestTimestampMs + idx * cycleMs;
+      out.push(simulationMode ? t / 1000.0 : new Date(t));
+    }
+    return out;
+  }
+
+  function futureValues(primaryPrefix, fallbackPrefix, name, maxSteps) {
+    const out = [];
+    for (let step = 1; step <= maxSteps; step += 1) {
+      const suffix = `${name}.k${String(step).padStart(2, "0")}`;
+      const candidates = [`${primaryPrefix}.${suffix}`];
+      if (fallbackPrefix) candidates.push(`${fallbackPrefix}.${suffix}`);
+      const value = firstAvailableFutureValue(candidates);
+      if (value === null) break;
+      out.push(value);
+    }
+    return out;
+  }
+
+  function latestHistoricalY(candidates) {
+    for (const [direction, signal] of candidates) {
+      const point = latestPoint(direction, signal);
+      if (point) return point.y;
+    }
+    return null;
+  }
+
+  function withAnchor(trace, latestTimestampMs, anchorY) {
+    if (anchorY === null || trace.x.length === 0) return trace;
+    const simulationMode = state.executionMode === "simulation";
+    const anchorX = simulationMode ? latestTimestampMs / 1000.0 : new Date(latestTimestampMs);
+    return {
+      ...trace,
+      x: [anchorX, ...trace.x],
+      y: [anchorY, ...trace.y],
+    };
+  }
+
+  function makeFutureTrace(name, x, y, color) {
+    return {
+      x,
+      y,
+      mode: "lines",
+      name,
+      line: { width: 2.2, dash: "dot", color },
+    };
+  }
+
+  function futureOverlaySeries(kind, name, latestTimestampMs) {
+    const futureSec = clampFutureWindow(Number(state.plotConfig.future_window_sec || 0));
+    if (futureSec <= 0) return [];
+    const maxSteps = Math.max(1, Math.floor((futureSec * 1000) / Math.max(1, Number(state.runtimeCycleMs || 1000))));
+    const out = [];
+
+    if (kind === "cv") {
+      const freeValues = futureValues(
+        "future_pred_without_control.cv",
+        "mpc.pred.free",
+        name,
+        maxSteps,
+      );
+      const controlledValues = futureValues(
+        "future_pred_with_control.cv",
+        "mpc.pred.mpc",
+        name,
+        maxSteps,
+      );
+      const anchorY = latestHistoricalY([["input", `cv.${name}.ist`]]);
+      if (freeValues.length > 0) {
+        out.push(withAnchor(
+          makeFutureTrace("future no control", futureXValues(freeValues.length, latestTimestampMs), freeValues, "#8a5b23"),
+          latestTimestampMs,
+          anchorY,
+        ));
+      }
+      if (controlledValues.length > 0) {
+        out.push(withAnchor(
+          makeFutureTrace("future with control", futureXValues(controlledValues.length, latestTimestampMs), controlledValues, "#1f7a68"),
+          latestTimestampMs,
+          anchorY,
+        ));
+      }
+    }
+
+    if (kind === "mv") {
+      const controlledValues = futureValues(
+        "future_pred_with_control.mv",
+        null,
+        name,
+        maxSteps,
+      );
+      const anchorY = latestHistoricalY([
+        ["output", `mv.${name}.write`],
+        ["input", `mv.${name}.read`],
+      ]);
+      if (controlledValues.length > 0) {
+        out.push(withAnchor(
+          makeFutureTrace("future with control", futureXValues(controlledValues.length, latestTimestampMs), controlledValues, "#1f7a68"),
+          latestTimestampMs,
+          anchorY,
+        ));
+      }
+    }
+
+    return out;
+  }
+
   function getPlotUiState(key) {
     if (!state.plotUi.has(key)) {
       state.plotUi.set(key, { xRange: null });
@@ -819,14 +963,18 @@ async fn plots_page() -> Html<&'static str> {
     });
   }
 
-  function renderPlot(divId, title, traces) {
+  function renderPlot(divId, title, traces, futureKind = null, futureName = null) {
     const div = document.getElementById(divId);
     if (!div) return;
     const windowMs = state.plotConfig.window_sec * 1000;
+    const futureWindowMs = state.plotConfig.future_window_sec * 1000;
     const latestTimestampMs = latestSeriesTimestampMs() ?? Date.now();
     const simulationMode = state.executionMode === "simulation";
     const uiState = getPlotUiState(divId);
     const data = plotTracesToSeries(traces);
+    if (futureKind && futureName) {
+      data.push(...futureOverlaySeries(futureKind, futureName, latestTimestampMs));
+    }
     const layout = {
       title: { text: title, font: { size: 13 } },
       margin: { l: 44, r: 16, t: 34, b: 34 },
@@ -843,13 +991,13 @@ async fn plots_page() -> Html<&'static str> {
               type: "linear",
               range: [
                 Math.max(0, latestTimestampMs / 1000.0 - windowMs / 1000.0),
-                latestTimestampMs / 1000.0,
+                latestTimestampMs / 1000.0 + futureWindowMs / 1000.0,
               ],
               title: { text: "Simulation time (s)" },
             }
           : {
               type: "date",
-              range: [new Date(latestTimestampMs - windowMs), new Date(latestTimestampMs)],
+              range: [new Date(latestTimestampMs - windowMs), new Date(latestTimestampMs + futureWindowMs)],
             },
       yaxis: { automargin: true },
       legend: { orientation: "h", y: -0.2 },
@@ -862,10 +1010,10 @@ async fn plots_page() -> Html<&'static str> {
 
   function renderPlots() {
     for (const name of state.plotConfig.mv_order) {
-      renderPlot(`chart-mv-${name}`, `MV ${name}`, mvTraces(name));
+      renderPlot(`chart-mv-${name}`, `MV ${name}`, mvTraces(name), "mv", name);
     }
     for (const name of state.plotConfig.cv_order) {
-      renderPlot(`chart-cv-${name}`, `CV ${name}`, cvTraces(name));
+      renderPlot(`chart-cv-${name}`, `CV ${name}`, cvTraces(name), "cv", name);
     }
     for (const name of state.plotConfig.dv_order) {
       renderPlot(`chart-dv-${name}`, `DV ${name}`, dvTraces(name));
@@ -928,11 +1076,31 @@ async fn plots_page() -> Html<&'static str> {
         scheduleSave();
       }
     };
+    const commitFutureWindowSetting = () => {
+      const parsed = Number(el.futureWindowSec.value || state.plotConfig.future_window_sec);
+      if (!Number.isFinite(parsed)) {
+        el.futureWindowSec.value = String(state.plotConfig.future_window_sec);
+        return;
+      }
+      const next = clampFutureWindow(parsed);
+      el.futureWindowSec.value = String(next);
+      if (next !== state.plotConfig.future_window_sec) {
+        state.plotConfig.future_window_sec = next;
+        scheduleSave();
+      }
+    };
     el.windowSec.addEventListener("change", commitWindowSetting);
     el.windowSec.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
         commitWindowSetting();
+      }
+    });
+    el.futureWindowSec.addEventListener("change", commitFutureWindowSetting);
+    el.futureWindowSec.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitFutureWindowSetting();
       }
     });
     el.traceDirection.addEventListener("change", () => renderTraceSelectors(true));
@@ -1567,6 +1735,7 @@ mod tests {
             .put("/api/projects/demo/plots/config")
             .json(&PlotConfig {
                 window_sec: 8,
+                future_window_sec: 4_000,
                 mv_order: vec!["u2".to_string(), "unknown".to_string(), "u1".to_string()],
                 cv_order: vec![],
                 dv_order: vec!["d2".to_string()],
@@ -1592,6 +1761,7 @@ mod tests {
 
         let saved: PlotConfig = resp.json();
         assert_eq!(saved.window_sec, 10);
+        assert_eq!(saved.future_window_sec, 3_600);
         assert_eq!(saved.mv_order, vec!["u2", "u1"]);
         assert_eq!(saved.cv_order, vec!["y1"]);
         assert_eq!(saved.dv_order, vec!["d2", "d1"]);
@@ -1601,6 +1771,7 @@ mod tests {
         get_resp.assert_status_ok();
         let loaded: PlotConfig = get_resp.json();
         assert_eq!(loaded.window_sec, 10);
+        assert_eq!(loaded.future_window_sec, 3_600);
         assert_eq!(loaded.custom_plots.len(), 1);
     }
 

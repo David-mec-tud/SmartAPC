@@ -141,6 +141,10 @@ impl ProjectService {
             crate::project_config::MIN_PLOT_WINDOW_SEC,
             crate::project_config::MAX_PLOT_WINDOW_SEC,
         );
+        plots.future_window_sec = plots.future_window_sec.clamp(
+            crate::project_config::MIN_PLOT_FUTURE_WINDOW_SEC,
+            crate::project_config::MAX_PLOT_FUTURE_WINDOW_SEC,
+        );
         cfg.plots = plots;
         cfg.normalize_plot_config();
         self.save_config(project_name, &cfg)?;

@@ -6974,6 +6974,10 @@ impl SmartApcOutputs {{
             values,
         }});
     }}
+
+    pub fn log_future_prediction_values(&mut self, values: HashMap<String, SignalValue>) {{
+        self.log_values("future_prediction", values);
+    }}
 }}
 
 #[derive(Debug, Clone, Serialize)]
@@ -7024,6 +7028,12 @@ pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     //    Diese werden automatisch als Online-Parameter geführt.
     // 4) Alle benötigten `mv.*.write` Outputs setzen.
     // 5) Eigene Logs können über out.log(...), out.log_value(...), out.log_values(...) erzeugt werden.
+    // 6) Optionale Zukunftsplots als F64-Werte loggen:
+    //    - future_pred_without_control.cv.<cv>.k01
+    //    - future_pred_with_control.cv.<cv>.k01
+    //    - future_pred_with_control.mv.<mv>.k01
+    //    Beispiel: values.insert("future_pred_with_control.cv.y1.k01".into(), SignalValue::F64(y_pred));
+    //    Danach out.log_future_prediction_values(values) aufrufen.
     // -----------------------------------------------------------------------------------------
     let _ = ctx;
     // Template default: set every required MV.write output.
