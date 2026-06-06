@@ -18,8 +18,8 @@ use iced::{
     Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
     application, mouse, time,
     widget::{
-        button, canvas, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
-        text_input,
+        Space, button, canvas, checkbox, column, container, pick_list, row, scrollable, text,
+        text_editor, text_input,
     },
 };
 
@@ -840,6 +840,117 @@ struct OptimizationParamRowState {
     start: String,
     min: String,
     max: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParameterHierarchyItem {
+    Heading {
+        label: String,
+        depth: usize,
+    },
+    Parameter {
+        index: usize,
+        key: String,
+        label: String,
+        depth: usize,
+    },
+}
+
+// Build a presentation-only tree so UI grouping never changes stored parameter keys.
+#[derive(Debug, Default)]
+struct ParameterHierarchyNode {
+    children: BTreeMap<String, ParameterHierarchyNode>,
+    parameters: Vec<(String, usize, String)>,
+}
+
+impl ParameterHierarchyNode {
+    fn insert(&mut self, key: &str, index: usize) {
+        let parts: Vec<_> = key.split('.').collect();
+        if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+            self.children
+                .entry("General".to_string())
+                .or_default()
+                .parameters
+                .push((key.to_string(), index, key.to_string()));
+            return;
+        }
+
+        let (label, headings) = parts.split_last().expect("parameter key has path parts");
+        let mut node = self;
+        for heading in headings {
+            node = node.children.entry((*heading).to_string()).or_default();
+        }
+        node.parameters
+            .push(((*label).to_string(), index, key.to_string()));
+    }
+
+    fn flatten_into(&self, depth: usize, items: &mut Vec<ParameterHierarchyItem>) {
+        enum Entry<'a> {
+            Heading(&'a str, &'a ParameterHierarchyNode),
+            Parameter(&'a str, usize, &'a str),
+        }
+
+        let mut entries = Vec::new();
+        for (label, child) in &self.children {
+            entries.push(Entry::Heading(label, child));
+        }
+        for (label, index, key) in &self.parameters {
+            entries.push(Entry::Parameter(label, *index, key));
+        }
+        entries.sort_by(|left, right| {
+            let left_label = match left {
+                Entry::Heading(label, _) | Entry::Parameter(label, _, _) => *label,
+            };
+            let right_label = match right {
+                Entry::Heading(label, _) | Entry::Parameter(label, _, _) => *label,
+            };
+            left_label.cmp(right_label)
+        });
+
+        for entry in entries {
+            match entry {
+                Entry::Heading(label, child) => {
+                    items.push(ParameterHierarchyItem::Heading {
+                        label: label.to_string(),
+                        depth,
+                    });
+                    child.flatten_into(depth + 1, items);
+                }
+                Entry::Parameter(label, index, key) => {
+                    items.push(ParameterHierarchyItem::Parameter {
+                        index,
+                        key: key.to_string(),
+                        label: label.to_string(),
+                        depth,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn parameter_hierarchy<'a>(
+    parameters: impl IntoIterator<Item = (usize, &'a str)>,
+) -> Vec<ParameterHierarchyItem> {
+    let mut root = ParameterHierarchyNode::default();
+    for (index, key) in parameters {
+        root.insert(key, index);
+    }
+
+    let mut items = Vec::new();
+    root.flatten_into(0, &mut items);
+    items
+}
+
+fn parameter_indent(depth: usize) -> Space {
+    Space::new().width(Length::Fixed(depth as f32 * 18.0))
+}
+
+fn parameter_heading(label: &str, depth: usize) -> Element<'static, Message> {
+    let size = 18_u32.saturating_sub((depth.min(4) as u32) * 2);
+    row![parameter_indent(depth), text(label.to_string()).size(size)]
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 #[derive(Debug, Clone)]
@@ -3588,44 +3699,68 @@ impl DesktopApp {
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
             );
-            for (index, row_data) in self.optimization_editor.param_rows.iter().enumerate() {
-                let fixed_toggle = if can_edit {
-                    checkbox(row_data.fixed)
-                        .label("Fixed")
-                        .on_toggle(move |value| {
-                            Message::OptimizationParamFixedToggled(index, value)
-                        })
-                        .width(fixed_col)
-                } else {
-                    checkbox(row_data.fixed).label("Fixed").width(fixed_col)
-                };
-                let start_input = text_input("start", &row_data.start);
-                let min_input = if can_edit && !row_data.fixed {
-                    text_input("min", &row_data.min)
-                        .on_input(move |value| Message::OptimizationParamMinChanged(index, value))
-                } else {
-                    text_input("min", &row_data.min)
-                };
-                let max_input = if can_edit && !row_data.fixed {
-                    text_input("max", &row_data.max)
-                        .on_input(move |value| Message::OptimizationParamMaxChanged(index, value))
-                } else {
-                    text_input("max", &row_data.max)
-                };
-                let best_value =
-                    self.optimization_parameter_display_value(&row_data.key, &row_data.start);
-                content = content.push(
-                    row![
-                        text(row_data.key.clone()).width(parameter_col),
-                        fixed_toggle,
-                        start_input.width(numeric_col),
-                        min_input.width(numeric_col),
-                        max_input.width(numeric_col),
-                        text_input("best", &best_value).width(numeric_col),
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center),
-                );
+            let hierarchy = parameter_hierarchy(
+                self.optimization_editor
+                    .param_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| (index, row.key.as_str())),
+            );
+            for item in hierarchy {
+                match item {
+                    ParameterHierarchyItem::Heading { label, depth } => {
+                        content = content.push(parameter_heading(&label, depth));
+                    }
+                    ParameterHierarchyItem::Parameter {
+                        index,
+                        label,
+                        depth,
+                        ..
+                    } => {
+                        let row_data = &self.optimization_editor.param_rows[index];
+                        let fixed_toggle = if can_edit {
+                            checkbox(row_data.fixed)
+                                .label("Fixed")
+                                .on_toggle(move |value| {
+                                    Message::OptimizationParamFixedToggled(index, value)
+                                })
+                                .width(fixed_col)
+                        } else {
+                            checkbox(row_data.fixed).label("Fixed").width(fixed_col)
+                        };
+                        let start_input = text_input("start", &row_data.start);
+                        let min_input = if can_edit && !row_data.fixed {
+                            text_input("min", &row_data.min).on_input(move |value| {
+                                Message::OptimizationParamMinChanged(index, value)
+                            })
+                        } else {
+                            text_input("min", &row_data.min)
+                        };
+                        let max_input = if can_edit && !row_data.fixed {
+                            text_input("max", &row_data.max).on_input(move |value| {
+                                Message::OptimizationParamMaxChanged(index, value)
+                            })
+                        } else {
+                            text_input("max", &row_data.max)
+                        };
+                        let best_value = self
+                            .optimization_parameter_display_value(&row_data.key, &row_data.start);
+                        content = content.push(
+                            row![
+                                row![parameter_indent(depth), text(label)]
+                                    .width(parameter_col)
+                                    .align_y(iced::Alignment::Center),
+                                fixed_toggle,
+                                start_input.width(numeric_col),
+                                min_input.width(numeric_col),
+                                max_input.width(numeric_col),
+                                text_input("best", &best_value).width(numeric_col),
+                            ]
+                            .spacing(12)
+                            .align_y(iced::Alignment::Center),
+                        );
+                    }
+                }
             }
         }
 
@@ -4017,6 +4152,8 @@ impl DesktopApp {
                 content = content.push(self.control_function_sweep_row_view(
                     index,
                     row_data,
+                    &row_data.name,
+                    0,
                     Message::ControlTestInputEnabledToggled,
                     Message::ControlTestInputMinChanged,
                     Message::ControlTestInputMaxChanged,
@@ -4029,15 +4166,37 @@ impl DesktopApp {
         if self.control_function_tests.param_rows.is_empty() {
             content = content.push(text("Keine Online-Parameter aktiv."));
         } else {
-            for (index, row_data) in self.control_function_tests.param_rows.iter().enumerate() {
-                content = content.push(self.control_function_sweep_row_view(
-                    index,
-                    row_data,
-                    Message::ControlTestParamEnabledToggled,
-                    Message::ControlTestParamMinChanged,
-                    Message::ControlTestParamMaxChanged,
-                    Message::ControlTestParamSamplesChanged,
-                ));
+            let hierarchy = parameter_hierarchy(
+                self.control_function_tests
+                    .param_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| (index, row.name.as_str())),
+            );
+            for item in hierarchy {
+                match item {
+                    ParameterHierarchyItem::Heading { label, depth } => {
+                        content = content.push(parameter_heading(&label, depth));
+                    }
+                    ParameterHierarchyItem::Parameter {
+                        index,
+                        label,
+                        depth,
+                        ..
+                    } => {
+                        let row_data = &self.control_function_tests.param_rows[index];
+                        content = content.push(self.control_function_sweep_row_view(
+                            index,
+                            row_data,
+                            &label,
+                            depth,
+                            Message::ControlTestParamEnabledToggled,
+                            Message::ControlTestParamMinChanged,
+                            Message::ControlTestParamMaxChanged,
+                            Message::ControlTestParamSamplesChanged,
+                        ));
+                    }
+                }
             }
         }
 
@@ -4146,6 +4305,8 @@ impl DesktopApp {
         &self,
         index: usize,
         row_data: &ControlFunctionSweepRowState,
+        label: &str,
+        depth: usize,
         enabled_message: FEnabled,
         min_message: FMin,
         max_message: FMax,
@@ -4158,7 +4319,7 @@ impl DesktopApp {
         FSamples: Fn(usize, String) -> Message + Copy + 'static,
     {
         let toggle = checkbox(row_data.enabled)
-            .label(row_data.name.clone())
+            .label(label.to_string())
             .on_toggle(move |checked| enabled_message(index, checked))
             .width(Length::FillPortion(3));
         let baseline = text(format!("Basis: {}", row_data.baseline_label))
@@ -4192,7 +4353,9 @@ impl DesktopApp {
             .align_y(iced::Alignment::Center),
         };
 
-        container(row).padding(6).into()
+        container(row![parameter_indent(depth), row.width(Length::Fill)])
+            .padding(6)
+            .into()
     }
 
     fn communication_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
@@ -4780,17 +4943,41 @@ impl DesktopApp {
                     .align_y(iced::Alignment::Center),
                 );
 
-                for (index, row_data) in self.logic_editor.mpc_params.iter().enumerate() {
-                    content = content.push(
-                        row![
-                            text(row_data.key.clone()).width(Length::FillPortion(2)),
-                            text_input("Wert", &row_data.value)
-                                .on_input(move |value| Message::MpcParamChanged(index, value))
-                                .width(Length::FillPortion(1)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                    );
+                let hierarchy = parameter_hierarchy(
+                    self.logic_editor
+                        .mpc_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| (index, row.key.as_str())),
+                );
+                for item in hierarchy {
+                    match item {
+                        ParameterHierarchyItem::Heading { label, depth } => {
+                            content = content.push(parameter_heading(&label, depth));
+                        }
+                        ParameterHierarchyItem::Parameter {
+                            index,
+                            label,
+                            depth,
+                            ..
+                        } => {
+                            let row_data = &self.logic_editor.mpc_params[index];
+                            content = content.push(
+                                row![
+                                    row![parameter_indent(depth), text(label)]
+                                        .width(Length::FillPortion(2))
+                                        .align_y(iced::Alignment::Center),
+                                    text_input("Wert", &row_data.value)
+                                        .on_input(move |value| Message::MpcParamChanged(
+                                            index, value
+                                        ))
+                                        .width(Length::FillPortion(1)),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::Alignment::Center),
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -4895,40 +5082,58 @@ impl DesktopApp {
         if self.logic_params.is_empty() {
             content = content.push(text("Keine Parameter vorhanden."));
         } else {
-            let mut keys: Vec<_> = self.logic_params.keys().cloned().collect();
-            keys.sort();
+            let hierarchy = parameter_hierarchy(
+                self.logic_params
+                    .keys()
+                    .enumerate()
+                    .map(|(index, key)| (index, key.as_str())),
+            );
 
-            for key in keys {
-                let current = self
-                    .logic_params
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or(LogicParamValue::F64(0.0));
-                let input_value = self
-                    .param_inputs
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_else(|| format_logic_param_value(&current));
-                let key_clone = key.clone();
+            for item in hierarchy {
+                match item {
+                    ParameterHierarchyItem::Heading { label, depth } => {
+                        content = content.push(parameter_heading(&label, depth));
+                    }
+                    ParameterHierarchyItem::Parameter {
+                        key, label, depth, ..
+                    } => {
+                        let current = self
+                            .logic_params
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or(LogicParamValue::F64(0.0));
+                        let input_value = self
+                            .param_inputs
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_else(|| format_logic_param_value(&current));
+                        let key_clone = key.clone();
 
-                let apply_button = if execution_active {
-                    button("Apply").on_press(Message::ApplyParamPressed(key_clone))
-                } else {
-                    button("Apply")
-                };
+                        let apply_button = if execution_active {
+                            button("Apply").on_press(Message::ApplyParamPressed(key_clone))
+                        } else {
+                            button("Apply")
+                        };
 
-                content = content.push(
-                    row![
-                        text(key.clone()).width(Length::FillPortion(2)),
-                        text(format_logic_param_value(&current)).width(Length::FillPortion(1)),
-                        text_input("Neuer Wert", &input_value)
-                            .on_input(move |value| Message::ParamInputChanged(key.clone(), value))
-                            .width(Length::FillPortion(2)),
-                        apply_button,
-                    ]
-                    .spacing(10)
-                    .align_y(iced::Alignment::Center),
-                );
+                        content = content.push(
+                            row![
+                                row![parameter_indent(depth), text(label)]
+                                    .width(Length::FillPortion(2))
+                                    .align_y(iced::Alignment::Center),
+                                text(format_logic_param_value(&current))
+                                    .width(Length::FillPortion(1)),
+                                text_input("Neuer Wert", &input_value)
+                                    .on_input(move |value| {
+                                        Message::ParamInputChanged(key.clone(), value)
+                                    })
+                                    .width(Length::FillPortion(2)),
+                                apply_button,
+                            ]
+                            .spacing(10)
+                            .align_y(iced::Alignment::Center),
+                        );
+                    }
+                }
             }
         }
 
@@ -8205,9 +8410,10 @@ mod tests {
     };
 
     use super::{
-        LogicEditorState, ModelEditorState, ModelKindChoice, SimulationEditorState,
-        build_model_config_from_editor, build_simulation_config_from_editor,
-        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
+        LogicEditorState, ModelEditorState, ModelKindChoice, ParameterHierarchyItem,
+        SimulationEditorState, build_model_config_from_editor, build_simulation_config_from_editor,
+        parameter_hierarchy, parse_matrix_import_text, resize_string_matrix,
+        sync_io_initial_value_online_params,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -8216,6 +8422,117 @@ mod tests {
             cvs: vec!["y1".to_string(), "y2".to_string()],
             dvs: vec!["d1".to_string()],
         }
+    }
+
+    #[test]
+    fn parameter_hierarchy_groups_sorts_and_preserves_parameter_identity() {
+        let keys = [
+            "mpc.kalman.state.2.q",
+            "custom_gain",
+            "io.cv.y1.sollband",
+            "p.y1.u1.kp",
+            "mpc.control_horizon",
+            "mpc.kalman.state.1.q",
+            "broken..key",
+        ];
+
+        let items = parameter_hierarchy(keys.iter().enumerate().map(|(index, key)| (index, *key)));
+
+        assert_eq!(
+            items,
+            vec![
+                ParameterHierarchyItem::Heading {
+                    label: "General".to_string(),
+                    depth: 0,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 6,
+                    key: "broken..key".to_string(),
+                    label: "broken..key".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 1,
+                    key: "custom_gain".to_string(),
+                    label: "custom_gain".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "io".to_string(),
+                    depth: 0,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "cv".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "y1".to_string(),
+                    depth: 2,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 2,
+                    key: "io.cv.y1.sollband".to_string(),
+                    label: "sollband".to_string(),
+                    depth: 3,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "mpc".to_string(),
+                    depth: 0,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 4,
+                    key: "mpc.control_horizon".to_string(),
+                    label: "control_horizon".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "kalman".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "state".to_string(),
+                    depth: 2,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "1".to_string(),
+                    depth: 3,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 5,
+                    key: "mpc.kalman.state.1.q".to_string(),
+                    label: "q".to_string(),
+                    depth: 4,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "2".to_string(),
+                    depth: 3,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 0,
+                    key: "mpc.kalman.state.2.q".to_string(),
+                    label: "q".to_string(),
+                    depth: 4,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "p".to_string(),
+                    depth: 0,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "y1".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "u1".to_string(),
+                    depth: 2,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 3,
+                    key: "p.y1.u1.kp".to_string(),
+                    label: "kp".to_string(),
+                    depth: 3,
+                },
+            ]
+        );
     }
 
     #[test]
