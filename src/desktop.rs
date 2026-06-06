@@ -1155,7 +1155,6 @@ enum Message {
     SimulationActionFinished(Result<String, String>),
     SimulationLiveUpdated(Result<String, String>),
     OptimizationParamFixedToggled(usize, bool),
-    OptimizationParamStartChanged(usize, String),
     OptimizationParamMinChanged(usize, String),
     OptimizationParamMaxChanged(usize, String),
     OptimizationCvTargetChanged(usize, String),
@@ -1177,8 +1176,7 @@ enum Message {
     OptimizationConvergencePatienceChanged(String),
     OptimizationPlotIntervalChanged(String),
     OptimizationDurationChanged(String),
-    SaveOptimizationPressed,
-    OptimizationSaved(Result<String, String>),
+    OptimizationAutosaved(Result<String, String>),
     StartOptimizationPressed,
     CancelOptimizationPressed,
     UseOptimizedParametersPressed,
@@ -1467,6 +1465,23 @@ impl DesktopApp {
             project_name,
             self.simulation_editor.clone(),
             self.simulation_running(),
+        )
+    }
+
+    fn maybe_autosave_optimization_editor(&self) -> Task<Message> {
+        if self.execution_active() || self.optimization_job.is_some() {
+            return Task::none();
+        }
+        let Some(project_name) = self.selected_project.clone() else {
+            return Task::none();
+        };
+        if build_optimization_config_from_editor(&self.optimization_editor).is_err() {
+            return Task::none();
+        }
+        autosave_optimization_task(
+            self.project_service.clone(),
+            project_name,
+            self.optimization_editor.clone(),
         )
     }
 
@@ -2629,138 +2644,117 @@ impl DesktopApp {
             Message::OptimizationParamFixedToggled(index, fixed) => {
                 if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
                     row.fixed = fixed;
-                }
-                Task::none()
-            }
-            Message::OptimizationParamStartChanged(index, value) => {
-                if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
-                    row.start = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationParamMinChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
                     row.min = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationParamMaxChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.param_rows.get_mut(index) {
                     row.max = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationCvTargetChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.cv_targets.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationCvWeightChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.cv_weights.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationCvNoiseChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.cv_noise.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationMvNoiseChanged(index, value) => {
                 if let Some(row) = self.optimization_editor.mv_noise.get_mut(index) {
                     row.value = value;
+                    return self.maybe_autosave_optimization_editor();
                 }
                 Task::none()
             }
             Message::OptimizationMetricIseChanged(value) => {
                 self.optimization_editor.metric_ise = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationMetricIaeChanged(value) => {
                 self.optimization_editor.metric_iae = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationMetricItaeChanged(value) => {
                 self.optimization_editor.metric_itae = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationMetricOvershootChanged(value) => {
                 self.optimization_editor.metric_overshoot = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationMetricActuatorChanged(value) => {
                 self.optimization_editor.metric_actuator = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationAScaleMinChanged(value) => {
                 self.optimization_editor.a_scale_min_pct = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationAScaleMaxChanged(value) => {
                 self.optimization_editor.a_scale_max_pct = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationBScaleMinChanged(value) => {
                 self.optimization_editor.b_scale_min_pct = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationBScaleMaxChanged(value) => {
                 self.optimization_editor.b_scale_max_pct = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationScenarioCountChanged(value) => {
                 self.optimization_editor.scenario_count = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationMaxIterationsChanged(value) => {
                 self.optimization_editor.max_iterations = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationInitialSamplesChanged(value) => {
                 self.optimization_editor.initial_samples = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationConvergencePatienceChanged(value) => {
                 self.optimization_editor.convergence_patience = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationPlotIntervalChanged(value) => {
                 self.optimization_editor.plot_interval = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
             Message::OptimizationDurationChanged(value) => {
                 self.optimization_editor.simulation_duration_s = value;
-                Task::none()
+                self.maybe_autosave_optimization_editor()
             }
-            Message::SaveOptimizationPressed => {
-                if self.execution_active() {
-                    self.error_message = Some(
-                        "Ausführung läuft. Für Parameteroptimierung bitte erst stoppen."
-                            .to_string(),
-                    );
-                    return Task::none();
-                }
-                let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
-                    return Task::none();
-                };
-                save_optimization_task(
-                    self.project_service.clone(),
-                    project_name,
-                    self.optimization_editor.clone(),
-                )
-            }
-            Message::OptimizationSaved(result) => match result {
+            Message::OptimizationAutosaved(result) => match result {
                 Ok(status) => {
                     self.status_message = status;
                     self.error_message = None;
-                    if let Some(project_name) = self.selected_project.clone() {
-                        load_project_panel_task(self.project_service.clone(), project_name)
-                    } else {
-                        Task::none()
-                    }
+                    Task::none()
                 }
                 Err(err) => {
                     self.error_message = Some(err);
@@ -3507,11 +3501,6 @@ impl DesktopApp {
         let can_start = self.selected_project.is_some() && can_edit;
         let can_use = self.optimization_editor.last_report.is_some() && !optimization_running;
 
-        let save_button = if can_edit {
-            button("Save Settings").on_press(Message::SaveOptimizationPressed)
-        } else {
-            button("Save Settings")
-        };
         let start_button = if can_start {
             button("Start Optimization").on_press(Message::StartOptimizationPressed)
         } else {
@@ -3557,7 +3546,6 @@ impl DesktopApp {
             text("Offline robust step-response tuning for active numeric controller parameters.")
                 .size(14),
             row![
-                save_button,
                 start_button,
                 cancel_button,
                 use_button,
@@ -3577,7 +3565,7 @@ impl DesktopApp {
 
         content = content.push(text("Controller Parameters").size(18));
         content = content.push(
-            text("Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles.")
+            text("Start reflects the value currently saved in Regellogik. Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles. Valid setting edits are saved automatically.")
                 .size(13),
         );
         if self.optimization_editor.param_rows.is_empty() {
@@ -3611,12 +3599,7 @@ impl DesktopApp {
                 } else {
                     checkbox(row_data.fixed).label("Fixed").width(fixed_col)
                 };
-                let start_input = if can_edit {
-                    text_input("start", &row_data.start)
-                        .on_input(move |value| Message::OptimizationParamStartChanged(index, value))
-                } else {
-                    text_input("start", &row_data.start)
-                };
+                let start_input = text_input("start", &row_data.start);
                 let min_input = if can_edit && !row_data.fixed {
                     text_input("min", &row_data.min)
                         .on_input(move |value| Message::OptimizationParamMinChanged(index, value))
@@ -6077,7 +6060,7 @@ fn save_optimization_config_now(
         .map_err(|err| format!("Optimierungseinstellungen konnten nicht gespeichert werden: {err}"))
 }
 
-fn save_optimization_task(
+fn autosave_optimization_task(
     project_service: ProjectService,
     project_name: String,
     editor: ParameterOptimizationState,
@@ -6086,11 +6069,11 @@ fn save_optimization_task(
         async move {
             save_optimization_config_now(&project_service, &project_name, &editor)?;
             Ok(format!(
-                "Optimierungseinstellungen für '{}' gespeichert",
+                "Optimierungseinstellungen für '{}' automatisch gespeichert",
                 project_name
             ))
         },
-        Message::OptimizationSaved,
+        Message::OptimizationAutosaved,
     )
 }
 

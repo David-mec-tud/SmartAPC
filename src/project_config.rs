@@ -1827,9 +1827,8 @@ impl ParameterOptimizationParamConfig {
     }
 
     fn normalized_for_default(mut self, default: f64) -> Self {
-        if !self.start.is_finite() {
-            self.start = default;
-        }
+        // Start is the currently saved controller value, not a separate optimization setting.
+        self.start = default;
         if !self.min.is_finite() {
             self.min = self.start - self.start.abs().max(1.0);
         }
@@ -2535,6 +2534,14 @@ mod tests {
         cfg.optimization.metric_weights.overshoot = 2.0;
         cfg.optimization.metric_weights.actuator = 0.5;
         cfg.optimization.scenario_count = 3;
+        let active_params = cfg.active_controller_f64_param_defaults();
+        let expected_start = active_params["p.y1.u1.kp"];
+        cfg.optimization
+            .parameters
+            .iter_mut()
+            .find(|row| row.key == "p.y1.u1.kp")
+            .expect("optimization parameter")
+            .start = expected_start + 123.0;
 
         let encoded = to_toml_string(&cfg).expect("toml encode");
         let decoded = from_toml_str(&encoded).expect("toml decode");
@@ -2543,13 +2550,13 @@ mod tests {
         assert_eq!(decoded.optimization.metric_weights.iae, 1.0);
         assert_eq!(decoded.optimization.metric_weights.overshoot, 2.0);
         assert_eq!(decoded.optimization.metric_weights.actuator, 0.5);
-        assert!(
-            decoded
-                .optimization
-                .parameters
-                .iter()
-                .any(|row| row.key == "p.y1.u1.kp")
-        );
+        let kp_row = decoded
+            .optimization
+            .parameters
+            .iter()
+            .find(|row| row.key == "p.y1.u1.kp")
+            .expect("optimization parameter");
+        assert_eq!(kp_row.start, expected_start);
     }
 
     #[test]
