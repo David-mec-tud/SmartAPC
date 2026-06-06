@@ -451,12 +451,18 @@ impl ProjectConfig {
     pub fn active_controller_f64_param_defaults(&self) -> HashMap<String, f64> {
         self.active_online_param_defaults()
             .into_iter()
-            .filter_map(|(key, value)| {
+            .filter_map(|(key, default_value)| {
                 if key.starts_with("io.") {
                     return None;
                 }
+                let value = self
+                    .logic
+                    .params
+                    .get(&key)
+                    .filter(|existing| existing.matches_type(default_value.param_type()))
+                    .unwrap_or(&default_value);
                 match value {
-                    LogicParamValue::F64(value) => Some((key, value)),
+                    LogicParamValue::F64(value) => Some((key, *value)),
                     LogicParamValue::Bool(_) => None,
                 }
             })
@@ -3050,6 +3056,15 @@ description = "SmartAPC controller runtime"
         assert!(cfg.logic.params.contains_key("io.mv.u1.hl"));
         assert!(!cfg.logic.params.contains_key("custom_gain"));
         assert!(cfg.linear_mpc_is_configured_for(&cfg.io));
+
+        cfg.normalize_optimization_config();
+        let q_row = cfg
+            .optimization
+            .parameters
+            .iter()
+            .find(|row| row.key == "mpc.cv.y1.q")
+            .expect("optimization q parameter");
+        assert_eq!(q_row.start, 3.0);
     }
 
     #[test]
