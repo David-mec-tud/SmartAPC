@@ -4695,9 +4695,8 @@ impl DesktopApp {
         if self.linear_mpc_available() {
             available.push(LogicKindChoice::LinearMpc);
         }
-        if self.logic_editor.custom_compatible {
-            available.push(LogicKindChoice::CustomRust);
-        }
+        // Custom logic must remain selectable so its template/build tools are reachable.
+        available.push(LogicKindChoice::CustomRust);
         let selected_kind = if available.contains(&self.logic_editor.selected_kind) {
             self.logic_editor.selected_kind
         } else {
@@ -4798,72 +4797,74 @@ impl DesktopApp {
             content = content.push(text("Eigene Regellogik ist aktiv.").size(14));
         }
 
-        let template_button = if can_run_custom_actions {
-            button("Template generieren").on_press(Message::GenerateLogicTemplatePressed)
-        } else {
-            button("Template generieren")
-        };
-        let build_button = if can_run_custom_actions {
-            button("Strategie prüfen/builden").on_press(Message::BuildCustomLogicPressed)
-        } else {
-            button("Strategie prüfen/builden")
-        };
+        if selected_kind == LogicKindChoice::CustomRust {
+            let template_button = if can_run_custom_actions {
+                button("Template generieren").on_press(Message::GenerateLogicTemplatePressed)
+            } else {
+                button("Template generieren")
+            };
+            let build_button = if can_run_custom_actions {
+                button("Strategie prüfen/builden").on_press(Message::BuildCustomLogicPressed)
+            } else {
+                button("Strategie prüfen/builden")
+            };
 
-        content = content.push(text("Custom Rust (cdylib)").size(16)).push(
-            column![
-                row![
-                    text("Name").width(Length::Fixed(90.0)),
-                    text_input("strategy name", &self.logic_editor.custom_strategy_name)
-                        .on_input(Message::CustomStrategyNameChanged)
+            content = content.push(text("Custom Rust (cdylib)").size(16)).push(
+                column![
+                    row![
+                        text("Name").width(Length::Fixed(90.0)),
+                        text_input("strategy name", &self.logic_editor.custom_strategy_name)
+                            .on_input(Message::CustomStrategyNameChanged)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Source").width(Length::Fixed(90.0)),
+                        text_input(
+                            "logic/custom_strategy/src/lib.rs",
+                            &self.logic_editor.custom_source_path
+                        )
+                        .on_input(Message::CustomSourcePathChanged)
                         .width(Length::Fill)
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Artifact").width(Length::Fixed(90.0)),
+                        text_input(
+                            "logic/custom_strategy/target/release/<name>.dll",
+                            &self.logic_editor.custom_artifact_path
+                        )
+                        .on_input(Message::CustomArtifactPathChanged)
+                        .width(Length::Fill)
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    row![template_button, build_button].spacing(10),
+                    text(format!(
+                        "Status: {}{}",
+                        if self.logic_editor.custom_compatible {
+                            "kompatibel"
+                        } else {
+                            "nicht kompatibel"
+                        },
+                        if self.logic_editor.custom_status.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" | {}", self.logic_editor.custom_status)
+                        }
+                    ))
+                    .size(13),
                 ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-                row![
-                    text("Source").width(Length::Fixed(90.0)),
-                    text_input(
-                        "logic/custom_strategy/src/lib.rs",
-                        &self.logic_editor.custom_source_path
-                    )
-                    .on_input(Message::CustomSourcePathChanged)
-                    .width(Length::Fill)
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-                row![
-                    text("Artifact").width(Length::Fixed(90.0)),
-                    text_input(
-                        "logic/custom_strategy/target/release/<name>.dll",
-                        &self.logic_editor.custom_artifact_path
-                    )
-                    .on_input(Message::CustomArtifactPathChanged)
-                    .width(Length::Fill)
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-                row![template_button, build_button].spacing(10),
-                text(format!(
-                    "Status: {}{}",
-                    if self.logic_editor.custom_compatible {
-                        "kompatibel"
-                    } else {
-                        "nicht kompatibel"
-                    },
-                    if self.logic_editor.custom_status.trim().is_empty() {
-                        String::new()
-                    } else {
-                        format!(" | {}", self.logic_editor.custom_status)
-                    }
-                ))
-                .size(13),
-            ]
-            .spacing(8),
-        );
+                .spacing(8),
+            );
 
-        if !self.logic_editor.custom_compatible {
-            content = content.push(text(
-                "Hinweis: 'Eigene Regellogik' wird erst nach erfolgreichem Build+Kompatibilitätscheck auswählbar.",
-            ));
+            if !self.logic_editor.custom_compatible {
+                content = content.push(text(
+                    "Hinweis: Eigene Regellogik kann erst nach erfolgreichem Build und Kompatibilitätscheck gespeichert werden.",
+                ));
+            }
         }
 
         let save_button = if can_save {
