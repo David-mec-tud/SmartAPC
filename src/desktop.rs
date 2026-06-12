@@ -18,8 +18,8 @@ use iced::{
     Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
     application, mouse, time,
     widget::{
-        Space, button, canvas, checkbox, column, container, pick_list, row, scrollable, text,
-        text_editor, text_input,
+        button, canvas, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
+        text_input,
     },
 };
 
@@ -885,46 +885,23 @@ impl ParameterHierarchyNode {
     }
 
     fn flatten_into(&self, depth: usize, items: &mut Vec<ParameterHierarchyItem>) {
-        enum Entry<'a> {
-            Heading(&'a str, &'a ParameterHierarchyNode),
-            Parameter(&'a str, usize, &'a str),
+        let mut parameters = self.parameters.iter().collect::<Vec<_>>();
+        parameters.sort_by(|left, right| left.0.cmp(&right.0));
+        for (label, index, key) in parameters {
+            items.push(ParameterHierarchyItem::Parameter {
+                index: *index,
+                key: key.to_string(),
+                label: label.to_string(),
+                depth,
+            });
         }
 
-        let mut entries = Vec::new();
         for (label, child) in &self.children {
-            entries.push(Entry::Heading(label, child));
-        }
-        for (label, index, key) in &self.parameters {
-            entries.push(Entry::Parameter(label, *index, key));
-        }
-        entries.sort_by(|left, right| {
-            let left_label = match left {
-                Entry::Heading(label, _) | Entry::Parameter(label, _, _) => *label,
-            };
-            let right_label = match right {
-                Entry::Heading(label, _) | Entry::Parameter(label, _, _) => *label,
-            };
-            left_label.cmp(right_label)
-        });
-
-        for entry in entries {
-            match entry {
-                Entry::Heading(label, child) => {
-                    items.push(ParameterHierarchyItem::Heading {
-                        label: label.to_string(),
-                        depth,
-                    });
-                    child.flatten_into(depth + 1, items);
-                }
-                Entry::Parameter(label, index, key) => {
-                    items.push(ParameterHierarchyItem::Parameter {
-                        index,
-                        key: key.to_string(),
-                        label: label.to_string(),
-                        depth,
-                    });
-                }
-            }
+            items.push(ParameterHierarchyItem::Heading {
+                label: label.to_string(),
+                depth,
+            });
+            child.flatten_into(depth + 1, items);
         }
     }
 }
@@ -942,15 +919,13 @@ fn parameter_hierarchy<'a>(
     items
 }
 
-fn parameter_indent(depth: usize) -> Space {
-    Space::new().width(Length::Fixed(depth as f32 * 18.0))
+fn parameter_heading(label: &str, depth: usize) -> Element<'static, Message> {
+    let size = 20_u32.saturating_sub((depth.min(4) as u32) * 2);
+    text(label.to_string()).size(size).into()
 }
 
-fn parameter_heading(label: &str, depth: usize) -> Element<'static, Message> {
-    let size = 18_u32.saturating_sub((depth.min(4) as u32) * 2);
-    row![parameter_indent(depth), text(label.to_string()).size(size)]
-        .align_y(iced::Alignment::Center)
-        .into()
+fn parameter_leaf_label(label: &str) -> String {
+    format!("• {label}")
 }
 
 #[derive(Debug, Clone)]
@@ -3711,12 +3686,7 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter {
-                        index,
-                        label,
-                        depth,
-                        ..
-                    } => {
+                    ParameterHierarchyItem::Parameter { index, label, .. } => {
                         let row_data = &self.optimization_editor.param_rows[index];
                         let fixed_toggle = if can_edit {
                             checkbox(row_data.fixed)
@@ -3747,9 +3717,7 @@ impl DesktopApp {
                             .optimization_parameter_display_value(&row_data.key, &row_data.start);
                         content = content.push(
                             row![
-                                row![parameter_indent(depth), text(label)]
-                                    .width(parameter_col)
-                                    .align_y(iced::Alignment::Center),
+                                text(parameter_leaf_label(&label)).width(parameter_col),
                                 fixed_toggle,
                                 start_input.width(numeric_col),
                                 min_input.width(numeric_col),
@@ -4153,7 +4121,6 @@ impl DesktopApp {
                     index,
                     row_data,
                     &row_data.name,
-                    0,
                     Message::ControlTestInputEnabledToggled,
                     Message::ControlTestInputMinChanged,
                     Message::ControlTestInputMaxChanged,
@@ -4178,18 +4145,13 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter {
-                        index,
-                        label,
-                        depth,
-                        ..
-                    } => {
+                    ParameterHierarchyItem::Parameter { index, label, .. } => {
                         let row_data = &self.control_function_tests.param_rows[index];
+                        let label = parameter_leaf_label(&label);
                         content = content.push(self.control_function_sweep_row_view(
                             index,
                             row_data,
                             &label,
-                            depth,
                             Message::ControlTestParamEnabledToggled,
                             Message::ControlTestParamMinChanged,
                             Message::ControlTestParamMaxChanged,
@@ -4306,7 +4268,6 @@ impl DesktopApp {
         index: usize,
         row_data: &ControlFunctionSweepRowState,
         label: &str,
-        depth: usize,
         enabled_message: FEnabled,
         min_message: FMin,
         max_message: FMax,
@@ -4353,9 +4314,7 @@ impl DesktopApp {
             .align_y(iced::Alignment::Center),
         };
 
-        container(row![parameter_indent(depth), row.width(Length::Fill)])
-            .padding(6)
-            .into()
+        container(row).padding(6).into()
     }
 
     fn communication_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
@@ -4955,18 +4914,12 @@ impl DesktopApp {
                         ParameterHierarchyItem::Heading { label, depth } => {
                             content = content.push(parameter_heading(&label, depth));
                         }
-                        ParameterHierarchyItem::Parameter {
-                            index,
-                            label,
-                            depth,
-                            ..
-                        } => {
+                        ParameterHierarchyItem::Parameter { index, label, .. } => {
                             let row_data = &self.logic_editor.mpc_params[index];
                             content = content.push(
                                 row![
-                                    row![parameter_indent(depth), text(label)]
-                                        .width(Length::FillPortion(2))
-                                        .align_y(iced::Alignment::Center),
+                                    text(parameter_leaf_label(&label))
+                                        .width(Length::FillPortion(2)),
                                     text_input("Wert", &row_data.value)
                                         .on_input(move |value| Message::MpcParamChanged(
                                             index, value
@@ -5094,9 +5047,7 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter {
-                        key, label, depth, ..
-                    } => {
+                    ParameterHierarchyItem::Parameter { key, label, .. } => {
                         let current = self
                             .logic_params
                             .get(&key)
@@ -5117,9 +5068,7 @@ impl DesktopApp {
 
                         content = content.push(
                             row![
-                                row![parameter_indent(depth), text(label)]
-                                    .width(Length::FillPortion(2))
-                                    .align_y(iced::Alignment::Center),
+                                text(parameter_leaf_label(&label)).width(Length::FillPortion(2)),
                                 text(format_logic_param_value(&current))
                                     .width(Length::FillPortion(1)),
                                 text_input("Neuer Wert", &input_value)
@@ -8434,6 +8383,8 @@ mod tests {
             "mpc.control_horizon",
             "mpc.kalman.state.1.q",
             "broken..key",
+            "mpc.prediction_horizon",
+            "mpc.mv.u1.hl",
         ];
 
         let items = parameter_hierarchy(keys.iter().enumerate().map(|(index, key)| (index, *key)));
@@ -8485,6 +8436,12 @@ mod tests {
                     label: "control_horizon".to_string(),
                     depth: 1,
                 },
+                ParameterHierarchyItem::Parameter {
+                    index: 7,
+                    key: "mpc.prediction_horizon".to_string(),
+                    label: "prediction_horizon".to_string(),
+                    depth: 1,
+                },
                 ParameterHierarchyItem::Heading {
                     label: "kalman".to_string(),
                     depth: 1,
@@ -8512,6 +8469,20 @@ mod tests {
                     key: "mpc.kalman.state.2.q".to_string(),
                     label: "q".to_string(),
                     depth: 4,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "mv".to_string(),
+                    depth: 1,
+                },
+                ParameterHierarchyItem::Heading {
+                    label: "u1".to_string(),
+                    depth: 2,
+                },
+                ParameterHierarchyItem::Parameter {
+                    index: 8,
+                    key: "mpc.mv.u1.hl".to_string(),
+                    label: "hl".to_string(),
+                    depth: 3,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "p".to_string(),
