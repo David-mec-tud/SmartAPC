@@ -994,15 +994,12 @@ fn parameter_heading(
     button(
         row![
             parameter_hierarchy_indent(depth),
-            text(format!(
-                "{marker} {}",
-                parameter_heading_label(label, depth)
-            ))
-            .size(parameter_heading_size(depth))
-            .font(Font {
-                weight: Weight::Bold,
-                ..Font::DEFAULT
-            })
+            text(format!("{marker} {}", parameter_heading_label(label)))
+                .size(parameter_heading_size(depth))
+                .font(Font {
+                    weight: Weight::Bold,
+                    ..Font::DEFAULT
+                })
         ]
         .align_y(iced::Alignment::Center),
     )
@@ -1024,12 +1021,8 @@ fn parameter_heading_size(depth: usize) -> u32 {
     }
 }
 
-fn parameter_heading_label(label: &str, depth: usize) -> String {
-    if depth == 0 {
-        label.to_string()
-    } else {
-        format!("• {label}")
-    }
+fn parameter_heading_label(label: &str) -> String {
+    label.to_string()
 }
 
 fn parameter_leaf_label(label: &str) -> String {
@@ -8723,9 +8716,9 @@ mod tests {
 
     #[test]
     fn parameter_hierarchy_presentation_uses_heading_levels_bullets_and_deep_indent() {
-        assert_eq!(parameter_heading_label("mpc", 0), "mpc");
-        assert_eq!(parameter_heading_label("kalman", 1), "• kalman");
-        assert_eq!(parameter_heading_label("cv", 2), "• cv");
+        assert_eq!(parameter_heading_label("mpc"), "mpc");
+        assert_eq!(parameter_heading_label("kalman"), "kalman");
+        assert_eq!(parameter_heading_label("cv"), "cv");
         assert_eq!(parameter_leaf_label("r"), "• r");
 
         assert_eq!(parameter_heading_size(0), 24);
