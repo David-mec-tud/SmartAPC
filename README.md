@@ -184,6 +184,37 @@ Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition 
 - Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*`, `future_pred_*` und `mpc.status.*`.
 - `/plots` zeigt MPC-Zukunftswerte als gepunktete Linien, wenn im Plot-Toolbar **Future (seconds)** > 0 gesetzt ist.
 
+### Kalman Filter Tuning
+
+Nach dem Speichern einer kompatiblen **Linear MPC**-Regellogik steht die Aufgabe
+**Kalman Filter Tuning** zur Verfügung.
+
+1. Über **CSV importieren** historische Messdaten laden.
+2. Kalman-Parameter als Textwerte anpassen und optional mit **Parameter speichern** in
+   `project.toml` übernehmen.
+3. **Run Observer** ausführen.
+4. Über **Interaktive Plots öffnen** die Plotly-Auswertung mit Zoom, Pan, Hover,
+   Autoscale und synchronisierter Zeitachse öffnen.
+
+Die CSV-Datei muss UTF-8 und komma-separiert sein. Sie benötigt:
+
+- `time`: strikt steigender RFC-3339-/ISO-8601-Zeitstempel mit Zeitzone, zum Beispiel
+  `2026-06-13T14:30:00.123+02:00`
+- eine Spalte mit dem exakten Variablennamen für jeden konfigurierten CV, MV und DV
+- mindestens zwei vollständige Datenzeilen mit endlichen numerischen Messwerten
+
+Beispiel für CV `y1`, MV `u1` und DV `d1`:
+
+```csv
+time,y1,u1,d1
+2026-06-13T14:30:00.000+02:00,1.2,0.3,0.0
+2026-06-13T14:30:01.000+02:00,1.3,0.4,0.1
+```
+
+Zusätzliche Spalten werden ignoriert. Importierte Daten und Observer-Ergebnisse bleiben
+nur in der aktuellen Desktop-Sitzung. Die interaktiven Plots benötigen die lokale Web-API,
+also einen Desktop-Start ohne `--no-web`.
+
 ## Guide: Eigene Rust-Regellogik (`custom_rust`)
 
 ### Voraussetzungen

@@ -49,6 +49,13 @@ pub(crate) struct DiscreteModel {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ObserverReplaySnapshot {
+    pub states: Vec<f64>,
+    pub biases: Vec<f64>,
+    pub cv_estimates: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 struct MpcProblemData {
     base_prediction: DVector<f64>,
     target: DVector<f64>,
@@ -369,6 +376,37 @@ impl LinearMpcLogic {
         self.y_bias = z_hat.rows(nx, ny).into_owned();
         let identity = DMatrix::identity(nz, nz);
         self.covariance = (&identity - &k * &h) * p_pred;
+    }
+
+    pub(crate) fn replay_observer_step(
+        &mut self,
+        y_measured: &[f64],
+        current_mv: &[f64],
+        current_dv: &[f64],
+        dt_s: f64,
+    ) -> Result<ObserverReplaySnapshot> {
+        if !dt_s.is_finite() || dt_s <= 0.0 {
+            bail!("observer replay interval must be finite and > 0");
+        }
+        if y_measured.len() != self.vars.cvs.len()
+            || current_mv.len() != self.vars.mvs.len()
+            || current_dv.len() != self.vars.dvs.len()
+        {
+            bail!("observer replay values do not match configured CV/MV/DV dimensions");
+        }
+
+        let discrete = discretize_rk4(&self.model, dt_s);
+        let current_u_total = self.total_input_vector(current_mv, current_dv);
+        self.update_kalman(y_measured, &current_u_total, &discrete);
+        let cv_estimates =
+            &discrete.c * &self.x_hat + &discrete.d * &current_u_total + &self.y_bias;
+        self.last_u_total = current_u_total.as_slice().to_vec();
+
+        Ok(ObserverReplaySnapshot {
+            states: self.x_hat.as_slice().to_vec(),
+            biases: self.y_bias.as_slice().to_vec(),
+            cv_estimates: cv_estimates.as_slice().to_vec(),
+        })
     }
 
     fn build_problem_data(

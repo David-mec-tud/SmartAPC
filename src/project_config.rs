@@ -577,6 +577,11 @@ impl ProjectConfig {
             SidebarTask::new("limits", "I/O definieren", io_definition_configured),
             SidebarTask::new("model", "Define Model (optional)", true),
             SidebarTask::new("logic", "Regellogik hinterlegen", logic_configured),
+            SidebarTask::new(
+                "kalman_tuning",
+                "Kalman Filter Tuning",
+                self.kalman_tuning_available(),
+            ),
             SidebarTask::new("optimization", "Parameter Optimization", logic_configured),
             SidebarTask::new("timing", "Control Function Tests", logic_configured),
             SidebarTask::new("simulation", "Simulate Controller (optional)", true),
@@ -586,6 +591,16 @@ impl ProjectConfig {
                 !self.deployment.service_name.is_empty(),
             ),
         ]
+    }
+
+    pub fn kalman_tuning_available(&self) -> bool {
+        self.logic.kind == LogicKind::LinearMpc
+            && self.linear_mpc_is_configured_for(&self.io)
+            && self
+                .model
+                .as_ref()
+                .and_then(ModelConfig::linear_state_space)
+                .is_some()
     }
 }
 
@@ -2566,18 +2581,18 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_places_optimization_after_logic() {
+    fn sidebar_places_optimization_after_kalman_tuning() {
         let cfg = valid_config_with_variables();
         let tasks = cfg.sidebar_tasks();
-        let logic_index = tasks
+        let tuning_index = tasks
             .iter()
-            .position(|task| task.id == "logic")
-            .expect("logic task");
+            .position(|task| task.id == "kalman_tuning")
+            .expect("kalman tuning task");
         let optimization_index = tasks
             .iter()
             .position(|task| task.id == "optimization")
             .expect("optimization task");
-        assert_eq!(optimization_index, logic_index + 1);
+        assert_eq!(optimization_index, tuning_index + 1);
     }
 
     #[test]
@@ -2890,6 +2905,27 @@ description = "SmartAPC controller runtime"
                 .any(|task| task.id == "limits" && task.label == "I/O definieren")
         );
         assert!(!tasks.iter().any(|task| task.id == "params"));
+    }
+
+    #[test]
+    fn sidebar_places_kalman_tuning_after_logic() {
+        let cfg = ProjectConfig::new("demo");
+        let tasks = cfg.sidebar_tasks();
+        let logic = tasks
+            .iter()
+            .position(|task| task.id == "logic")
+            .expect("logic");
+        let tuning = tasks
+            .iter()
+            .position(|task| task.id == "kalman_tuning")
+            .expect("kalman tuning");
+        let optimization = tasks
+            .iter()
+            .position(|task| task.id == "optimization")
+            .expect("optimization");
+        assert_eq!(tuning, logic + 1);
+        assert_eq!(optimization, tuning + 1);
+        assert!(!tasks[tuning].configured);
     }
 
     #[test]

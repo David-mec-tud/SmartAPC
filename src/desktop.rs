@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::anyhow;
+use chrono::DateTime;
 use iced::{
     Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
     application,
@@ -30,6 +31,10 @@ use crate::{
     control_function_tests::{
         ControlFunctionTestReport, DefaultSweepDimension, NumericSweepConfig, SweepExecutionMode,
         SweepSelection, SweepValueKind, default_sweep_dimensions, run_control_function_tests,
+    },
+    kalman_tuning::{
+        KalmanDataset, import_csv, is_kalman_parameter, run_observer, tuning_store,
+        validate_kalman_parameters,
     },
     linear_mpc::linear_mpc_default_params,
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
@@ -710,6 +715,48 @@ struct MpcParamEditorRow {
 }
 
 #[derive(Debug, Clone)]
+struct KalmanTuningEditorState {
+    params: Vec<MpcParamEditorRow>,
+    dataset: Option<KalmanDataset>,
+    help_visible: bool,
+    has_results: bool,
+}
+
+impl KalmanTuningEditorState {
+    fn from_config(cfg: &ProjectConfig) -> Self {
+        let mut params = cfg
+            .logic
+            .params
+            .iter()
+            .filter(|(key, _)| is_kalman_parameter(key))
+            .filter_map(|(key, value)| match value {
+                LogicParamValue::F64(value) => Some(MpcParamEditorRow {
+                    key: key.clone(),
+                    value: value.to_string(),
+                }),
+                LogicParamValue::Bool(_) => None,
+            })
+            .collect::<Vec<_>>();
+        params.sort_by(|left, right| left.key.cmp(&right.key));
+        Self {
+            params,
+            dataset: None,
+            help_visible: false,
+            has_results: false,
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            params: Vec::new(),
+            dataset: None,
+            help_visible: false,
+            has_results: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct LogicEditorState {
     selected_kind: LogicKindChoice,
     p_pairs: Vec<PPairEditorRow>,
@@ -1168,6 +1215,7 @@ enum SetupPage {
     Limits,
     Model,
     Logic,
+    KalmanTuning,
     Optimization,
     Timing,
     Simulation,
@@ -1185,6 +1233,7 @@ impl SetupPage {
             "limits" => Some(Self::Limits),
             "model" => Some(Self::Model),
             "logic" => Some(Self::Logic),
+            "kalman_tuning" => Some(Self::KalmanTuning),
             "optimization" => Some(Self::Optimization),
             "timing" => Some(Self::Timing),
             "simulation" => Some(Self::Simulation),
@@ -1201,6 +1250,7 @@ impl SetupPage {
             Self::Limits => "I/O definieren",
             Self::Model => "Define Model",
             Self::Logic => "Regellogik",
+            Self::KalmanTuning => "Kalman Filter Tuning",
             Self::Optimization => "Parameter Optimization",
             Self::Timing => "Control Function Tests",
             Self::Simulation => "Simulate Controller",
@@ -1216,6 +1266,7 @@ struct ProjectPanelData {
     sidebar_tasks: Vec<SidebarTask>,
     config_params: HashMap<String, LogicParamValue>,
     logic_editor: LogicEditorState,
+    kalman_tuning_editor: KalmanTuningEditorState,
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
     optimization_editor: ParameterOptimizationState,
@@ -1394,6 +1445,15 @@ enum Message {
     PPairKpChanged(usize, String),
     PPairBiasChanged(usize, String),
     MpcParamChanged(usize, String),
+    ToggleKalmanTuningHelp,
+    KalmanParamChanged(usize, String),
+    ImportKalmanCsvPressed,
+    KalmanCsvImported(Result<Option<KalmanDataset>, String>),
+    SaveKalmanParametersPressed,
+    KalmanParametersSaved(Result<HashMap<String, LogicParamValue>, String>),
+    RunObserverPressed,
+    ObserverFinished(Result<String, String>),
+    OpenKalmanPlotsPressed,
     CustomStrategyNameChanged(String),
     CustomSourcePathChanged(String),
     CustomArtifactPathChanged(String),
@@ -1436,6 +1496,7 @@ struct DesktopApp {
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
     logic_editor: LogicEditorState,
+    kalman_tuning_editor: KalmanTuningEditorState,
     optimization_editor: ParameterOptimizationState,
     optimization_job: Option<OptimizationJob>,
     control_function_tests: ControlFunctionTestState,
@@ -1484,6 +1545,7 @@ impl DesktopApp {
                 None,
             ),
             logic_editor: LogicEditorState::blank(),
+            kalman_tuning_editor: KalmanTuningEditorState::blank(),
             optimization_editor: ParameterOptimizationState::blank(),
             optimization_job: None,
             control_function_tests: ControlFunctionTestState::blank(),
@@ -1826,6 +1888,7 @@ impl DesktopApp {
             Message::ProjectSelected(project_name) => {
                 self.selected_project = Some(project_name.clone());
                 self.collapsed_parameter_sections.clear();
+                self.kalman_tuning_editor = KalmanTuningEditorState::blank();
                 self.status_message = format!("Projekt '{}' ausgewählt", project_name);
                 self.error_message = None;
                 load_project_panel_task(self.project_service.clone(), project_name)
@@ -1837,6 +1900,13 @@ impl DesktopApp {
                     self.model_editor = panel.model_editor;
                     self.simulation_editor = panel.simulation_editor;
                     self.logic_editor = panel.logic_editor;
+                    let dataset = self.kalman_tuning_editor.dataset.take();
+                    let help_visible = self.kalman_tuning_editor.help_visible;
+                    let has_results = self.kalman_tuning_editor.has_results;
+                    self.kalman_tuning_editor = panel.kalman_tuning_editor;
+                    self.kalman_tuning_editor.dataset = dataset;
+                    self.kalman_tuning_editor.help_visible = help_visible;
+                    self.kalman_tuning_editor.has_results = has_results;
                     self.optimization_editor = panel.optimization_editor;
                     self.control_function_tests = panel.control_function_tests;
                     self.variables = panel.variables;
@@ -1912,6 +1982,108 @@ impl DesktopApp {
                     row.value = value;
                 }
                 Task::none()
+            }
+            Message::ToggleKalmanTuningHelp => {
+                self.kalman_tuning_editor.help_visible = !self.kalman_tuning_editor.help_visible;
+                Task::none()
+            }
+            Message::KalmanParamChanged(index, value) => {
+                if let Some(row) = self.kalman_tuning_editor.params.get_mut(index) {
+                    row.value = value;
+                }
+                Task::none()
+            }
+            Message::ImportKalmanCsvPressed => import_kalman_csv_task(self.variables.clone()),
+            Message::KalmanCsvImported(result) => {
+                match result {
+                    Ok(Some(dataset)) => {
+                        self.status_message = format!(
+                            "CSV '{}' importiert: {} Zeilen",
+                            dataset.file_name,
+                            dataset.row_count()
+                        );
+                        self.kalman_tuning_editor.dataset = Some(dataset);
+                        self.kalman_tuning_editor.has_results = false;
+                        self.error_message = None;
+                    }
+                    Ok(None) => {}
+                    Err(err) => self.error_message = Some(err),
+                }
+                Task::none()
+            }
+            Message::SaveKalmanParametersPressed => {
+                if self.execution_active() {
+                    self.error_message = Some(
+                        "Ausführung läuft. Parameter können nicht gespeichert werden.".to_string(),
+                    );
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                save_kalman_parameters_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.kalman_tuning_editor.params.clone(),
+                )
+            }
+            Message::KalmanParametersSaved(result) => {
+                match result {
+                    Ok(params) => {
+                        for (key, value) in params {
+                            self.logic_params.insert(key, value);
+                        }
+                        self.status_message = "Kalman-Parameter gespeichert".to_string();
+                        self.error_message = None;
+                    }
+                    Err(err) => self.error_message = Some(err),
+                }
+                Task::none()
+            }
+            Message::RunObserverPressed => {
+                if self.execution_active() {
+                    self.error_message =
+                        Some("Ausführung läuft. Observer-Replay ist deaktiviert.".to_string());
+                    return Task::none();
+                }
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    return Task::none();
+                };
+                let Some(dataset) = self.kalman_tuning_editor.dataset.clone() else {
+                    self.error_message =
+                        Some("Bitte zuerst eine CSV-Datei importieren".to_string());
+                    return Task::none();
+                };
+                run_observer_task(
+                    self.project_service.clone(),
+                    project_name,
+                    dataset,
+                    self.kalman_tuning_editor.params.clone(),
+                )
+            }
+            Message::ObserverFinished(result) => {
+                match result {
+                    Ok(status) => {
+                        self.kalman_tuning_editor.has_results = true;
+                        self.status_message = status;
+                        self.error_message = None;
+                    }
+                    Err(err) => self.error_message = Some(err),
+                }
+                Task::none()
+            }
+            Message::OpenKalmanPlotsPressed => {
+                let (Some(base), Some(project)) =
+                    (self.plots_web_url(), self.selected_project.as_ref())
+                else {
+                    self.error_message =
+                        Some("Web API ist deaktiviert. Desktop ohne --no-web starten.".to_string());
+                    return Task::none();
+                };
+                let base = base.trim_end_matches("/plots");
+                open_url_task(format!("{base}/kalman-tuning?project={project}"))
             }
             Message::CustomStrategyNameChanged(value) => {
                 self.logic_editor.custom_strategy_name = value;
@@ -3250,6 +3422,7 @@ impl DesktopApp {
             SetupPage::Limits => self.limits_editor_view(execution_active),
             SetupPage::Model => self.model_editor_view(execution_active),
             SetupPage::Logic => self.logic_editor_view(execution_active),
+            SetupPage::KalmanTuning => self.kalman_tuning_view(execution_active),
             SetupPage::Optimization => self.parameter_optimization_view(execution_active),
             SetupPage::Timing => self.control_function_tests_view(execution_active),
             SetupPage::Simulation => self.simulation_editor_view(),
@@ -5198,6 +5371,122 @@ impl DesktopApp {
             .into()
     }
 
+    fn kalman_tuning_view(&self, execution_active: bool) -> Element<'_, Message> {
+        let available = self
+            .sidebar_tasks
+            .iter()
+            .find(|task| task.id == "kalman_tuning")
+            .is_some_and(|task| task.configured);
+        let import_button = if available && !execution_active {
+            button("CSV importieren").on_press(Message::ImportKalmanCsvPressed)
+        } else {
+            button("CSV importieren")
+        };
+        let save_button = if available && !execution_active {
+            button("Parameter speichern").on_press(Message::SaveKalmanParametersPressed)
+        } else {
+            button("Parameter speichern")
+        };
+        let run_button =
+            if available && !execution_active && self.kalman_tuning_editor.dataset.is_some() {
+                button("Run Observer").on_press(Message::RunObserverPressed)
+            } else {
+                button("Run Observer")
+            };
+        let plots_button = if self.kalman_tuning_editor.has_results && self.web_bind.is_some() {
+            button("Interaktive Plots öffnen").on_press(Message::OpenKalmanPlotsPressed)
+        } else {
+            button("Interaktive Plots öffnen")
+        };
+
+        let mut content = column![
+            text("Kalman Filter Tuning").size(24),
+            text("Historische Messdaten offline mit dem Linear-MPC-Kalman-Observer auswerten.")
+                .size(14),
+            row![
+                import_button,
+                button("?").on_press(Message::ToggleKalmanTuningHelp)
+            ]
+            .spacing(8),
+        ]
+        .spacing(10);
+
+        if self.kalman_tuning_editor.help_visible {
+            let mut required = vec!["time".to_string()];
+            required.extend(self.variables.cvs.clone());
+            required.extend(self.variables.mvs.clone());
+            required.extend(self.variables.dvs.clone());
+            content = content.push(
+                container(
+                    column![
+                        text("CSV-Anforderungen").size(17),
+                        text("UTF-8, Komma als Trennzeichen, mindestens zwei Datenzeilen."),
+                        text("Spalte 'time': RFC 3339 / ISO 8601 mit Zeitzone, z. B. 2026-06-13T14:30:00.123+02:00."),
+                        text(format!("Pflichtspalten: {}", required.join(", "))),
+                        text("CV-, MV- und DV-Spalten verwenden exakt die konfigurierten Variablennamen. Zusätzliche Spalten werden ignoriert."),
+                    ]
+                    .spacing(5),
+                )
+                .padding(10),
+            );
+        }
+
+        if !available {
+            content = content.push(text(
+                "Verfügbar nach Speichern einer kompatiblen Linear-MPC-Regellogik mit linearem Zustandsraummodell.",
+            ));
+        }
+        if let Some(dataset) = &self.kalman_tuning_editor.dataset {
+            let first = dataset
+                .timestamps
+                .first()
+                .map(DateTime::to_rfc3339)
+                .unwrap_or_default();
+            let last = dataset
+                .timestamps
+                .last()
+                .map(DateTime::to_rfc3339)
+                .unwrap_or_default();
+            content = content.push(text(format!(
+                "Import: {} | {} Zeilen | {} bis {}",
+                dataset.file_name,
+                dataset.row_count(),
+                first,
+                last
+            )));
+        }
+
+        content = content.push(text("Kalman-Parameter").size(18));
+        for (index, param) in self.kalman_tuning_editor.params.iter().enumerate() {
+            content = content.push(
+                row![
+                    text(&param.key).width(Length::FillPortion(2)),
+                    text_input("Wert", &param.value)
+                        .on_input(move |value| Message::KalmanParamChanged(index, value))
+                        .width(Length::FillPortion(1)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        content = content.push(
+            row![save_button, run_button, plots_button]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+        );
+        if self.web_bind.is_none() {
+            content = content.push(text(
+                "Interaktive Plots benötigen die lokale Web-API; Desktop ohne --no-web starten.",
+            ));
+        }
+
+        container(scrollable(content).height(Length::Fill))
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
     fn params_view(&self) -> Element<'_, Message> {
         let execution_active = self.execution_active();
         let mut content = column![text("Online Parameter").size(20)].spacing(10);
@@ -5696,6 +5985,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 cfg.model.as_ref(),
             );
             let logic_editor = LogicEditorState::from_config(&cfg);
+            let kalman_tuning_editor = KalmanTuningEditorState::from_config(&cfg);
             let optimization_editor = ParameterOptimizationState::from_config(&cfg);
             let control_function_tests =
                 ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
@@ -5755,6 +6045,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 sidebar_tasks,
                 config_params: cfg.logic.params.clone(),
                 logic_editor,
+                kalman_tuning_editor,
                 optimization_editor,
                 model_editor,
                 simulation_editor,
@@ -6791,6 +7082,102 @@ fn save_logic_task(
             Ok(format!("Regellogik für '{}' gespeichert", project_name))
         },
         Message::LogicSaved,
+    )
+}
+
+fn parse_kalman_parameter_rows(rows: &[MpcParamEditorRow]) -> Result<HashMap<String, f64>, String> {
+    let mut values = HashMap::new();
+    for row in rows {
+        let value = row
+            .value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("Ungültiger Kalman-Parameter '{}'", row.key))?;
+        values.insert(row.key.clone(), value);
+    }
+    validate_kalman_parameters(&values).map_err(|err| err.to_string())?;
+    Ok(values)
+}
+
+fn import_kalman_csv_task(vars: VariableCatalogConfig) -> Task<Message> {
+    Task::perform(
+        async move {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("CSV", &["csv"])
+                .pick_file()
+            else {
+                return Ok(None);
+            };
+            import_csv(&path, &vars)
+                .map(Some)
+                .map_err(|err| format!("CSV konnte nicht importiert werden: {err}"))
+        },
+        Message::KalmanCsvImported,
+    )
+}
+
+fn save_kalman_parameters_task(
+    project_service: ProjectService,
+    project_name: String,
+    rows: Vec<MpcParamEditorRow>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let values = parse_kalman_parameter_rows(&rows)?;
+            let updates = values
+                .into_iter()
+                .map(|(key, value)| (key, LogicParamValue::F64(value)))
+                .collect::<HashMap<_, _>>();
+            project_service
+                .update_logic_params(&project_name, updates.clone())
+                .map_err(|err| {
+                    format!("Kalman-Parameter konnten nicht gespeichert werden: {err}")
+                })?;
+            Ok(updates)
+        },
+        Message::KalmanParametersSaved,
+    )
+}
+
+fn run_observer_task(
+    project_service: ProjectService,
+    project_name: String,
+    dataset: KalmanDataset,
+    rows: Vec<MpcParamEditorRow>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let parameters = parse_kalman_parameter_rows(&rows)?;
+            let cfg = project_service.load_config(&project_name).map_err(|err| {
+                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
+            })?;
+            if !cfg.kalman_tuning_available() {
+                return Err(
+                    "Kalman-Tuning benötigt gespeicherte kompatible Linear-MPC-Regellogik"
+                        .to_string(),
+                );
+            }
+            let model = cfg
+                .model
+                .as_ref()
+                .and_then(ModelConfig::linear_state_space)
+                .ok_or_else(|| "Lineares Zustandsraummodell fehlt".to_string())?;
+            let result = run_observer(
+                &project_name,
+                &dataset,
+                model,
+                &cfg.variables,
+                cfg.runtime.cycle_ms,
+                &parameters,
+            )
+            .map_err(|err| format!("Observer konnte nicht ausgeführt werden: {err}"))?;
+            let rows = result.timestamps.len();
+            tuning_store().put(result);
+            Ok(format!(
+                "Observer für '{project_name}' über {rows} Zeilen ausgeführt"
+            ))
+        },
+        Message::ObserverFinished,
     )
 }
 

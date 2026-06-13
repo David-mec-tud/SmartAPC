@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     deployment::{DeploymentCommands, windows_service_commands},
+    kalman_tuning::{KalmanTuningResult, tuning_store},
     project::ProjectService,
     project_config::{LogicParamValue, PlotConfig, ProjectConfig},
     runtime::{ExecutionSnapshot, RuntimeManager, RuntimeSnapshot},
@@ -31,6 +32,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/plots", get(plots_page))
+        .route("/kalman-tuning", get(kalman_tuning_page))
         .route("/assets/plotly-2.35.2.min.js", get(plotly_asset))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -65,6 +67,10 @@ pub fn build_router(state: AppState) -> Router {
             get(get_execution_plots_catalog),
         )
         .route("/api/plots", get(get_plots))
+        .route(
+            "/api/kalman-tuning/{project}/results",
+            get(get_kalman_tuning_results),
+        )
         .route("/api/simulate/step", post(simulate_step))
         .route("/api/deployment/commands", get(get_deployment_commands))
         .with_state(state)
@@ -1161,6 +1167,88 @@ async fn plots_page() -> Html<&'static str> {
     )
 }
 
+async fn kalman_tuning_page() -> Html<&'static str> {
+    Html(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SmartAPC Kalman Tuning</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/assets/plotly-2.35.2.min.js"></script>
+  <style>
+    body { margin:0; font-family:"Segoe UI",sans-serif; color:#1f2c2c; background:#f7f8f4; }
+    .wrap { max-width:1440px; margin:20px auto; padding:0 16px 30px; }
+    .hero,.card { background:#fff; border:1px solid #d5ddd8; border-radius:12px; padding:12px; margin-bottom:12px; }
+    h1 { margin:0 0 8px; } h2 { margin:18px 0 8px; font-size:20px; }
+    .muted { color:#6e7b7b; } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:12px; }
+    .chart { width:100%; height:300px; }
+    table { border-collapse:collapse; font-size:13px; } td { padding:2px 12px 2px 0; }
+  </style>
+</head>
+<body><div class="wrap">
+  <div class="hero"><h1>Kalman Filter Tuning</h1><div id="summary" class="muted">Loading...</div><table id="params"></table></div>
+  <div id="content"></div>
+</div>
+<script>
+(() => {
+  const project = new URLSearchParams(location.search).get("project");
+  const summary = document.getElementById("summary");
+  const content = document.getElementById("content");
+  let syncing = false;
+  const plotIds = [];
+
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+  function section(title, items, traces) {
+    if (!items.length) return;
+    const heading = document.createElement("h2"); heading.textContent = title; content.appendChild(heading);
+    const grid = document.createElement("div"); grid.className = "grid"; content.appendChild(grid);
+    items.forEach((item, index) => {
+      const card = document.createElement("div"); card.className = "card";
+      const div = document.createElement("div"); div.className = "chart";
+      div.id = `${title}-${index}`; card.appendChild(div); grid.appendChild(card); plotIds.push(div.id);
+      Plotly.newPlot(div, traces(item), {
+        title:{text:item.name,font:{size:14}}, margin:{l:52,r:16,t:38,b:46},
+        xaxis:{type:"date",title:{text:"time"}}, yaxis:{automargin:true},
+        legend:{orientation:"h",y:-0.22}, uirevision:"kalman-tuning"
+      }, {displaylogo:false,responsive:true}).then(() => {
+        div.on("plotly_relayout", event => {
+          if (syncing) return;
+          const update = {};
+          if (event["xaxis.autorange"] === true) update["xaxis.autorange"] = true;
+          if (event["xaxis.range[0]"] !== undefined && event["xaxis.range[1]"] !== undefined) {
+            update["xaxis.range"] = [event["xaxis.range[0]"], event["xaxis.range[1]"]];
+          }
+          if (!Object.keys(update).length) return;
+          syncing = true;
+          Promise.all(plotIds.filter(id => id !== div.id).map(id => Plotly.relayout(id, update))).finally(() => syncing = false);
+        });
+      });
+    });
+  }
+  function line(x,y,name,color) { return {x,y,name,type:"scatter",mode:"lines",line:{color}}; }
+  async function load() {
+    if (!project) throw new Error("Missing project query parameter.");
+    const response = await fetch(`/api/kalman-tuning/${encodeURIComponent(project)}/results`);
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
+    summary.textContent = `${data.project_name} | ${data.file_name} | ${data.timestamps.length} rows | ${data.timestamps[0]} to ${data.timestamps[data.timestamps.length-1]}`;
+    document.getElementById("params").innerHTML = Object.entries(data.parameters).sort().map(([k,v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("");
+    const x = data.timestamps;
+    section("CVs", data.cvs, item => [line(x,item.measurement,"measurement","#1f5f99"),line(x,item.estimate,"estimate","#d05a35")]);
+    section("MVs", data.mvs, item => [line(x,item.values,"measurement","#1f7a68")]);
+    section("DVs", data.dvs, item => [line(x,item.values,"measurement","#7a5c1f")]);
+    section("States", data.states, item => [line(x,item.values,"estimate","#654a9e")]);
+    section("Biases", data.biases, item => [line(x,item.values,"estimate","#a13f72")]);
+  }
+  load().catch(error => { summary.textContent = error.message; });
+})();
+</script></body></html>"##,
+    )
+}
+
 async fn plotly_asset() -> impl IntoResponse {
     (
         [(
@@ -1337,6 +1425,15 @@ async fn get_plots(
     let limit = query.limit.unwrap_or(250).clamp(1, 10_000);
     let rows = state.runtime.active_read_plots(limit).await?;
     Ok(Json(rows))
+}
+
+async fn get_kalman_tuning_results(
+    Path(project): Path<String>,
+) -> Result<Json<KalmanTuningResult>, AppError> {
+    tuning_store()
+        .get(&project)
+        .map(Json)
+        .ok_or_else(|| anyhow::anyhow!("no Kalman tuning results for '{project}'").into())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1628,6 +1725,36 @@ mod tests {
             .expect("tasks array");
 
         assert!(!tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kalman_tuning_results_endpoint_returns_session_result() {
+        let dir = tempdir().expect("tmp");
+        let project = "kalman_api_demo";
+        tuning_store().put(KalmanTuningResult {
+            project_name: project.to_string(),
+            file_name: "history.csv".to_string(),
+            timestamps: vec!["2026-06-13T12:00:00+00:00".to_string()],
+            parameters: HashMap::from([("mpc.kalman.initial_p".to_string(), 1.0)]),
+            cvs: Vec::new(),
+            mvs: Vec::new(),
+            dvs: Vec::new(),
+            states: Vec::new(),
+            biases: Vec::new(),
+        });
+        let app = build_router(AppState {
+            project_service: ProjectService::new(dir.path()),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: std::env::current_exe().expect("exe"),
+        });
+        let server = TestServer::new(app).expect("server");
+
+        let response = server
+            .get(&format!("/api/kalman-tuning/{project}/results"))
+            .await;
+        response.assert_status_ok();
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["file_name"], "history.csv");
     }
 
     #[tokio::test]
