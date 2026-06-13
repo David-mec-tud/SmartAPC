@@ -848,6 +848,7 @@ struct OptimizationParamRowState {
 enum ParameterHierarchyItem {
     Heading {
         label: String,
+        path: String,
         depth: usize,
     },
     Parameter {
@@ -886,7 +887,12 @@ impl ParameterHierarchyNode {
             .push(((*label).to_string(), index, key.to_string()));
     }
 
-    fn flatten_into(&self, depth: usize, items: &mut Vec<ParameterHierarchyItem>) {
+    fn flatten_into(
+        &self,
+        depth: usize,
+        parent_path: &str,
+        items: &mut Vec<ParameterHierarchyItem>,
+    ) {
         let mut parameters = self.parameters.iter().collect::<Vec<_>>();
         parameters.sort_by(|left, right| left.0.cmp(&right.0));
         for (label, index, key) in parameters {
@@ -899,11 +905,17 @@ impl ParameterHierarchyNode {
         }
 
         for (label, child) in &self.children {
+            let path = if parent_path.is_empty() {
+                label.to_string()
+            } else {
+                format!("{parent_path}.{label}")
+            };
             items.push(ParameterHierarchyItem::Heading {
                 label: label.to_string(),
+                path: path.clone(),
                 depth,
             });
-            child.flatten_into(depth + 1, items);
+            child.flatten_into(depth + 1, &path, items);
         }
     }
 }
@@ -917,21 +929,89 @@ fn parameter_hierarchy<'a>(
     }
 
     let mut items = Vec::new();
-    root.flatten_into(0, &mut items);
+    root.flatten_into(0, "", &mut items);
     items
 }
 
-fn parameter_heading(label: &str, depth: usize) -> Element<'static, Message> {
-    row![
-        parameter_hierarchy_indent(depth),
-        text(parameter_heading_label(label, depth))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ParameterHierarchyScope {
+    Logic,
+    Optimization,
+    ControlTests,
+    Online,
+}
+
+impl ParameterHierarchyScope {
+    fn key(self, path: &str) -> String {
+        format!("{self:?}:{path}")
+    }
+}
+
+fn visible_parameter_hierarchy(
+    items: Vec<ParameterHierarchyItem>,
+    scope: ParameterHierarchyScope,
+    collapsed_sections: &HashSet<String>,
+) -> Vec<ParameterHierarchyItem> {
+    let mut hidden_below_depth = None;
+    let mut visible = Vec::new();
+
+    for item in items {
+        let depth = item.depth();
+        if let Some(hidden_depth) = hidden_below_depth {
+            if depth > hidden_depth {
+                continue;
+            }
+            hidden_below_depth = None;
+        }
+
+        if let ParameterHierarchyItem::Heading { path, .. } = &item {
+            if collapsed_sections.contains(&scope.key(path)) {
+                hidden_below_depth = Some(depth);
+            }
+        }
+        visible.push(item);
+    }
+
+    visible
+}
+
+impl ParameterHierarchyItem {
+    fn depth(&self) -> usize {
+        match self {
+            Self::Heading { depth, .. } | Self::Parameter { depth, .. } => *depth,
+        }
+    }
+}
+
+fn parameter_heading(
+    scope: ParameterHierarchyScope,
+    path: &str,
+    label: &str,
+    depth: usize,
+    collapsed: bool,
+) -> Element<'static, Message> {
+    let marker = if collapsed { "▸" } else { "▾" };
+    button(
+        row![
+            parameter_hierarchy_indent(depth),
+            text(format!(
+                "{marker} {}",
+                parameter_heading_label(label, depth)
+            ))
             .size(parameter_heading_size(depth))
             .font(Font {
                 weight: Weight::Bold,
                 ..Font::DEFAULT
             })
-    ]
-    .align_y(iced::Alignment::Center)
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(0)
+    .style(iced::widget::button::text)
+    .on_press(Message::ToggleParameterHierarchySection(
+        scope,
+        path.to_string(),
+    ))
     .into()
 }
 
@@ -1215,6 +1295,7 @@ enum Message {
     RuntimeActionFinished(Result<String, String>),
     Tick,
     Refreshed(Result<RefreshData, String>),
+    ToggleParameterHierarchySection(ParameterHierarchyScope, String),
     ParamInputChanged(String, String),
     ApplyParamPressed(String),
     ParamApplied(Result<ParamApplyResult, String>),
@@ -1353,6 +1434,7 @@ struct DesktopApp {
     logic_params: HashMap<String, LogicParamValue>,
     param_inputs: HashMap<String, String>,
     param_dirty_keys: HashSet<String>,
+    collapsed_parameter_sections: HashSet<String>,
     samples: Vec<SignalSample>,
     active_snapshot: Option<ExecutionSnapshot>,
     selected_page: SetupPage,
@@ -1397,6 +1479,7 @@ impl DesktopApp {
             logic_params: HashMap::new(),
             param_inputs: HashMap::new(),
             param_dirty_keys: HashSet::new(),
+            collapsed_parameter_sections: HashSet::new(),
             samples: Vec::new(),
             active_snapshot: None,
             selected_page: SetupPage::Communication,
@@ -1749,6 +1832,7 @@ impl DesktopApp {
             },
             Message::ProjectSelected(project_name) => {
                 self.selected_project = Some(project_name.clone());
+                self.collapsed_parameter_sections.clear();
                 self.status_message = format!("Projekt '{}' ausgewählt", project_name);
                 self.error_message = None;
                 load_project_panel_task(self.project_service.clone(), project_name)
@@ -1786,6 +1870,13 @@ impl DesktopApp {
             },
             Message::SelectPage(page) => {
                 self.selected_page = page;
+                Task::none()
+            }
+            Message::ToggleParameterHierarchySection(scope, path) => {
+                let key = scope.key(&path);
+                if !self.collapsed_parameter_sections.remove(&key) {
+                    self.collapsed_parameter_sections.insert(key);
+                }
                 Task::none()
             }
             Message::LogicKindChanged(kind) => {
@@ -3720,17 +3811,26 @@ impl DesktopApp {
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
             );
-            let hierarchy = parameter_hierarchy(
-                self.optimization_editor
-                    .param_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, row)| (index, row.key.as_str())),
+            let scope = ParameterHierarchyScope::Optimization;
+            let hierarchy = visible_parameter_hierarchy(
+                parameter_hierarchy(
+                    self.optimization_editor
+                        .param_rows
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| (index, row.key.as_str())),
+                ),
+                scope,
+                &self.collapsed_parameter_sections,
             );
             for item in hierarchy {
                 match item {
-                    ParameterHierarchyItem::Heading { label, depth } => {
-                        content = content.push(parameter_heading(&label, depth));
+                    ParameterHierarchyItem::Heading { label, path, depth } => {
+                        let collapsed = self
+                            .collapsed_parameter_sections
+                            .contains(&scope.key(&path));
+                        content =
+                            content.push(parameter_heading(scope, &path, &label, depth, collapsed));
                     }
                     ParameterHierarchyItem::Parameter {
                         index,
@@ -4185,17 +4285,26 @@ impl DesktopApp {
         if self.control_function_tests.param_rows.is_empty() {
             content = content.push(text("Keine Online-Parameter aktiv."));
         } else {
-            let hierarchy = parameter_hierarchy(
-                self.control_function_tests
-                    .param_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, row)| (index, row.name.as_str())),
+            let scope = ParameterHierarchyScope::ControlTests;
+            let hierarchy = visible_parameter_hierarchy(
+                parameter_hierarchy(
+                    self.control_function_tests
+                        .param_rows
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| (index, row.name.as_str())),
+                ),
+                scope,
+                &self.collapsed_parameter_sections,
             );
             for item in hierarchy {
                 match item {
-                    ParameterHierarchyItem::Heading { label, depth } => {
-                        content = content.push(parameter_heading(&label, depth));
+                    ParameterHierarchyItem::Heading { label, path, depth } => {
+                        let collapsed = self
+                            .collapsed_parameter_sections
+                            .contains(&scope.key(&path));
+                        content =
+                            content.push(parameter_heading(scope, &path, &label, depth, collapsed));
                     }
                     ParameterHierarchyItem::Parameter {
                         index,
@@ -4966,17 +5075,26 @@ impl DesktopApp {
                     .align_y(iced::Alignment::Center),
                 );
 
-                let hierarchy = parameter_hierarchy(
-                    self.logic_editor
-                        .mpc_params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, row)| (index, row.key.as_str())),
+                let scope = ParameterHierarchyScope::Logic;
+                let hierarchy = visible_parameter_hierarchy(
+                    parameter_hierarchy(
+                        self.logic_editor
+                            .mpc_params
+                            .iter()
+                            .enumerate()
+                            .map(|(index, row)| (index, row.key.as_str())),
+                    ),
+                    scope,
+                    &self.collapsed_parameter_sections,
                 );
                 for item in hierarchy {
                     match item {
-                        ParameterHierarchyItem::Heading { label, depth } => {
-                            content = content.push(parameter_heading(&label, depth));
+                        ParameterHierarchyItem::Heading { label, path, depth } => {
+                            let collapsed = self
+                                .collapsed_parameter_sections
+                                .contains(&scope.key(&path));
+                            content = content
+                                .push(parameter_heading(scope, &path, &label, depth, collapsed));
                         }
                         ParameterHierarchyItem::Parameter {
                             index,
@@ -5103,17 +5221,26 @@ impl DesktopApp {
         if self.logic_params.is_empty() {
             content = content.push(text("Keine Parameter vorhanden."));
         } else {
-            let hierarchy = parameter_hierarchy(
-                self.logic_params
-                    .keys()
-                    .enumerate()
-                    .map(|(index, key)| (index, key.as_str())),
+            let scope = ParameterHierarchyScope::Online;
+            let hierarchy = visible_parameter_hierarchy(
+                parameter_hierarchy(
+                    self.logic_params
+                        .keys()
+                        .enumerate()
+                        .map(|(index, key)| (index, key.as_str())),
+                ),
+                scope,
+                &self.collapsed_parameter_sections,
             );
 
             for item in hierarchy {
                 match item {
-                    ParameterHierarchyItem::Heading { label, depth } => {
-                        content = content.push(parameter_heading(&label, depth));
+                    ParameterHierarchyItem::Heading { label, path, depth } => {
+                        let collapsed = self
+                            .collapsed_parameter_sections
+                            .contains(&scope.key(&path));
+                        content =
+                            content.push(parameter_heading(scope, &path, &label, depth, collapsed));
                     }
                     ParameterHierarchyItem::Parameter {
                         key, label, depth, ..
@@ -8423,6 +8550,8 @@ fn split_import_row(line: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::project_config::{
         CvIoDefinition, LinearStateSpaceModelConfig, LogicKind, LogicParamValue, ModelConfig,
         MvIoDefinition, ProjectConfig, VariableCatalogConfig, WatchdogConfig,
@@ -8430,10 +8559,11 @@ mod tests {
 
     use super::{
         LogicEditorState, ModelEditorState, ModelKindChoice, ParameterHierarchyItem,
-        SimulationEditorState, build_model_config_from_editor, build_simulation_config_from_editor,
-        parameter_heading_label, parameter_heading_size, parameter_hierarchy,
-        parameter_hierarchy_indent_px, parameter_leaf_label, parse_matrix_import_text,
-        resize_string_matrix, sync_io_initial_value_online_params,
+        ParameterHierarchyScope, SimulationEditorState, build_model_config_from_editor,
+        build_simulation_config_from_editor, parameter_heading_label, parameter_heading_size,
+        parameter_hierarchy, parameter_hierarchy_indent_px, parameter_leaf_label,
+        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
+        visible_parameter_hierarchy,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -8465,6 +8595,7 @@ mod tests {
             vec![
                 ParameterHierarchyItem::Heading {
                     label: "General".to_string(),
+                    path: "General".to_string(),
                     depth: 0,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8481,14 +8612,17 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "io".to_string(),
+                    path: "io".to_string(),
                     depth: 0,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "cv".to_string(),
+                    path: "io.cv".to_string(),
                     depth: 1,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "y1".to_string(),
+                    path: "io.cv.y1".to_string(),
                     depth: 2,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8499,6 +8633,7 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "mpc".to_string(),
+                    path: "mpc".to_string(),
                     depth: 0,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8515,14 +8650,17 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "kalman".to_string(),
+                    path: "mpc.kalman".to_string(),
                     depth: 1,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "state".to_string(),
+                    path: "mpc.kalman.state".to_string(),
                     depth: 2,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "1".to_string(),
+                    path: "mpc.kalman.state.1".to_string(),
                     depth: 3,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8533,6 +8671,7 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "2".to_string(),
+                    path: "mpc.kalman.state.2".to_string(),
                     depth: 3,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8543,10 +8682,12 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "mv".to_string(),
+                    path: "mpc.mv".to_string(),
                     depth: 1,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "u1".to_string(),
+                    path: "mpc.mv.u1".to_string(),
                     depth: 2,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8557,14 +8698,17 @@ mod tests {
                 },
                 ParameterHierarchyItem::Heading {
                     label: "p".to_string(),
+                    path: "p".to_string(),
                     depth: 0,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "y1".to_string(),
+                    path: "p.y1".to_string(),
                     depth: 1,
                 },
                 ParameterHierarchyItem::Heading {
                     label: "u1".to_string(),
+                    path: "p.y1.u1".to_string(),
                     depth: 2,
                 },
                 ParameterHierarchyItem::Parameter {
@@ -8593,6 +8737,47 @@ mod tests {
         assert_eq!(parameter_hierarchy_indent_px(1), 0.0);
         assert_eq!(parameter_hierarchy_indent_px(2), 18.0);
         assert_eq!(parameter_hierarchy_indent_px(3), 36.0);
+    }
+
+    #[test]
+    fn collapsed_parameter_heading_hides_only_its_descendants_in_its_scope() {
+        let items = parameter_hierarchy(
+            [
+                "mpc.control_horizon",
+                "mpc.kalman.cv.y1.r",
+                "io.cv.y1.sollband",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (index, *key)),
+        );
+        let collapsed = HashSet::from([ParameterHierarchyScope::Online.key("mpc.kalman")]);
+
+        let visible =
+            visible_parameter_hierarchy(items.clone(), ParameterHierarchyScope::Online, &collapsed);
+        assert!(visible.iter().any(|item| matches!(
+            item,
+            ParameterHierarchyItem::Heading { path, .. } if path == "mpc.kalman"
+        )));
+        assert!(!visible.iter().any(|item| matches!(
+            item,
+            ParameterHierarchyItem::Heading { path, .. } if path == "mpc.kalman.cv"
+        )));
+        assert!(visible.iter().any(|item| matches!(
+            item,
+            ParameterHierarchyItem::Parameter { key, .. } if key == "mpc.control_horizon"
+        )));
+        assert!(visible.iter().any(|item| matches!(
+            item,
+            ParameterHierarchyItem::Parameter { key, .. } if key == "io.cv.y1.sollband"
+        )));
+
+        let other_scope =
+            visible_parameter_hierarchy(items, ParameterHierarchyScope::Logic, &collapsed);
+        assert!(other_scope.iter().any(|item| matches!(
+            item,
+            ParameterHierarchyItem::Parameter { key, .. } if key == "mpc.kalman.cv.y1.r"
+        )));
     }
 
     #[test]
