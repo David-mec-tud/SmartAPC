@@ -1006,15 +1006,15 @@ mod tests {
         cfg.communication.endpoint_url = "mock://runtime-tests".to_string();
         cfg.io.inputs = vec![
             SignalPoint {
-                name: "cv.y1.soll".to_string(),
+                name: "cv.y1.setpoint".to_string(),
                 signal_type: SignalType::F64,
-                address: "ns=2;s=Y1_SOLL".to_string(),
+                address: "ns=2;s=Y1_SETPOINT".to_string(),
                 opc_tag: None,
             },
             SignalPoint {
-                name: "cv.y1.ist".to_string(),
+                name: "cv.y1.process_value".to_string(),
                 signal_type: SignalType::F64,
-                address: "ns=2;s=Y1_IST".to_string(),
+                address: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
                 opc_tag: None,
             },
         ];
@@ -1115,8 +1115,8 @@ mod tests {
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-limits"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed nodes");
-        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(10.0));
-        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(0.0));
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(10.0));
+        adapter.seed_node("ns=2;s=Y1_PROCESS_VALUE", SignalValue::F64(0.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
@@ -1152,8 +1152,8 @@ mod tests {
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-fault"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
-        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(1.0));
-        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(0.0));
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_PROCESS_VALUE", SignalValue::F64(0.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
@@ -1195,8 +1195,8 @@ mod tests {
 
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-logging"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
-        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(2.0));
-        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(2.0));
+        adapter.seed_node("ns=2;s=Y1_PROCESS_VALUE", SignalValue::F64(1.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
@@ -1228,7 +1228,7 @@ mod tests {
         let content = fs::read_to_string(&log_path).expect("read log");
         assert!(content.contains("\"event\":\"runtime_cycle\""));
         assert!(content.contains("\"event\":\"online_params_update\""));
-        assert!(content.contains("cv.y1.soll"));
+        assert!(content.contains("cv.y1.setpoint"));
         assert!(content.contains("mv.u1.write"));
     }
 
@@ -1240,8 +1240,8 @@ mod tests {
             .insert("custom_gain".to_string(), LogicParamValue::F64(1.5));
         let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-plot-extra"));
         seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
-        adapter.seed_node("ns=2;s=Y1_SOLL", SignalValue::F64(2.0));
-        adapter.seed_node("ns=2;s=Y1_IST", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(2.0));
+        adapter.seed_node("ns=2;s=Y1_PROCESS_VALUE", SignalValue::F64(1.0));
 
         let storage_dir = tempdir().expect("tmp");
         let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");

@@ -1,78 +1,47 @@
 # SmartAPC
 
-SmartAPC V1 ist eine modulare Regelungssoftware in Rust für OT-/Industrie-Umgebungen.
+SmartAPC V1 is modular control software written in Rust for OT and industrial environments.
 
-## Aktueller Status (Stand April 2026)
+## Current Status (April 2026)
 
-### Bereits umgesetzt
+### Implemented
 
-- Modulare Runtime mit klaren Interfaces:
-  - `ProtocolAdapter` (V1: OPC-UA Client Adapter)
+- Modular runtime with clear interfaces:
+  - `ProtocolAdapter` (V1: OPC UA client adapter)
   - `WatchdogModule` (`none`, `counter_mirror`)
-  - `ControlLogic`:
-    - `p_controller` (produktiv nutzbar)
-    - `linear_mpc` (lineares MPC auf Basis des gespeicherten State-Space-Modells)
-    - `custom_rust` (projektlokale `cdylib`)
-  - Persistiertes `linear_state_space`-Modell für Offline-Simulation
-- Runtime-State-Machine:
-  - `Running -> Hold -> Alarm -> Off`
-  - Fault-Verhalten: Hold Last Value -> Alarm -> Off
-  - Im `Off`-State werden keine Outputs geschrieben.
-- Laufzeit-Logging in `projects/<projekt>/data/runtime.log` (JSONL):
-  - Inputs/Outputs je Zyklus
-  - Online-Parameter je Zyklus
-  - Online-Parameter-Änderungen
-  - User-definierte Logs aus `custom_rust`-Strategien und strukturierte `linear_mpc`-Diagnosen
-- Simulations-Logging in `projects/<projekt>/data/simulation.log` (JSONL):
-  - `simulation_cycle` je Zyklus
-  - `simulation_time_s`
-  - Inputs/Outputs und User-Logs analog zur Runtime
-- Native Desktop-App (`iced`) mit Setup-Workflow:
-  - OPC-UA Kommunikation
-  - Watchdog
-  - Ein-/Ausgangsnamen
-  - I/O-Definition inkl. OPC Read/Write Test
-  - Optionales State-Space-Modell-Setup (`linear_state_space`, A/B/C/D Import + Matrix-Editor)
-  - Optionales Controller-Simulations-Setup mit Start/Stop, Geschwindigkeitswahl, Initialwerten, Störungen, Rauschen und Live-A/B-Skalierung
-  - Regellogik-Reiter mit Strategiewahl
-  - Control Function Tests mit Input-/Parameter-Sweeps, Fehler-Checks und Laufzeitmetriken
-  - Online-Parameter (f64/bool), Runtime-Update + Persistenz
-  - Statische I/O-Initialwerte (ohne OPC-Adresse) als Online-Parameter editierbar
-  - Plotansicht aus lokaler SQLite
-- Lokale Web-API:
-  - Projekte laden/speichern
-  - Plot-Konfiguration pro Projekt (Window, Reihenfolge, Custom Plots)
-  - Runtime Start/Stop/State
-  - Simulation Start/Stop/State
-  - Aktive Execution-Reads für State, Parameter und Plots
-  - Runtime-Parameter lesen/schreiben
-  - Simulation Step
-  - Plotdaten (Limit + Sliding Window + Series-Katalog)
-  - Deployment-Kommandos (Windows Service via `sc.exe`)
-- Interaktive Web-Plotansicht:
-  - `GET /plots`
-  - Folgt automatisch Runtime oder Simulation
-  - Plotly.js lokal gebündelt (kein CDN notwendig)
-  - Sliding-Window-Zeitfenster als User-Parameter
-  - MV/CV/DV Panels per Drag-and-Drop sortierbar
-  - Eigene Multi-Trace-Plots aus Online-Parametern und geloggten Variablen
-- Virtuelle Hardware:
-  - Separater lokaler OPC-UA PT1-Server
-  - Popup-Liveplot mit 3-Minuten-Fenster
+  - `ControlLogic`: production-ready `p_controller`, model-based `linear_mpc`, and project-local `custom_rust` `cdylib`
+  - Persisted `linear_state_space` model for offline simulation
+- Runtime state machine: `Running -> Hold -> Alarm -> Off`
+  - Fault behavior: hold last value, enter alarm, then switch off
+  - No outputs are written in the `Off` state
+- Structured JSONL runtime and simulation logging under `projects/<project>/data/`
+  - Per-cycle inputs, outputs, online parameters, simulation time, user logs, and MPC diagnostics
+  - Online-parameter changes
+- Native `iced` desktop application:
+  - OPC UA communication and watchdog setup
+  - MV/CV/DV catalog and I/O definition with OPC UA read/write tests
+  - Optional continuous state-space model with A/B/C/D import and matrix editor
+  - Controller simulation with speed selection, initial values, disturbances, noise, and live A/B scaling
+  - Control strategy selection, control-function tests, online parameters, and SQLite plots
+- Local web API:
+  - Project configuration, runtime and simulation control, execution state, parameters, plots, and Windows service commands
+- Interactive Plotly web view at `GET /plots`
+  - Automatically follows the runtime or simulation
+  - Uses locally bundled Plotly.js
+  - Supports sliding windows, sortable MV/CV/DV panels, custom multi-trace plots, and MPC future predictions
+- Virtual hardware:
+  - Separate local OPC UA PT1 server
+  - Live plot with a three-minute window
 
-### Noch als Platzhalter (UI-seitig)
+### Placeholder
 
-- Deployment-Setup-Seite (API-Kommandos vorhanden)
+- The deployment setup page is a placeholder; deployment API commands are available.
 
-Hinweis zum Modell-Setup:
+The optional continuous state-space model uses `x_dot = A x + B u` and `y = C x + D u`.
+Offline controller simulation integrates the model with fixed-step RK4 and zero-order hold per
+control cycle. The production runtime does not simulate the plant internally.
 
-- Die Desktop-App kann ein optionales kontinuierliches Zustandsraummodell `linear_state_space` mit
-  `x_dot = A x + B u` und `y = C x + D u` speichern.
-- Die Offline-Reglersimulation verwendet dieses Modell direkt.
-- Als Löser wird ein festes RK4-Verfahren mit Zero-Order Hold pro Regelzyklus verwendet.
-- Die Runtime selbst verwendet weiterhin keine interne Pflanzen-Simulation.
-
-## Build, Test, Start
+## Build, Test, and Run
 
 ```bash
 cargo test
@@ -81,19 +50,19 @@ cargo run -- serve
 cargo run -- virtual-hardware
 ```
 
-Typischer Start der Desktop-App:
+Start the desktop application with a project root:
 
 ```bash
 cargo run -- desktop --project-root ./projects
 ```
 
-Desktop ohne eingebettete Web-API:
+Disable the embedded web API:
 
 ```bash
 cargo run -- desktop --project-root ./projects --no-web
 ```
 
-## Projektlayout
+## Project Layout
 
 ```text
 projects/
@@ -105,32 +74,30 @@ projects/
       simulation.sqlite
       simulation.log
     logic/
-      custom_strategy/   # wird bei Template-Generierung angelegt
+      custom_strategy/   # created by template generation
 ```
 
-## Schnellstart mit virtueller Hardware
+## Virtual Hardware Quick Start
 
-1. Virtuelle Hardware starten:
+1. Start virtual hardware:
 
 ```bash
 cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120
 ```
 
-2. Desktop-App in zweitem Terminal starten:
+2. Start the desktop application in a second terminal:
 
 ```bash
 cargo run -- desktop --project-root ./projects
 ```
 
-3. In der App:
-- Endpoint auf `opc.tcp://127.0.0.1:4855/` setzen.
-- Watchdog konfigurieren:
-  - `read_node = ns=2;s=wd_counter_read`
-  - `write_node = ns=2;s=wd_counter_mirror`
-- Variablen und I/O definieren (z. B. `cv.y1.*`, `mv.u1.*`).
-- Regellogik auswählen und Runtime starten.
+3. In the application:
+   - Set the endpoint to `opc.tcp://127.0.0.1:4855/`.
+   - Configure `read_node = ns=2;s=wd_counter_read` and `write_node = ns=2;s=wd_counter_mirror`.
+   - Define variables and I/O, for example `cv.y1.*` and `mv.u1.*`.
+   - Select a control strategy and start the runtime.
 
-Virtuelle Hardware OPC-UA Tags:
+Virtual hardware OPC UA tags:
 
 - `ns=2;s=y1_value`
 - `ns=2;s=y1_target`
@@ -141,69 +108,51 @@ Virtuelle Hardware OPC-UA Tags:
 - `ns=2;s=wd_counter_read`
 - `ns=2;s=wd_counter_mirror`
 
-## Regelstrategie in V1
+## Control Strategies
 
-Im Reiter **Regellogik** gibt es oben eine Strategiewahl.
+The **Control Strategy** tab offers only strategies compatible with the current I/O definition:
 
-- Basis: `P-Regler` (`p_controller`)
-- Modellbasiert: `Linear MPC` (`linear_mpc`)
-- Alternative: `Eigene Regellogik` (`custom_rust`)
+- `P Controller` (`p_controller`)
+- `Linear MPC` (`linear_mpc`)
+- `Custom Control Strategy` (`custom_rust`)
 
-Wichtig: Die Auswahl zeigt nur Strategien, die mit der aktuellen I/O-Definition kompatibel sind.  
-`Linear MPC` erscheint, wenn ein `linear_state_space`-Modell sowie passende MV/CV/DV-I/O vorhanden sind.
-`Eigene Regellogik` erscheint erst nach erfolgreichem Build/Check als kompatibel.
+### P Controller
 
-### P-Regler
-
-- Explizite CV->MV Paarung
-- Pro Paar:
-  - `kp`
-  - `bias`
-- Formel: `u = kp * (soll - ist) + bias`
-- Enable-Verhalten:
-  - Falls `cv.<name>.enable == false` oder `mv.<name>.enable == false`, wird für dieses Paar kein Output geschrieben.
+- Uses explicit CV-to-MV pairings with `kp` and `bias`
+- Formula: `u = kp * (setpoint - process_value) + bias`
+- Writes no output for a pair when `cv.<name>.enable == false` or `mv.<name>.enable == false`
 
 ### Linear MPC
 
-- Verwendet das gespeicherte kontinuierliche Modell `x_dot = A x + B u`, `y = C x + D u`.
-- Diskretisierung erfolgt je Regelzyklus mit Zero-Order Hold/RK4 wie in der Offline-Simulation.
-- `u_order` bleibt `MVs + DVs`: MVs werden optimiert, DVs werden als gemessene Störungen über den Horizont konstant gehalten.
-- Benötigte I/O:
-  - je CV: `cv.<name>.soll` und `cv.<name>.ist`
-  - je MV: `mv.<name>.write`; `mv.<name>.read` ist optional und wird sonst durch den letzten Stellwert ersetzt
-  - je DV: `dv.<name>.read`
-- Online-Parameter:
-  - Horizonte: `mpc.prediction_horizon`, `mpc.control_horizon`
-  - CV-Tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
-  - MV-Tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
-  - Kalman-Filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`, `mpc.kalman.cv.<cv>.bias_q`
-- Im Reiter **Regellogik** können diese `mpc.*`-Startwerte vor dem Speichern gesetzt werden; danach erscheinen sie unter **Online Parameter** und sind live änderbar.
-- CV-Bänder sind relativ zum Live-Sollwert. Innerhalb des Bandes wird kein CV-Fehler bestraft; außerhalb wird auf die nächste Bandkante optimiert.
-- Pro CV wird ein Ausgangs-Bias geschätzt. Dieser Bias kompensiert konstante Messoffsets und stationäre Modellabweichungen in den MPC-Vorhersagen.
-- MV-Grenzen kommen aus `io.mv.<mv>.ll` und `io.mv.<mv>.hl`, sofern statisch oder als OPC-Eingang verfügbar.
-- Laufzeit-/Simulationslogs enthalten plotbare `user_log`-Serien wie `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`, `mpc.pred.free.*`, `mpc.pred.mpc.*`, `future_pred_*` und `mpc.status.*`.
-- `/plots` zeigt MPC-Zukunftswerte als gepunktete Linien, wenn im Plot-Toolbar **Future (seconds)** > 0 gesetzt ist.
+- Uses the persisted continuous model `x_dot = A x + B u`, `y = C x + D u`
+- Discretizes each control cycle with zero-order hold/RK4
+- Keeps `u_order` as `MVs + DVs`; MVs are optimized and measured DVs remain constant over the horizon
+- Required I/O:
+  - Per CV: `cv.<name>.setpoint` and `cv.<name>.process_value`
+  - Per MV: `mv.<name>.write`; `mv.<name>.read` is optional and falls back to the last manipulated value
+  - Per DV: `dv.<name>.read`
+- Online parameters:
+  - Horizons: `mpc.prediction_horizon`, `mpc.control_horizon`
+  - CV tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
+  - MV tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
+  - Kalman filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`, `mpc.kalman.cv.<cv>.bias_q`
+
+CV bands are relative to the live setpoint. Error inside the band is not penalized; error outside
+the band is optimized toward the nearest boundary. Runtime and simulation logs expose plot-ready
+MPC diagnostics such as `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`,
+`mpc.pred.free.*`, `mpc.pred.mpc.*`, `future_pred_*`, and `mpc.status.*`.
 
 ### Kalman Filter Tuning
 
-Nach dem Speichern einer kompatiblen **Linear MPC**-Regellogik steht die Aufgabe
-**Kalman Filter Tuning** zur Verfügung.
+After saving a compatible Linear MPC strategy:
 
-1. Über **CSV importieren** historische Messdaten laden.
-2. Kalman-Parameter als Textwerte anpassen und optional mit **Parameter speichern** in
-   `project.toml` übernehmen.
-3. **Run Observer** ausführen.
-4. Über **Interaktive Plots öffnen** die Plotly-Auswertung mit Zoom, Pan, Hover,
-   Autoscale und synchronisierter Zeitachse öffnen.
+1. Import historical measurements from a UTF-8, comma-separated CSV file.
+2. Adjust Kalman parameters and optionally persist them to `project.toml`.
+3. Run the observer.
+4. Open interactive Plotly charts.
 
-Die CSV-Datei muss UTF-8 und komma-separiert sein. Sie benötigt:
-
-- `time`: strikt steigender RFC-3339-/ISO-8601-Zeitstempel mit Zeitzone, zum Beispiel
-  `2026-06-13T14:30:00.123+02:00`
-- eine Spalte mit dem exakten Variablennamen für jeden konfigurierten CV, MV und DV
-- mindestens zwei vollständige Datenzeilen mit endlichen numerischen Messwerten
-
-Beispiel für CV `y1`, MV `u1` und DV `d1`:
+The CSV requires a strictly increasing RFC 3339/ISO 8601 `time` column with a time zone, one
+column for each configured CV, MV, and DV, and at least two complete finite data rows.
 
 ```csv
 time,y1,u1,d1
@@ -211,46 +160,32 @@ time,y1,u1,d1
 2026-06-13T14:30:01.000+02:00,1.3,0.4,0.1
 ```
 
-Zusätzliche Spalten werden ignoriert. Importierte Daten und Observer-Ergebnisse bleiben
-nur in der aktuellen Desktop-Sitzung. Die interaktiven Plots benötigen die lokale Web-API,
-also einen Desktop-Start ohne `--no-web`.
+Additional columns are ignored. Imported data and observer results remain in the current desktop
+session. Interactive plots require the local web API.
 
-## Guide: Eigene Rust-Regellogik (`custom_rust`)
+## Custom Rust Control Strategy
 
-### Voraussetzungen
+Prerequisites:
 
-- Rust Toolchain lokal installiert (`cargo` verfügbar)
-- Projekt-I/O bereits definiert
-- Runtime gestoppt (für Konfig-Änderungen)
-- Simulation gestoppt (für strukturelle Konfig-Änderungen)
+- A local Rust toolchain with `cargo`
+- Defined project I/O
+- Stopped runtime and simulation for structural configuration changes
 
-### Schritt-für-Schritt
+Workflow:
 
-1. In der Desktop-App zum Reiter **Regellogik**.
-2. Button **Template generieren** klicken.
-   - Erzeugt unter `projects/<projekt>/logic/custom_strategy/` ein Rust-`cdylib`-Template.
-   - Das Template ist ausführlich kommentiert (Context, History, Output-Pflicht, Logging-Helfer).
-3. Datei `projects/<projekt>/logic/custom_strategy/src/lib.rs` bearbeiten.
-4. Die Funktion `control(...)` implementieren.
-5. Optional zusätzliche Parameter als Funktionsargumente hinter `ctx` und `out` ergänzen:
-   - erlaubt: `f64`, `bool`
-6. Button **Strategie prüfen/builden** klicken.
-   - Führt `cargo build --release` für die Custom-Strategie aus.
-   - Extrahiert zusätzliche Parameter aus der Signatur.
-   - Liest den Contract aus der gebauten `cdylib` (`required_inputs`, `required_outputs`).
-   - Markiert Strategie nur dann als kompatibel, wenn Contract und aktuelle I/O-Definition exakt übereinstimmen.
-7. Jetzt kann im Auswahlmenü **Eigene Regellogik** gewählt und gespeichert werden.
-8. Zusätzliche Parameter erscheinen unter **Online Parameter** und sind zur Laufzeit änderbar.
+1. Open the **Control Strategy** tab and generate a template.
+2. Edit `projects/<project>/logic/custom_strategy/src/lib.rs`.
+3. Implement `control(...)` and optionally add `f64` or `bool` arguments after `ctx` and `out`.
+4. Build and check the strategy.
+5. Select and save it after the contract matches the current I/O definition.
 
-### Erwartete Signatur
-
-Pflicht:
+Required signature:
 
 ```rust
 pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs)
 ```
 
-Mit zusätzlichen User-Parametern:
+Signature with online parameters:
 
 ```rust
 pub fn control(
@@ -261,59 +196,19 @@ pub fn control(
 )
 ```
 
-Alle zusätzlichen Parameter werden als Online-Parameter registriert:
+The context provides current inputs and input/output/parameter history. Set every required
+`mv.<name>.write` output through `out`. Use `out.log(...)`, `out.log_value(...)`, and
+`out.log_values(...)` for structured user logs.
 
-- `f64` -> numerischer Parameter
-- `bool` -> boolescher Parameter
-
-### Inputs/Outputs in Custom-Logik
-
-- `ctx.inputs` enthält die aktuellen Runtime-Eingänge (aus I/O-Definition).
-- `ctx.input_history` enthält Input-Verlauf je Signal (ältest -> neuest).
-- `ctx.output_history` enthält Output-Verlauf je Signal (ältest -> neuest).
-- `ctx.param_history` enthält Verlauf der Online-Parameter (ältest -> neuest).
-- Über `out` müssen die benötigten `mv.<name>.write` Outputs gesetzt werden.
-- Wenn ein erforderlicher Output nicht gesetzt wird, gilt die Strategie als fehlerhaft.
-
-### Eigene Logs aus `control(...)`
-
-Im Template stehen flexible Log-Helfer zur Verfügung:
-
-- `out.log("text")`
-- `out.log_value("text", "key", SignalValue::F64(...))`
-- `out.log_values("text", values_map)`
-
-Diese Einträge landen im Runtime-Logfile (`data/runtime.log`) im Feld `user_logs`.
-Während der Offline-Simulation landen sie analog in `data/simulation.log`.
-
-### Optionale Zukunftsplots aus Custom-Logik
-
-Eigene Strategien können Vorhersagen für die gepunkteten Zukunftslinien bereitstellen. Dazu im `control(...)` pro Horizontschritt `F64`-Werte mit diesen Schlüsseln loggen:
+Custom strategies can provide dotted future-prediction lines by logging `F64` values with:
 
 - `future_pred_without_control.cv.<cv>.kNN`
 - `future_pred_with_control.cv.<cv>.kNN`
 - `future_pred_with_control.mv.<mv>.kNN`
 
-`NN` ist der 1-basierte Horizontschritt mit zwei Stellen, z. B. `k01`, `k02`. Fehlende Schlüssel sind erlaubt; die jeweilige Zukunftslinie wird dann nicht gezeichnet.
+`NN` is the one-based, two-digit horizon step, for example `k01`.
 
-```rust
-let mut values = HashMap::new();
-values.insert(
-    "future_pred_without_control.cv.y1.k01".to_string(),
-    SignalValue::F64(y_free),
-);
-values.insert(
-    "future_pred_with_control.cv.y1.k01".to_string(),
-    SignalValue::F64(y_controlled),
-);
-values.insert(
-    "future_pred_with_control.mv.u1.k01".to_string(),
-    SignalValue::F64(u_controlled),
-);
-out.log_future_prediction_values(values);
-```
-
-### Minimalbeispiel
+Minimal example:
 
 ```rust
 pub fn control(
@@ -321,46 +216,30 @@ pub fn control(
     out: &mut SmartApcOutputs,
     kp: f64,
 ) {
-    // Optional: Beispiel für User-Log
-    out.log("control tick");
-
-    let soll = match ctx.inputs.get("cv.y1.soll") {
+    let setpoint = match ctx.inputs.get("cv.y1.setpoint") {
         Some(SignalValue::F64(v)) => *v,
         _ => 0.0,
     };
-    let ist = match ctx.inputs.get("cv.y1.ist") {
+    let process_value = match ctx.inputs.get("cv.y1.process_value") {
         Some(SignalValue::F64(v)) => *v,
         _ => 0.0,
     };
-    out.set_f64("mv.u1.write", kp * (soll - ist));
+    out.set_f64("mv.u1.write", kp * (setpoint - process_value));
 }
 ```
 
-### Online-Parameter aus statischen I/O-Werten
-
-Wenn in der I/O-Definition ein Wert **ohne OPC-Adresse** konfiguriert ist, aber einen Initialwert hat,
-wird er automatisch als Online-Parameter gespiegelt:
+Static I/O values without OPC addresses are exposed as online parameters:
 
 - `io.mv.<name>.hl`
 - `io.mv.<name>.ll`
-- `io.cv.<name>.sollband`
+- `io.cv.<name>.deadband`
 
-Damit können diese Werte auch zur Laufzeit über **Online Parameter** angepasst werden.
+## Important Notes
 
-## Wichtige Hinweise
+- V1 is local and OT-focused, with no cloud dependency.
+- `runtime.cycle_ms` must be at least `1000 ms` in V1.
 
-- V1 ist lokal/OT-fokussiert, ohne Cloud-Zwang.
-- `runtime.cycle_ms` muss in V1 `>= 1000 ms` sein.
-- Kommunikation:
-  - `communication.endpoint_url`
-  - `communication.io_cycle_ms`
-- Watchdog `counter_mirror`:
-  - `read_node`
-  - `write_node`
-  - `mirror_cycle_ms`
-  - `stale_timeout_ms`
-
-## API Kurzreferenz
+## API Quick Reference
 
 - `GET /api/runtime/state`
 - `GET /api/runtime/params`

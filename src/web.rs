@@ -126,13 +126,13 @@ async fn index_page() -> Html<&'static str> {
   <div class="container">
     <div class="panel">
       <h1>SmartAPC V1</h1>
-      <p>Modulare Regelungssoftware mit OPC-UA, Watchdog, Runtime-State-Machine und SQLite-Plots.</p>
-      <p>API Startpunkte: <code>/api/projects</code>, <code>/api/runtime/start</code>, <code>/api/simulation/start</code>, <code>/api/execution/state</code>.</p>
-      <p><a href="/plots">Interaktive Plot-Ansicht öffnen</a></p>
+      <p>Modular control software with OPC UA, a watchdog, a runtime state machine, and SQLite plots.</p>
+      <p>API entry points: <code>/api/projects</code>, <code>/api/runtime/start</code>, <code>/api/simulation/start</code>, <code>/api/execution/state</code>.</p>
+      <p><a href="/plots">Open interactive plot view</a></p>
       <div class="grid">
-        <div class="card"><h3>Projektkonfiguration</h3><p>TOML-basierte Projekte, Sidebar-Tasks und Parametrierung.</p></div>
-        <div class="card"><h3>Runtime</h3><p>State: Running -> Hold -> Alarm -> Off mit konfigurierbaren Timeouts.</p></div>
-        <div class="card"><h3>Plots</h3><p>Ein-/Ausgänge und Zyklus-Metriken werden lokal in SQLite gespeichert.</p></div>
+        <div class="card"><h3>Project Configuration</h3><p>TOML-based projects, setup tasks, and parameterization.</p></div>
+        <div class="card"><h3>Runtime</h3><p>State: Running -> Hold -> Alarm -> Off with configurable timeouts.</p></div>
+        <div class="card"><h3>Plots</h3><p>Inputs, outputs, and cycle metrics are stored locally in SQLite.</p></div>
       </div>
     </div>
   </div>
@@ -598,12 +598,12 @@ async fn plots_page() -> Html<&'static str> {
       return ka.localeCompare(kb);
     });
     if (changed) {
-      state.catalogSig = catalogSignature(state.catalog);
+      state.catalogSig = catalogsignaturee(state.catalog);
     }
     return changed;
   }
 
-  function catalogSignature(rows) {
+  function catalogsignaturee(rows) {
     return rows
       .map((row) => `${row.direction}::${row.signal}::${row.value_kind}`)
       .sort()
@@ -618,7 +618,7 @@ async fn plots_page() -> Html<&'static str> {
         value_kind: row.value_kind === "bool" ? "bool" : "f64",
       }))
       .filter((row) => row.direction && row.signal);
-    const sig = catalogSignature(normalized);
+    const sig = catalogsignaturee(normalized);
     if (sig === state.catalogSig) {
       return false;
     }
@@ -657,11 +657,11 @@ async fn plots_page() -> Html<&'static str> {
 
   function cvTraces(name) {
     return [
-      makeTrace("input", `cv.${name}.soll`, "soll"),
-      makeTrace("input", `cv.${name}.ist`, "ist"),
-      makeTrace("input", `cv.${name}.sollband`, "sollband"),
+      makeTrace("input", `cv.${name}.setpoint`, "setpoint"),
+      makeTrace("input", `cv.${name}.process_value`, "process_value"),
+      makeTrace("input", `cv.${name}.deadband`, "deadband"),
       makeTrace("input", `cv.${name}.enable`, "enable"),
-      makeTrace("online_param", `io.cv.${name}.sollband`, "sollband (online)"),
+      makeTrace("online_param", `io.cv.${name}.deadband`, "deadband (online)"),
     ];
   }
 
@@ -901,7 +901,7 @@ async fn plots_page() -> Html<&'static str> {
         name,
         maxSteps,
       );
-      const anchorY = latestHistoricalY([["input", `cv.${name}.ist`]]);
+      const anchorY = latestHistoricalY([["input", `cv.${name}.process_value`]]);
       if (freeValues.length > 0) {
         out.push(withAnchor(
           makeFutureTrace("future no control", futureXValues(freeValues.length, latestTimestampMs), freeValues, "#8a5b23"),
@@ -1580,10 +1580,10 @@ mod tests {
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: "ns=2;s=Y1_SOLL".to_string(),
-            ist: "ns=2;s=Y1_IST".to_string(),
-            sollband_opc: None,
-            sollband_value: Some(0.0),
+            setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
+            process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(0.0),
             enable: None,
         });
         cfg.logic.kind = LogicKind::PController;
@@ -1633,13 +1633,13 @@ mod tests {
         let mut cfg = projects.load_config("demo").expect("config");
         cfg.communication.endpoint_url = "mock://web-project-api".to_string();
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
             address: "ns=2;s=PV_SOL".to_string(),
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
             address: "ns=2;s=PV_IST".to_string(),
             opc_tag: None,
@@ -1686,8 +1686,8 @@ mod tests {
             .post("/api/simulate/step")
             .json(&serde_json::json!({
                 "inputs": {
-                    "cv.y1.soll": { "kind": "f64", "value": 3.0 },
-                    "cv.y1.ist": { "kind": "f64", "value": 0.0 }
+                    "cv.y1.setpoint": { "kind": "f64", "value": 3.0 },
+                    "cv.y1.process_value": { "kind": "f64", "value": 0.0 }
                 }
             }))
             .await;
@@ -1766,13 +1766,13 @@ mod tests {
         let mut cfg = projects.load_config("demo").expect("config");
         cfg.communication.endpoint_url = "mock://web-plots".to_string();
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=In1Soll".to_string(),
+            address: "ns=2;s=In1Setpoint".to_string(),
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
             address: "ns=2;s=In1Ist".to_string(),
             opc_tag: None,
@@ -1871,7 +1871,7 @@ mod tests {
                         title: "".to_string(),
                         traces: vec![CustomPlotTraceConfig {
                             direction: "input".to_string(),
-                            signal: "cv.y1.ist".to_string(),
+                            signal: "cv.y1.process_value".to_string(),
                         }],
                     },
                     CustomPlotConfig {
@@ -1911,13 +1911,13 @@ mod tests {
         let mut cfg = projects.load_config("demo").expect("config");
         cfg.communication.endpoint_url = "mock://web-runtime-plots".to_string();
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=InSoll".to_string(),
+            address: "ns=2;s=InSetpoint".to_string(),
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
             address: "ns=2;s=InIst".to_string(),
             opc_tag: None,

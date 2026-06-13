@@ -279,13 +279,15 @@ impl SimulationCore {
                 simulation_mv_scalar(params, &self.config.io_definition.mvs, name, "ll")
                     .map(SignalValue::F64)
             }
-            ("cv", "soll") => Some(SignalValue::F64(
+            ("cv", "setpoint") => Some(SignalValue::F64(
                 *self.simulation.cv_setpoints.get(name).unwrap_or(&0.0),
             )),
-            ("cv", "ist") => Some(SignalValue::F64(*self.current_cv.get(name).unwrap_or(&0.0))),
+            ("cv", "process_value") => {
+                Some(SignalValue::F64(*self.current_cv.get(name).unwrap_or(&0.0)))
+            }
             ("cv", "enable") => Some(SignalValue::Bool(true)),
-            ("cv", "sollband") => {
-                simulation_cv_scalar(params, &self.config.io_definition.cvs, name, "sollband")
+            ("cv", "deadband") => {
+                simulation_cv_scalar(params, &self.config.io_definition.cvs, name, "deadband")
                     .map(SignalValue::F64)
             }
             ("dv", "read") => Some(SignalValue::F64(*self.current_dv.get(name).unwrap_or(&0.0))),
@@ -497,13 +499,13 @@ fn simulation_cv_scalar(
     rows.iter()
         .find(|row| row.name == name)
         .and_then(|row| match suffix {
-            "sollband" => row.sollband_value,
+            "deadband" => row.deadband_value,
             _ => None,
         })
 }
 
 fn prefix_from_suffix(suffix: &str) -> &'static str {
-    if suffix == "sollband" { "cv" } else { "mv" }
+    if suffix == "deadband" { "cv" } else { "mv" }
 }
 
 fn simulation_timestamp_ms(simulation_time_s: f64) -> i64 {
@@ -873,10 +875,10 @@ mod tests {
             }],
             cvs: vec![CvIoDefinition {
                 name: "y1".to_string(),
-                soll: String::new(),
-                ist: String::new(),
-                sollband_opc: None,
-                sollband_value: Some(0.05),
+                setpoint: String::new(),
+                process_value: String::new(),
+                deadband_opc: None,
+                deadband_value: Some(0.05),
                 enable: None,
             }],
             dvs: Vec::new(),
@@ -947,10 +949,10 @@ mod tests {
             }],
             cvs: vec![CvIoDefinition {
                 name: "y1".to_string(),
-                soll: String::new(),
-                ist: String::new(),
-                sollband_opc: None,
-                sollband_value: Some(0.05),
+                setpoint: String::new(),
+                process_value: String::new(),
+                deadband_opc: None,
+                deadband_value: Some(0.05),
                 enable: None,
             }],
             dvs: Vec::new(),

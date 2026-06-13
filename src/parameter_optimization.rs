@@ -865,12 +865,12 @@ fn simulated_input_value(
             .map(SignalValue::F64),
         ("mv", "ll") => simulation_mv_scalar(params, &config.io_definition.mvs, name, "ll")
             .map(SignalValue::F64),
-        ("cv", "soll") => Some(SignalValue::F64(
+        ("cv", "setpoint") => Some(SignalValue::F64(
             *simulation.cv_setpoints.get(name).unwrap_or(&0.0),
         )),
-        ("cv", "ist") => Some(SignalValue::F64(*current_cv.get(name).unwrap_or(&0.0))),
+        ("cv", "process_value") => Some(SignalValue::F64(*current_cv.get(name).unwrap_or(&0.0))),
         ("cv", "enable") => Some(SignalValue::Bool(true)),
-        ("cv", "sollband") => {
+        ("cv", "deadband") => {
             simulation_cv_scalar(params, &config.io_definition.cvs, name).map(SignalValue::F64)
         }
         ("dv", "read") => Some(SignalValue::F64(*current_dv.get(name).unwrap_or(&0.0))),
@@ -903,13 +903,13 @@ fn simulation_cv_scalar(
     rows: &[crate::project_config::CvIoDefinition],
     name: &str,
 ) -> Option<f64> {
-    let param_key = format!("io.cv.{name}.sollband");
+    let param_key = format!("io.cv.{name}.deadband");
     if let Some(LogicParamValue::F64(value)) = params.get(&param_key) {
         return Some(*value);
     }
     rows.iter()
         .find(|row| row.name == name)
-        .and_then(|row| row.sollband_value)
+        .and_then(|row| row.deadband_value)
 }
 
 fn scaled_model_matrices(
@@ -1201,10 +1201,10 @@ mod tests {
             }],
             cvs: vec![CvIoDefinition {
                 name: "y1".to_string(),
-                soll: "cv.y1.soll".to_string(),
-                ist: "cv.y1.ist".to_string(),
-                sollband_value: Some(0.0),
-                sollband_opc: None,
+                setpoint: "cv.y1.setpoint".to_string(),
+                process_value: "cv.y1.process_value".to_string(),
+                deadband_value: Some(0.0),
+                deadband_opc: None,
                 enable: None,
             }],
             dvs: Vec::new(),
@@ -1276,10 +1276,10 @@ mod tests {
             }],
             cvs: vec![CvIoDefinition {
                 name: "y1".to_string(),
-                soll: "cv.y1.soll".to_string(),
-                ist: "cv.y1.ist".to_string(),
-                sollband_value: Some(0.0),
-                sollband_opc: None,
+                setpoint: "cv.y1.setpoint".to_string(),
+                process_value: "cv.y1.process_value".to_string(),
+                deadband_value: Some(0.0),
+                deadband_opc: None,
                 enable: None,
             }],
             dvs: Vec::new(),

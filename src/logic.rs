@@ -147,8 +147,8 @@ impl ControlLogic for PControllerLogic {
         let mut outputs = HashMap::new();
 
         for pair in &self.pairs {
-            let cv_soll_key = format!("cv.{}.soll", pair.cv);
-            let cv_ist_key = format!("cv.{}.ist", pair.cv);
+            let cv_setpoint_key = format!("cv.{}.setpoint", pair.cv);
+            let cv_process_value_key = format!("cv.{}.process_value", pair.cv);
             let cv_enable_key = format!("cv.{}.enable", pair.cv);
             let mv_enable_key = format!("mv.{}.enable", pair.mv);
             let mv_write_key = format!("mv.{}.write", pair.mv);
@@ -159,14 +159,17 @@ impl ControlLogic for PControllerLogic {
                 continue;
             }
 
-            let Some(soll) = inputs.get(&cv_soll_key).and_then(SignalValue::as_f64) else {
+            let Some(setpoint) = inputs.get(&cv_setpoint_key).and_then(SignalValue::as_f64) else {
                 continue;
             };
-            let Some(ist) = inputs.get(&cv_ist_key).and_then(SignalValue::as_f64) else {
+            let Some(process_value) = inputs
+                .get(&cv_process_value_key)
+                .and_then(SignalValue::as_f64)
+            else {
                 continue;
             };
 
-            let error = soll - ist;
+            let error = setpoint - process_value;
             let u = self.pair_kp(pair) * error + self.pair_bias(pair);
             outputs.insert(mv_write_key, SignalValue::F64(u));
         }
@@ -667,8 +670,8 @@ mod tests {
         );
 
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(10.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(7.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(10.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(7.0));
 
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         assert_eq!(outputs.get("mv.u1.write"), Some(&SignalValue::F64(7.0)));
@@ -687,8 +690,8 @@ mod tests {
         );
 
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(10.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(7.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(10.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(7.0));
         inputs.insert("cv.y1.enable".to_string(), SignalValue::Bool(false));
 
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");

@@ -255,14 +255,14 @@ impl ProjectConfig {
         let mut output_names = HashSet::new();
 
         for pair in &self.logic.p_controller.pairs {
-            let soll = format!("cv.{}.soll", pair.cv);
-            if input_names.insert(soll.clone()) {
-                inputs.push(simulation_signal_point(soll, SignalType::F64));
+            let setpoint = format!("cv.{}.setpoint", pair.cv);
+            if input_names.insert(setpoint.clone()) {
+                inputs.push(simulation_signal_point(setpoint, SignalType::F64));
             }
 
-            let ist = format!("cv.{}.ist", pair.cv);
-            if input_names.insert(ist.clone()) {
-                inputs.push(simulation_signal_point(ist, SignalType::F64));
+            let process_value = format!("cv.{}.process_value", pair.cv);
+            if input_names.insert(process_value.clone()) {
+                inputs.push(simulation_signal_point(process_value, SignalType::F64));
             }
 
             let write = format!("mv.{}.write", pair.mv);
@@ -291,11 +291,11 @@ impl ProjectConfig {
 
         for cv in &self.variables.cvs {
             inputs.push(simulation_signal_point(
-                format!("cv.{cv}.soll"),
+                format!("cv.{cv}.setpoint"),
                 SignalType::F64,
             ));
             inputs.push(simulation_signal_point(
-                format!("cv.{cv}.ist"),
+                format!("cv.{cv}.process_value"),
                 SignalType::F64,
             ));
         }
@@ -435,10 +435,10 @@ impl ProjectConfig {
         }
 
         for cv in &self.io_definition.cvs {
-            if cv.sollband_opc.as_deref().unwrap_or("").trim().is_empty() {
-                if let Some(value) = cv.sollband_value {
+            if cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = cv.deadband_value {
                     defaults.insert(
-                        format!("io.cv.{}.sollband", cv.name),
+                        format!("io.cv.{}.deadband", cv.name),
                         LogicParamValue::F64(value),
                     );
                 }
@@ -510,13 +510,13 @@ impl ProjectConfig {
         let output_names: HashSet<_> = io.outputs.iter().map(|point| point.name.as_str()).collect();
 
         for cv in &self.variables.cvs {
-            let soll = format!("cv.{cv}.soll");
-            let ist = format!("cv.{cv}.ist");
-            if !input_names.contains(soll.as_str()) {
-                return Some(format!("linear_mpc requires input '{soll}'"));
+            let setpoint = format!("cv.{cv}.setpoint");
+            let process_value = format!("cv.{cv}.process_value");
+            if !input_names.contains(setpoint.as_str()) {
+                return Some(format!("linear_mpc requires input '{setpoint}'"));
             }
-            if !input_names.contains(ist.as_str()) {
-                return Some(format!("linear_mpc requires input '{ist}'"));
+            if !input_names.contains(process_value.as_str()) {
+                return Some(format!("linear_mpc requires input '{process_value}'"));
             }
         }
         for mv in &self.variables.mvs {
@@ -538,8 +538,8 @@ impl ProjectConfig {
     pub fn static_cv_band_defaults(&self) -> HashMap<String, f64> {
         let mut values = HashMap::new();
         for cv in &self.io_definition.cvs {
-            if cv.sollband_opc.as_deref().unwrap_or("").trim().is_empty() {
-                if let Some(value) = cv.sollband_value {
+            if cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
+                if let Some(value) = cv.deadband_value {
                     values.insert(cv.name.clone(), value);
                 }
             }
@@ -564,19 +564,19 @@ impl ProjectConfig {
         vec![
             SidebarTask::new(
                 "communication",
-                "OPC-UA Kommunikation konfigurieren",
+                "Configure OPC UA Communication",
                 !self.communication.endpoint_url.trim().is_empty()
                     && self.communication.io_cycle_ms > 0,
             ),
             SidebarTask::new(
                 "watchdog",
-                "Watchdog definieren",
+                "Define Watchdog",
                 !matches!(self.watchdog, WatchdogConfig::None),
             ),
-            SidebarTask::new("io", "Ein- und Ausgänge definieren", variables_configured),
-            SidebarTask::new("limits", "I/O definieren", io_definition_configured),
+            SidebarTask::new("io", "Define Inputs and Outputs", variables_configured),
+            SidebarTask::new("limits", "Define I/O", io_definition_configured),
             SidebarTask::new("model", "Define Model (optional)", true),
-            SidebarTask::new("logic", "Regellogik hinterlegen", logic_configured),
+            SidebarTask::new("logic", "Configure Control Strategy", logic_configured),
             SidebarTask::new(
                 "kalman_tuning",
                 "Kalman Filter Tuning",
@@ -587,7 +587,7 @@ impl ProjectConfig {
             SidebarTask::new("simulation", "Simulate Controller (optional)", true),
             SidebarTask::new(
                 "deployment",
-                "Deployment konfigurieren",
+                "Configure Deployment",
                 !self.deployment.service_name.is_empty(),
             ),
         ]
@@ -975,29 +975,29 @@ impl IoDefinitionConfig {
                 .find(|row| row.name == *name)
                 .expect("checked by is_complete_for");
 
-            if let Some(addr) = optional_trimmed(&row.soll) {
+            if let Some(addr) = optional_trimmed(&row.setpoint) {
                 inputs.push(SignalPoint {
-                    name: format!("cv.{}.soll", name),
+                    name: format!("cv.{}.setpoint", name),
                     signal_type: SignalType::F64,
                     address: addr,
                     opc_tag: None,
                 });
             }
-            if let Some(addr) = optional_trimmed(&row.ist) {
+            if let Some(addr) = optional_trimmed(&row.process_value) {
                 inputs.push(SignalPoint {
-                    name: format!("cv.{}.ist", name),
+                    name: format!("cv.{}.process_value", name),
                     signal_type: SignalType::F64,
                     address: addr,
                     opc_tag: None,
                 });
             }
 
-            if let Some(sollband_opc) = optional_trimmed(row.sollband_opc.as_deref().unwrap_or(""))
+            if let Some(deadband_opc) = optional_trimmed(row.deadband_opc.as_deref().unwrap_or(""))
             {
                 inputs.push(SignalPoint {
-                    name: format!("cv.{}.sollband", name),
+                    name: format!("cv.{}.deadband", name),
                     signal_type: SignalType::F64,
-                    address: sollband_opc,
+                    address: deadband_opc,
                     opc_tag: None,
                 });
             }
@@ -1124,13 +1124,13 @@ pub struct MvIoDefinition {
 pub struct CvIoDefinition {
     pub name: String,
     #[serde(default)]
-    pub soll: String,
+    pub setpoint: String,
     #[serde(default)]
-    pub ist: String,
+    pub process_value: String,
     #[serde(default)]
-    pub sollband_opc: Option<String>,
+    pub deadband_opc: Option<String>,
     #[serde(default)]
-    pub sollband_value: Option<f64>,
+    pub deadband_value: Option<f64>,
     #[serde(default)]
     pub enable: Option<String>,
 }
@@ -1369,14 +1369,17 @@ impl PControllerLogicConfig {
             }
 
             if !io.inputs.is_empty() || !io.outputs.is_empty() {
-                let soll = format!("cv.{}.soll", pair.cv);
-                let ist = format!("cv.{}.ist", pair.cv);
+                let setpoint = format!("cv.{}.setpoint", pair.cv);
+                let process_value = format!("cv.{}.process_value", pair.cv);
                 let mv_write = format!("mv.{}.write", pair.mv);
-                if !input_set.contains(soll.as_str()) {
-                    bail!("p_controller pair references missing input '{}'", soll);
+                if !input_set.contains(setpoint.as_str()) {
+                    bail!("p_controller pair references missing input '{}'", setpoint);
                 }
-                if !input_set.contains(ist.as_str()) {
-                    bail!("p_controller pair references missing input '{}'", ist);
+                if !input_set.contains(process_value.as_str()) {
+                    bail!(
+                        "p_controller pair references missing input '{}'",
+                        process_value
+                    );
                 }
                 if !output_set.contains(mv_write.as_str()) {
                     bail!("p_controller pair references missing output '{}'", mv_write);
@@ -1393,11 +1396,11 @@ impl PControllerLogicConfig {
         let inputs: HashSet<_> = io.inputs.iter().map(|s| s.name.as_str()).collect();
         let outputs: HashSet<_> = io.outputs.iter().map(|s| s.name.as_str()).collect();
         self.pairs.iter().all(|pair| {
-            let soll = format!("cv.{}.soll", pair.cv);
-            let ist = format!("cv.{}.ist", pair.cv);
+            let setpoint = format!("cv.{}.setpoint", pair.cv);
+            let process_value = format!("cv.{}.process_value", pair.cv);
             let mv_write = format!("mv.{}.write", pair.mv);
-            inputs.contains(soll.as_str())
-                && inputs.contains(ist.as_str())
+            inputs.contains(setpoint.as_str())
+                && inputs.contains(process_value.as_str())
                 && outputs.contains(mv_write.as_str())
         })
     }
@@ -2454,9 +2457,9 @@ mod tests {
         cfg.variables.cvs = vec!["y1".to_string(), "y2".to_string()];
         cfg.variables.dvs = vec!["d1".to_string()];
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_SOL".to_string(),
+            address: "ns=2;s=Y1_SETPOINT".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {
@@ -2466,9 +2469,9 @@ mod tests {
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_IST".to_string(),
+            address: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
             opc_tag: None,
         });
         cfg.logic.p_controller.pairs.push(PControllerPairConfig {
@@ -2634,8 +2637,8 @@ dvs = ["d1"]
 
 [io]
 inputs = [
-  { name = "cv.y1.soll", signal_type = "f64", address = "ns=2;s=Y1_SOL" },
-  { name = "cv.y1.ist", signal_type = "f64", address = "ns=2;s=Y1_IST" }
+  { name = "cv.y1.setpoint", signal_type = "f64", address = "ns=2;s=Y1_SETPOINT" },
+  { name = "cv.y1.process_value", signal_type = "f64", address = "ns=2;s=Y1_PROCESS_VALUE" }
 ]
 outputs = [
   { name = "mv.u1.write", signal_type = "f64", address = "ns=2;s=U1_WRITE" }
@@ -2779,10 +2782,10 @@ description = "SmartAPC controller runtime"
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: String::new(),
-            ist: String::new(),
-            sollband_opc: None,
-            sollband_value: Some(0.0),
+            setpoint: String::new(),
+            process_value: String::new(),
+            deadband_opc: None,
+            deadband_value: Some(0.0),
             enable: None,
         });
         cfg.logic.kind = LogicKind::PController;
@@ -2816,7 +2819,7 @@ description = "SmartAPC controller runtime"
             .iter()
             .map(|signal| signal.name.as_str())
             .collect();
-        assert_eq!(input_names, vec!["cv.y1.soll", "cv.y1.ist"]);
+        assert_eq!(input_names, vec!["cv.y1.setpoint", "cv.y1.process_value"]);
         assert_eq!(output_names, vec!["mv.u1.write"]);
         assert!(sim_limits.values.contains_key("mv.u1.write"));
         assert!(cfg.validate_for_simulation().is_ok());
@@ -2840,10 +2843,10 @@ description = "SmartAPC controller runtime"
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: "ns=2;s=Y1_SOLL".to_string(),
-            ist: "ns=2;s=Y1_IST".to_string(),
-            sollband_opc: None,
-            sollband_value: Some(0.0),
+            setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
+            process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(0.0),
             enable: None,
         });
         cfg.rebuild_runtime_io_from_definition()
@@ -2854,8 +2857,8 @@ description = "SmartAPC controller runtime"
             "logic/custom_strategy/target/release/demo.dll".to_string();
         cfg.logic.custom_rust.required_inputs = vec![
             "mv.u1.read".to_string(),
-            "cv.y1.soll".to_string(),
-            "cv.y1.ist".to_string(),
+            "cv.y1.setpoint".to_string(),
+            "cv.y1.process_value".to_string(),
         ];
         cfg.logic.custom_rust.required_outputs = vec!["mv.u1.write".to_string()];
         cfg.logic.custom_rust.compatible = true;
@@ -2884,7 +2887,10 @@ description = "SmartAPC controller runtime"
             .map(|signal| signal.name.as_str())
             .collect();
 
-        assert_eq!(input_names, vec!["mv.u1.read", "cv.y1.soll", "cv.y1.ist"]);
+        assert_eq!(
+            input_names,
+            vec!["mv.u1.read", "cv.y1.setpoint", "cv.y1.process_value"]
+        );
         assert_eq!(output_names, vec!["mv.u1.write"]);
         assert!(cfg.validate_for_simulation().is_ok());
     }
@@ -2897,12 +2903,12 @@ description = "SmartAPC controller runtime"
         assert!(
             tasks
                 .iter()
-                .any(|task| { task.id == "io" && task.label == "Ein- und Ausgänge definieren" })
+                .any(|task| { task.id == "io" && task.label == "Define Inputs and Outputs" })
         );
         assert!(
             tasks
                 .iter()
-                .any(|task| task.id == "limits" && task.label == "I/O definieren")
+                .any(|task| task.id == "limits" && task.label == "Define I/O")
         );
         assert!(!tasks.iter().any(|task| task.id == "params"));
     }
@@ -2932,15 +2938,15 @@ description = "SmartAPC controller runtime"
     fn custom_logic_compatibility_requires_exact_io_match() {
         let mut cfg = ProjectConfig::new("demo");
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_SOLL".to_string(),
+            address: "ns=2;s=Y1_SETPOINT".to_string(),
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_IST".to_string(),
+            address: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {
@@ -2954,14 +2960,16 @@ description = "SmartAPC controller runtime"
         cfg.logic.custom_rust.source_path = "logic/custom_strategy/src/lib.rs".to_string();
         cfg.logic.custom_rust.artifact_path =
             "logic/custom_strategy/target/release/demo.dll".to_string();
-        cfg.logic.custom_rust.required_inputs = vec!["cv.y1.soll".to_string()];
+        cfg.logic.custom_rust.required_inputs = vec!["cv.y1.setpoint".to_string()];
         cfg.logic.custom_rust.required_outputs = vec!["mv.u1.write".to_string()];
         cfg.logic.custom_rust.compatible = true;
 
         assert!(!cfg.logic.custom_rust.is_compatible_with(&cfg.io));
 
-        cfg.logic.custom_rust.required_inputs =
-            vec!["cv.y1.soll".to_string(), "cv.y1.ist".to_string()];
+        cfg.logic.custom_rust.required_inputs = vec![
+            "cv.y1.setpoint".to_string(),
+            "cv.y1.process_value".to_string(),
+        ];
         assert!(cfg.logic.custom_rust.is_compatible_with(&cfg.io));
     }
 
@@ -3010,15 +3018,15 @@ description = "SmartAPC controller runtime"
         cfg.variables.mvs = vec!["u1".to_string()];
         cfg.variables.cvs = vec!["y1".to_string()];
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.soll".to_string(),
+            name: "cv.y1.setpoint".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_SOL".to_string(),
+            address: "ns=2;s=Y1_SETPOINT".to_string(),
             opc_tag: None,
         });
         cfg.io.inputs.push(SignalPoint {
-            name: "cv.y1.ist".to_string(),
+            name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=Y1_IST".to_string(),
+            address: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {
@@ -3050,10 +3058,10 @@ description = "SmartAPC controller runtime"
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: "ns=2;s=Y1_SOL".to_string(),
-            ist: "ns=2;s=Y1_IST".to_string(),
-            sollband_opc: None,
-            sollband_value: Some(2.0),
+            setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
+            process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(2.0),
             enable: None,
         });
         cfg.rebuild_runtime_io_from_definition()
@@ -3126,11 +3134,11 @@ description = "SmartAPC controller runtime"
                 traces: vec![
                     CustomPlotTraceConfig {
                         direction: "input".to_string(),
-                        signal: "cv.y1.ist".to_string(),
+                        signal: "cv.y1.process_value".to_string(),
                     },
                     CustomPlotTraceConfig {
                         direction: "input".to_string(),
-                        signal: "cv.y1.ist".to_string(),
+                        signal: "cv.y1.process_value".to_string(),
                     },
                 ],
             },

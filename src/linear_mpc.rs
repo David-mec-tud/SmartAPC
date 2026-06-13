@@ -786,10 +786,10 @@ impl ControlLogic for LinearMpcLogic {
         if !self.all_enabled(inputs) {
             return Ok(HashMap::new());
         }
-        let Some(y_measured) = self.read_cv_vector(inputs, "ist") else {
+        let Some(y_measured) = self.read_cv_vector(inputs, "process_value") else {
             return Ok(HashMap::new());
         };
-        let Some(setpoints) = self.read_cv_vector(inputs, "soll") else {
+        let Some(setpoints) = self.read_cv_vector(inputs, "setpoint") else {
             return Ok(HashMap::new());
         };
 
@@ -1062,8 +1062,8 @@ mod tests {
             .params
             .insert("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0e-6));
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(10.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(10.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.0));
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         let u = outputs
             .get("mv.u1.write")
@@ -1080,8 +1080,8 @@ mod tests {
             LogicParamValue::F64(10.0),
         );
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(10.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(10.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.0));
         inputs.insert("mv.u1.hl".to_string(), SignalValue::F64(0.5));
         inputs.insert("mv.u1.ll".to_string(), SignalValue::F64(-0.5));
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
@@ -1104,8 +1104,8 @@ mod tests {
             .insert("mpc.control_horizon".to_string(), LogicParamValue::F64(2.0));
 
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(2.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(2.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.0));
 
         let _outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         let logs = logic.drain_user_logs();
@@ -1129,8 +1129,8 @@ mod tests {
             .params
             .insert("mpc.cv.y1.band_high".to_string(), LogicParamValue::F64(1.0));
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(0.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.2));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(0.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.2));
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         let u = outputs
             .get("mv.u1.write")
@@ -1152,8 +1152,8 @@ mod tests {
             .params
             .insert("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0e-6));
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(1.0));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.0));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(1.0));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.0));
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         let u = outputs
             .get("mv.u1.write")
@@ -1201,8 +1201,8 @@ mod tests {
         logic.y_bias[0] = 0.5;
         logic.initialized = true;
         let mut inputs = HashMap::new();
-        inputs.insert("cv.y1.soll".to_string(), SignalValue::F64(0.5));
-        inputs.insert("cv.y1.ist".to_string(), SignalValue::F64(0.5));
+        inputs.insert("cv.y1.setpoint".to_string(), SignalValue::F64(0.5));
+        inputs.insert("cv.y1.process_value".to_string(), SignalValue::F64(0.5));
 
         let outputs = logic.step(&inputs, RuntimeState::Running).expect("step");
         let u = outputs

@@ -335,7 +335,7 @@ mod tests {
         let dir = tempdir().expect("tmp dir");
         let db = SqliteStorage::new(dir.path().join("samples.sqlite")).expect("create db");
 
-        db.store_signal("input", "cv.y1.soll", &SignalValue::F64(1.0))
+        db.store_signal("input", "cv.y1.setpoint", &SignalValue::F64(1.0))
             .expect("store first");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let cutoff = now_ms();
@@ -354,7 +354,7 @@ mod tests {
         let dir = tempdir().expect("tmp dir");
         let db = SqliteStorage::new(dir.path().join("samples.sqlite")).expect("create db");
 
-        db.store_signal("input", "cv.y1.ist", &SignalValue::F64(1.0))
+        db.store_signal("input", "cv.y1.process_value", &SignalValue::F64(1.0))
             .expect("store input");
         db.store_signal("online_param", "p.y1.u1.kp", &SignalValue::F64(2.0))
             .expect("store param");
@@ -364,7 +364,7 @@ mod tests {
         let catalog = db.read_series_catalog().expect("catalog");
         assert!(catalog.contains(&SeriesCatalogEntry {
             direction: "input".to_string(),
-            signal: "cv.y1.ist".to_string(),
+            signal: "cv.y1.process_value".to_string(),
             value_kind: SampleValueKind::F64,
         }));
         assert!(catalog.contains(&SeriesCatalogEntry {

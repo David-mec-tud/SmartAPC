@@ -57,7 +57,7 @@
 - Ensure logging additions are structured and testable (runtime log entries must be machine-parseable).
 
 ## 9. Custom Rust Strategy Workflow (Quick Reference)
-1. Generate template in Regellogik tab.
+1. Generate template in Control Strategy tab.
 2. Edit `control(...)` in `projects/<project>/logic/custom_strategy/src/lib.rs`.
 3. Build/check strategy via UI button.
 4. Verify compatibility result against current I/O definition.

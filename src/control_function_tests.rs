@@ -727,7 +727,7 @@ fn default_numeric_input_baseline(config: &ProjectConfig, signal_name: &str) -> 
         if let (Some(name), Some(suffix)) = (parts.next(), parts.next()) {
             if let Some(row) = config.io_definition.cvs.iter().find(|row| row.name == name) {
                 return match suffix {
-                    "sollband" => row.sollband_value.unwrap_or(0.0),
+                    "deadband" => row.deadband_value.unwrap_or(0.0),
                     _ => 0.0,
                 };
             }
@@ -757,11 +757,11 @@ fn default_numeric_input_range(
         let mut parts = rest.split('.');
         if let (Some(name), Some(suffix)) = (parts.next(), parts.next()) {
             if let Some(row) = config.io_definition.cvs.iter().find(|row| row.name == name) {
-                if suffix == "sollband" {
-                    let band = row.sollband_value.unwrap_or(1.0).abs().max(1.0);
+                if suffix == "deadband" {
+                    let band = row.deadband_value.unwrap_or(1.0).abs().max(1.0);
                     return (0.0, band * 2.0);
                 }
-                if let Some(band) = row.sollband_value {
+                if let Some(band) = row.deadband_value {
                     return symmetric_range(baseline, band.abs().max(1.0), false);
                 }
             }
@@ -776,7 +776,7 @@ fn default_numeric_param_range(name: &str, baseline: f64) -> (f64, f64) {
 }
 
 fn default_numeric_range(name: &str, baseline: f64) -> (f64, f64) {
-    let non_negative = name.ends_with(".kp") || name.ends_with(".sollband");
+    let non_negative = name.ends_with(".kp") || name.ends_with(".deadband");
     let span = baseline.abs().max(1.0);
     symmetric_range(baseline, span, non_negative)
 }
@@ -866,10 +866,10 @@ mod tests {
             }],
             cvs: vec![CvIoDefinition {
                 name: "y1".to_string(),
-                soll: "ns=2;s=y1_soll".to_string(),
-                ist: "ns=2;s=y1_ist".to_string(),
-                sollband_opc: None,
-                sollband_value: Some(2.0),
+                setpoint: "ns=2;s=y1_setpoint".to_string(),
+                process_value: "ns=2;s=y1_ist".to_string(),
+                deadband_opc: None,
+                deadband_value: Some(2.0),
                 enable: Some("ns=2;s=y1_enable".to_string()),
             }],
             dvs: Vec::new(),
@@ -899,7 +899,7 @@ mod tests {
         let cfg = base_config();
         let dimensions = default_sweep_dimensions(&cfg);
 
-        assert!(dimensions.iter().any(|dim| dim.name == "cv.y1.soll"));
+        assert!(dimensions.iter().any(|dim| dim.name == "cv.y1.setpoint"));
         assert!(dimensions.iter().any(|dim| dim.name == "cv.y1.enable"));
         assert!(dimensions.iter().any(|dim| dim.name == "p.y1.u1.kp"));
 
@@ -921,7 +921,7 @@ mod tests {
         let selections = vec![
             SweepSelection {
                 kind: SweepDimensionKind::Input,
-                name: "cv.y1.soll".to_string(),
+                name: "cv.y1.setpoint".to_string(),
                 enabled: true,
                 numeric: Some(NumericSweepConfig {
                     min: -2.0,
@@ -931,7 +931,7 @@ mod tests {
             },
             SweepSelection {
                 kind: SweepDimensionKind::Input,
-                name: "cv.y1.ist".to_string(),
+                name: "cv.y1.process_value".to_string(),
                 enabled: true,
                 numeric: Some(NumericSweepConfig {
                     min: -2.0,
@@ -954,7 +954,7 @@ mod tests {
         let selections = vec![
             SweepSelection {
                 kind: SweepDimensionKind::Input,
-                name: "cv.y1.soll".to_string(),
+                name: "cv.y1.setpoint".to_string(),
                 enabled: true,
                 numeric: Some(NumericSweepConfig {
                     min: -1.0,
@@ -964,7 +964,7 @@ mod tests {
             },
             SweepSelection {
                 kind: SweepDimensionKind::Input,
-                name: "cv.y1.ist".to_string(),
+                name: "cv.y1.process_value".to_string(),
                 enabled: true,
                 numeric: Some(NumericSweepConfig {
                     min: -1.0,

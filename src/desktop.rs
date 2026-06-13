@@ -184,14 +184,14 @@ impl MvIoEditorRow {
 #[derive(Debug, Clone)]
 struct CvIoEditorRow {
     name: String,
-    soll: String,
-    ist: String,
-    sollband_value: String,
-    sollband_opc: String,
+    setpoint: String,
+    process_value: String,
+    deadband_value: String,
+    deadband_opc: String,
     enable: String,
-    read_soll: String,
-    read_ist: String,
-    read_sollband: String,
+    read_setpoint: String,
+    read_process_value: String,
+    read_deadband: String,
     read_enable: String,
     test_write: String,
 }
@@ -200,14 +200,14 @@ impl CvIoEditorRow {
     fn blank() -> Self {
         Self {
             name: String::new(),
-            soll: String::new(),
-            ist: String::new(),
-            sollband_value: String::new(),
-            sollband_opc: String::new(),
+            setpoint: String::new(),
+            process_value: String::new(),
+            deadband_value: String::new(),
+            deadband_opc: String::new(),
             enable: String::new(),
-            read_soll: String::new(),
-            read_ist: String::new(),
-            read_sollband: String::new(),
+            read_setpoint: String::new(),
+            read_process_value: String::new(),
+            read_deadband: String::new(),
             read_enable: String::new(),
             test_write: String::new(),
         }
@@ -216,17 +216,17 @@ impl CvIoEditorRow {
     fn from_definition(def: &CvIoDefinition) -> Self {
         Self {
             name: def.name.clone(),
-            soll: def.soll.clone(),
-            ist: def.ist.clone(),
-            sollband_value: def
-                .sollband_value
+            setpoint: def.setpoint.clone(),
+            process_value: def.process_value.clone(),
+            deadband_value: def
+                .deadband_value
                 .map(|v| format!("{v}"))
                 .unwrap_or_default(),
-            sollband_opc: def.sollband_opc.clone().unwrap_or_default(),
+            deadband_opc: def.deadband_opc.clone().unwrap_or_default(),
             enable: def.enable.clone().unwrap_or_default(),
-            read_soll: String::new(),
-            read_ist: String::new(),
-            read_sollband: String::new(),
+            read_setpoint: String::new(),
+            read_process_value: String::new(),
+            read_deadband: String::new(),
             read_enable: String::new(),
             test_write: String::new(),
         }
@@ -653,9 +653,9 @@ enum LogicKindChoice {
 impl fmt::Display for LogicKindChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PController => write!(f, "P-Regler"),
+            Self::PController => write!(f, "P Controller"),
             Self::LinearMpc => write!(f, "Linear MPC"),
-            Self::CustomRust => write!(f, "Eigene Regellogik"),
+            Self::CustomRust => write!(f, "Custom Control Strategy"),
         }
     }
 }
@@ -1244,18 +1244,18 @@ impl SetupPage {
 
     fn title(self) -> &'static str {
         match self {
-            Self::Communication => "OPC-UA Kommunikation",
+            Self::Communication => "OPC UA Communication",
             Self::Watchdog => "Watchdog",
-            Self::Io => "Ein- und Ausgänge",
-            Self::Limits => "I/O definieren",
+            Self::Io => "Inputs and Outputs",
+            Self::Limits => "Define I/O",
             Self::Model => "Define Model",
-            Self::Logic => "Regellogik",
+            Self::Logic => "Control Strategy",
             Self::KalmanTuning => "Kalman Filter Tuning",
             Self::Optimization => "Parameter Optimization",
             Self::Timing => "Control Function Tests",
             Self::Simulation => "Simulate Controller",
             Self::Deployment => "Deployment",
-            Self::Params => "Online Parameter",
+            Self::Params => "Online Parameters",
             Self::Plots => "Plots",
         }
     }
@@ -1313,9 +1313,9 @@ struct MvReadValues {
 
 #[derive(Debug, Clone)]
 struct CvReadValues {
-    soll: String,
-    ist: String,
-    sollband: String,
+    setpoint: String,
+    process_value: String,
+    deadband: String,
     enable: String,
 }
 
@@ -1376,10 +1376,10 @@ enum Message {
     MvLlChanged(usize, String),
     MvEnableChanged(usize, String),
     MvTestWriteChanged(usize, String),
-    CvSollChanged(usize, String),
+    CvSetpointChanged(usize, String),
     CvIstChanged(usize, String),
-    CvSollbandValueChanged(usize, String),
-    CvSollbandOpcChanged(usize, String),
+    CvDeadbandValueChanged(usize, String),
+    CvDeadbandOpcChanged(usize, String),
     CvEnableChanged(usize, String),
     CvTestWriteChanged(usize, String),
     DvReadChanged(usize, String),
@@ -1436,8 +1436,8 @@ enum Message {
     OptimizationAutosaved(Result<String, String>),
     StartOptimizationPressed,
     CancelOptimizationPressed,
-    UseOptimizedParametersPressed,
-    OptimizedParametersApplied(Result<String, String>),
+    UseOptimizedparametersPressed,
+    OptimizedparametersApplied(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     AddPControllerPair,
     PPairCvChanged(usize, String),
@@ -1450,7 +1450,7 @@ enum Message {
     ImportKalmanCsvPressed,
     KalmanCsvImported(Result<Option<KalmanDataset>, String>),
     SaveKalmanParametersPressed,
-    KalmanParametersSaved(Result<HashMap<String, LogicParamValue>, String>),
+    KalmanparametersSaved(Result<HashMap<String, LogicParamValue>, String>),
     RunObserverPressed,
     ObserverFinished(Result<String, String>),
     OpenKalmanPlotsPressed,
@@ -1557,7 +1557,7 @@ impl DesktopApp {
             cv_io_rows: Vec::new(),
             dv_io_rows: Vec::new(),
             watchdog_editor: WatchdogEditorState::blank(),
-            status_message: format!("Projektordner: {}", settings.project_root.display()),
+            status_message: format!("Project directory: {}", settings.project_root.display()),
             error_message: None,
         };
 
@@ -1686,7 +1686,7 @@ impl DesktopApp {
             let Some(row) = self.cv_io_rows.iter().find(|row| row.name == *cv) else {
                 return false;
             };
-            if row.soll.trim().is_empty() || row.ist.trim().is_empty() {
+            if row.setpoint.trim().is_empty() || row.process_value.trim().is_empty() {
                 return false;
             }
         }
@@ -1806,15 +1806,15 @@ impl DesktopApp {
                     match result {
                         Ok(report) => {
                             self.status_message = if report.cancelled {
-                                "Parameteroptimierung abgebrochen".to_string()
+                                "parameter optimization cancelled".to_string()
                             } else if report.converged {
                                 format!(
-                                    "Parameteroptimierung konvergiert: Score {:.6}",
+                                    "Parameter optimization converged: Score {:.6}",
                                     report.best_score
                                 )
                             } else {
                                 format!(
-                                    "Parameteroptimierung abgeschlossen: Score {:.6}",
+                                    "parameter optimization completed: Score {:.6}",
                                     report.best_score
                                 )
                             };
@@ -1875,7 +1875,7 @@ impl DesktopApp {
                     if self.selected_project.is_none() && !self.projects.is_empty() {
                         let selected = self.projects[0].clone();
                         self.selected_project = Some(selected.clone());
-                        self.status_message = format!("Projekt '{}' ausgewählt", selected);
+                        self.status_message = format!("Project '{}' selected", selected);
                         return load_project_panel_task(self.project_service.clone(), selected);
                     }
                     Task::none()
@@ -1889,7 +1889,7 @@ impl DesktopApp {
                 self.selected_project = Some(project_name.clone());
                 self.collapsed_parameter_sections.clear();
                 self.kalman_tuning_editor = KalmanTuningEditorState::blank();
-                self.status_message = format!("Projekt '{}' ausgewählt", project_name);
+                self.status_message = format!("Project '{}' selected", project_name);
                 self.error_message = None;
                 load_project_panel_task(self.project_service.clone(), project_name)
             }
@@ -1998,7 +1998,7 @@ impl DesktopApp {
                 match result {
                     Ok(Some(dataset)) => {
                         self.status_message = format!(
-                            "CSV '{}' importiert: {} Zeilen",
+                            "CSV '{}' imported: {} rows",
                             dataset.file_name,
                             dataset.row_count()
                         );
@@ -2013,13 +2013,12 @@ impl DesktopApp {
             }
             Message::SaveKalmanParametersPressed => {
                 if self.execution_active() {
-                    self.error_message = Some(
-                        "Ausführung läuft. Parameter können nicht gespeichert werden.".to_string(),
-                    );
+                    self.error_message =
+                        Some("Execution running. parameter cannot be saved.".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 save_kalman_parameters_task(
@@ -2028,13 +2027,13 @@ impl DesktopApp {
                     self.kalman_tuning_editor.params.clone(),
                 )
             }
-            Message::KalmanParametersSaved(result) => {
+            Message::KalmanparametersSaved(result) => {
                 match result {
                     Ok(params) => {
                         for (key, value) in params {
                             self.logic_params.insert(key, value);
                         }
-                        self.status_message = "Kalman-Parameter gespeichert".to_string();
+                        self.status_message = "Kalman parameters saved".to_string();
                         self.error_message = None;
                     }
                     Err(err) => self.error_message = Some(err),
@@ -2044,16 +2043,15 @@ impl DesktopApp {
             Message::RunObserverPressed => {
                 if self.execution_active() {
                     self.error_message =
-                        Some("Ausführung läuft. Observer-Replay ist deaktiviert.".to_string());
+                        Some("Execution running. Observer-Replay is disabled.".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 let Some(dataset) = self.kalman_tuning_editor.dataset.clone() else {
-                    self.error_message =
-                        Some("Bitte zuerst eine CSV-Datei importieren".to_string());
+                    self.error_message = Some("Import a CSV file first".to_string());
                     return Task::none();
                 };
                 run_observer_task(
@@ -2079,7 +2077,7 @@ impl DesktopApp {
                     (self.plots_web_url(), self.selected_project.as_ref())
                 else {
                     self.error_message =
-                        Some("Web API ist deaktiviert. Desktop ohne --no-web starten.".to_string());
+                        Some("Web API is disabled. Desktop without --no-web start.".to_string());
                     return Task::none();
                 };
                 let base = base.trim_end_matches("/plots");
@@ -2100,12 +2098,13 @@ impl DesktopApp {
             Message::SaveLogicPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für Logik-Änderungen bitte erst stoppen.".to_string(),
+                        "Execution is running. Stop it before control strategy changes."
+                            .to_string(),
                     );
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 save_logic_task(
@@ -2132,7 +2131,7 @@ impl DesktopApp {
             },
             Message::GenerateLogicTemplatePressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 generate_logic_template_task(self.project_service.clone(), project_name)
@@ -2154,7 +2153,7 @@ impl DesktopApp {
             },
             Message::BuildCustomLogicPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 build_custom_logic_task(self.project_service.clone(), project_name)
@@ -2225,13 +2224,12 @@ impl DesktopApp {
             Message::RunControlFunctionTestsPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für Control Function Tests bitte erst stoppen."
-                            .to_string(),
+                        "Execution is running. Stop it before Control Function Tests.".to_string(),
                     );
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 self.error_message = None;
@@ -2244,7 +2242,7 @@ impl DesktopApp {
             Message::ControlFunctionTestsFinished(result) => match result {
                 Ok(report) => {
                     self.status_message = format!(
-                        "Control Function Tests abgeschlossen: {} Fälle",
+                        "Control Function Tests completed: {} cases",
                         report.execution.executed_case_count
                     );
                     self.control_function_tests.last_report = Some(report);
@@ -2263,7 +2261,7 @@ impl DesktopApp {
             Message::CreateProjectPressed => {
                 let name = self.new_project_name.trim().to_string();
                 if name.is_empty() {
-                    self.error_message = Some("Projektname darf nicht leer sein".to_string());
+                    self.error_message = Some("Project name must not be empty".to_string());
                     return Task::none();
                 }
                 create_project_task(self.project_service.clone(), name)
@@ -2272,7 +2270,7 @@ impl DesktopApp {
                 Ok(project_name) => {
                     self.new_project_name.clear();
                     self.selected_project = Some(project_name.clone());
-                    self.status_message = format!("Projekt '{}' erstellt", project_name);
+                    self.status_message = format!("Created project '{}'", project_name);
                     self.error_message = None;
                     Task::batch(vec![
                         load_projects_task(self.project_service.clone()),
@@ -2286,7 +2284,7 @@ impl DesktopApp {
             },
             Message::StartRuntimePressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 start_runtime_task(
@@ -2334,18 +2332,18 @@ impl DesktopApp {
             }
             Message::ApplyParamPressed(key) => {
                 let Some(raw_value) = self.param_inputs.get(&key).cloned() else {
-                    self.error_message = Some(format!("Kein Eingabewert für Parameter '{}'", key));
+                    self.error_message = Some(format!("No input value for parameter '{}'", key));
                     return Task::none();
                 };
                 let Some(current) = self.logic_params.get(&key) else {
-                    self.error_message = Some(format!("Unbekannter Parameter '{}'", key));
+                    self.error_message = Some(format!("Unknown parameter '{}'", key));
                     return Task::none();
                 };
                 let parsed = match parse_logic_param_input(current, &raw_value) {
                     Ok(value) => value,
                     Err(err) => {
                         self.error_message = Some(format!(
-                            "Ungültiger Wert '{}' für Parameter '{}': {}",
+                            "Invalid value '{}' for parameter '{}': {}",
                             raw_value, key, err
                         ));
                         return Task::none();
@@ -2363,7 +2361,7 @@ impl DesktopApp {
                     self.param_dirty_keys.remove(&updated.key);
                     self.logic_params = updated.params;
                     self.refresh_param_inputs_preserving_dirty();
-                    self.status_message = "Parameter übernommen und persistiert".to_string();
+                    self.status_message = "parameter applied and persisted".to_string();
                     self.error_message = None;
                     Task::none()
                 }
@@ -2378,7 +2376,7 @@ impl DesktopApp {
                     return Task::none();
                 };
 
-                self.web_status = WebStatus::Starting(format!("Web API startet auf {}", bind));
+                self.web_status = WebStatus::Starting(format!("Web API starting on {}", bind));
                 start_web_task(
                     self.project_service.clone(),
                     Arc::clone(&self.runtime),
@@ -2403,7 +2401,7 @@ impl DesktopApp {
             Message::OpenPlotsWebPressed => {
                 let Some(url) = self.plots_web_url() else {
                     self.error_message =
-                        Some("Web API ist deaktiviert. Desktop ohne --no-web starten.".to_string());
+                        Some("Web API is disabled. Desktop without --no-web start.".to_string());
                     return Task::none();
                 };
                 open_url_task(url)
@@ -2430,14 +2428,13 @@ impl DesktopApp {
             Message::SaveCommunicationPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für Kommunikations-Änderungen bitte erst stoppen."
-                            .to_string(),
+                        "Execution is running. Stop it before communication changes.".to_string(),
                     );
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2485,14 +2482,14 @@ impl DesktopApp {
             Message::SaveWatchdogPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Execution is running. Stop it before structural configuration changes."
                             .to_string(),
                     );
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2504,14 +2501,13 @@ impl DesktopApp {
             }
             Message::TestWatchdogPressed => {
                 if self.execution_active() {
-                    self.error_message = Some(
-                        "Ausführung läuft. Für den Watchdog-Test bitte erst stoppen.".to_string(),
-                    );
+                    self.error_message =
+                        Some("Execution is running. Stop it before the watchdog test.".to_string());
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2586,14 +2582,14 @@ impl DesktopApp {
             Message::SaveVariablesPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Execution is running. Stop it before structural configuration changes."
                             .to_string(),
                     );
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2670,29 +2666,29 @@ impl DesktopApp {
                 }
                 Task::none()
             }
-            Message::CvSollChanged(index, value) => {
+            Message::CvSetpointChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
-                    row.soll = value;
-                    row.read_soll.clear();
+                    row.setpoint = value;
+                    row.read_setpoint.clear();
                 }
                 Task::none()
             }
             Message::CvIstChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
-                    row.ist = value;
-                    row.read_ist.clear();
+                    row.process_value = value;
+                    row.read_process_value.clear();
                 }
                 Task::none()
             }
-            Message::CvSollbandValueChanged(index, value) => {
+            Message::CvDeadbandValueChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
-                    row.sollband_value = value;
+                    row.deadband_value = value;
                 }
                 Task::none()
             }
-            Message::CvSollbandOpcChanged(index, value) => {
+            Message::CvDeadbandOpcChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
-                    row.sollband_opc = value;
+                    row.deadband_opc = value;
                 }
                 Task::none()
             }
@@ -2723,7 +2719,7 @@ impl DesktopApp {
             }
             Message::TestIoDefinitionReadPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2739,7 +2735,7 @@ impl DesktopApp {
             }
             Message::TestIoDefinitionWritePressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2761,16 +2757,16 @@ impl DesktopApp {
                         row.read_enable = value.enable;
                     }
                     for (row, value) in self.cv_io_rows.iter_mut().zip(values.cv_values) {
-                        row.read_soll = value.soll;
-                        row.read_ist = value.ist;
-                        row.read_sollband = value.sollband;
+                        row.read_setpoint = value.setpoint;
+                        row.read_process_value = value.process_value;
+                        row.read_deadband = value.deadband;
                         row.read_enable = value.enable;
                     }
                     for (row, value) in self.dv_io_rows.iter_mut().zip(values.dv_values) {
                         row.read_read = value.read;
                         row.read_enable = value.enable;
                     }
-                    self.status_message = "I/O OPC-UA Read-Test abgeschlossen".to_string();
+                    self.status_message = "I/O OPC UA Read-Test completed".to_string();
                     self.error_message = None;
                     Task::none()
                 }
@@ -2793,14 +2789,14 @@ impl DesktopApp {
             Message::SaveIoDefinitionPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für strukturelle Konfig-Änderungen bitte erst stoppen."
+                        "Execution is running. Stop it before structural configuration changes."
                             .to_string(),
                     );
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2885,14 +2881,13 @@ impl DesktopApp {
             }
             Message::SaveModelPressed => {
                 if self.execution_active() {
-                    self.error_message = Some(
-                        "Ausführung läuft. Für Modell-Änderungen bitte erst stoppen.".to_string(),
-                    );
+                    self.error_message =
+                        Some("Execution is running. Stop it before model changes.".to_string());
                     return Task::none();
                 }
 
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
 
@@ -2995,7 +2990,7 @@ impl DesktopApp {
             }
             Message::StartSimulationPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 self.sync_stopped_simulation_startup_state();
@@ -3152,17 +3147,16 @@ impl DesktopApp {
             Message::StartOptimizationPressed => {
                 if self.execution_active() {
                     self.error_message = Some(
-                        "Ausführung läuft. Für Parameteroptimierung bitte erst stoppen."
-                            .to_string(),
+                        "Execution is running. Stop it before parameter optimization.".to_string(),
                     );
                     return Task::none();
                 }
                 if self.optimization_job.is_some() {
-                    self.error_message = Some("Parameteroptimierung läuft bereits".to_string());
+                    self.error_message = Some("parameter optimization running already".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 match save_optimization_config_now(
@@ -3194,7 +3188,7 @@ impl DesktopApp {
                             handle: Some(handle),
                         });
                         self.status_message =
-                            format!("Parameteroptimierung für '{}' gestartet", project_name);
+                            format!("Started parameter optimization for '{}'", project_name);
                         self.error_message = None;
                         Task::none()
                     }
@@ -3207,17 +3201,17 @@ impl DesktopApp {
             Message::CancelOptimizationPressed => {
                 if let Some(job) = self.optimization_job.as_ref() {
                     job.cancel.store(true, Ordering::Relaxed);
-                    self.status_message = "Parameteroptimierung wird abgebrochen".to_string();
+                    self.status_message = "parameter optimization is cancelled".to_string();
                 }
                 Task::none()
             }
-            Message::UseOptimizedParametersPressed => {
+            Message::UseOptimizedparametersPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
-                    self.error_message = Some("Bitte zuerst ein Projekt auswählen".to_string());
+                    self.error_message = Some("Select a project first".to_string());
                     return Task::none();
                 };
                 let Some(report) = self.optimization_editor.last_report.clone() else {
-                    self.error_message = Some("Keine optimierten Parameter vorhanden".to_string());
+                    self.error_message = Some("No optimized parameters available".to_string());
                     return Task::none();
                 };
                 apply_optimized_parameters_task(
@@ -3226,7 +3220,7 @@ impl DesktopApp {
                     report.best_params,
                 )
             }
-            Message::OptimizedParametersApplied(result) => match result {
+            Message::OptimizedparametersApplied(result) => match result {
                 Ok(status) => {
                     self.status_message = status;
                     self.error_message = None;
@@ -3275,34 +3269,34 @@ impl DesktopApp {
             self.selected_project.clone(),
             Message::ProjectSelected,
         )
-        .placeholder("Projekt wählen")
+        .placeholder("Select Project")
         .width(Length::Fixed(260.0));
 
         let create_button = if self.new_project_name.trim().is_empty() {
-            button("Projekt erstellen")
+            button("Create Project")
         } else {
-            button("Projekt erstellen").on_press(Message::CreateProjectPressed)
+            button("Create Project").on_press(Message::CreateProjectPressed)
         };
 
         let web_button = match self.web_status {
             WebStatus::Disabled | WebStatus::Running(_) | WebStatus::Starting(_) => {
-                button("Web API läuft")
+                button("Web API running")
             }
-            WebStatus::Error(_) => button("Web API neu starten").on_press(Message::StartWebPressed),
+            WebStatus::Error(_) => button("Restart Web API").on_press(Message::StartWebPressed),
         };
 
         let web_hint = match &self.web_status {
-            WebStatus::Disabled => "Web API deaktiviert".to_string(),
+            WebStatus::Disabled => "Web API disabled".to_string(),
             WebStatus::Starting(msg) => msg.clone(),
             WebStatus::Running(msg) => msg.clone(),
-            WebStatus::Error(msg) => format!("Web API Fehler: {}", msg),
+            WebStatus::Error(msg) => format!("Web API Error: {}", msg),
         };
 
         container(
             row![
-                text("Projekt").width(Length::Fixed(56.0)),
+                text("Project").width(Length::Fixed(56.0)),
                 project_selector,
-                text_input("Neuer Projektname", &self.new_project_name)
+                text_input("New project name", &self.new_project_name)
                     .on_input(Message::NewProjectNameChanged)
                     .width(Length::Fixed(220.0)),
                 create_button,
@@ -3320,20 +3314,20 @@ impl DesktopApp {
         let runtime_running = self.runtime_running();
         let execution_active = self.execution_active();
         let start_button = if self.selected_project.is_some() && !execution_active {
-            button("Runtime Start").on_press(Message::StartRuntimePressed)
+            button("Start Runtime").on_press(Message::StartRuntimePressed)
         } else {
-            button("Runtime Start")
+            button("Start Runtime")
         };
 
         let stop_button = if runtime_running {
-            button("Runtime Stop").on_press(Message::StopRuntimePressed)
+            button("Stop Runtime").on_press(Message::StopRuntimePressed)
         } else {
-            button("Runtime Stop")
+            button("Stop Runtime")
         };
 
         let summary = match &self.active_snapshot {
             Some(ExecutionSnapshot::Runtime(snapshot)) => format!(
-                "Runtime | Projekt={} | State={:?} | Watchdog={:?} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
+                "Runtime | Project={} | State={:?} | Watchdog={:?} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
                 snapshot.project_name,
                 snapshot.state,
                 snapshot.watchdog_status,
@@ -3343,14 +3337,14 @@ impl DesktopApp {
                 snapshot.metrics.last_jitter_us
             ),
             Some(ExecutionSnapshot::Simulation(snapshot)) => format!(
-                "Simulation | Projekt={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
+                "Simulation | Project={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
                 snapshot.project_name,
                 snapshot.state,
                 snapshot.simulation_time_s,
                 snapshot.metrics.total_cycles,
                 snapshot.metrics.last_duration_us
             ),
-            None => "Keine aktive Runtime/Simulation".to_string(),
+            None => "No active runtime or simulation".to_string(),
         };
 
         container(row![start_button, stop_button, text(summary).size(14)].spacing(12))
@@ -3359,9 +3353,9 @@ impl DesktopApp {
     }
 
     fn sidebar_view(&self) -> Element<'_, Message> {
-        let mut content = column![text("Setup Aufgaben").size(20)].spacing(8);
+        let mut content = column![text("Setup Tasks").size(20)].spacing(8);
         if self.sidebar_tasks.is_empty() {
-            content = content.push(text("Kein Projekt geladen."));
+            content = content.push(text("No project loaded."));
         } else {
             for task in &self.sidebar_tasks {
                 if task.id == "params" {
@@ -3428,7 +3422,7 @@ impl DesktopApp {
             SetupPage::Simulation => self.simulation_editor_view(),
             SetupPage::Deployment => self.placeholder_page_view(
                 SetupPage::Deployment,
-                "Hier folgt ein Deployment-Assistent (Install/Start/Stop) für Windows-Service-Betrieb.",
+                "Here is next a Deployment-wizard (Install/Start/Stop) for Windows-Service-operation.",
             ),
             SetupPage::Params => self.params_view(),
             SetupPage::Plots => self.plots_view(),
@@ -3444,7 +3438,7 @@ impl DesktopApp {
             column![
                 text(page.title()).size(24),
                 text(description).size(15),
-                text("Status: Platzhalterseite, noch keine Eingabefelder.").size(14)
+                text("Status: placeholder page, still no input fields.").size(14)
             ]
             .spacing(12),
         )
@@ -3498,7 +3492,7 @@ impl DesktopApp {
 
         if runtime_running {
             content = content.push(
-                text("Runtime oder Simulation läuft: erst stoppen, dann Modell ändern.").size(13),
+                text("Runtime or Simulation running: first stop, then Model change.").size(13),
             );
         }
 
@@ -3611,7 +3605,7 @@ impl DesktopApp {
 
         let summary = match &self.active_snapshot {
             Some(ExecutionSnapshot::Simulation(snapshot)) => format!(
-                "Simulation aktiv | Projekt={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
+                "Simulation active | Project={} | State={:?} | t={:.1}s | Cycles={} | LastDuration={}us",
                 snapshot.project_name,
                 snapshot.state,
                 snapshot.simulation_time_s,
@@ -3619,15 +3613,15 @@ impl DesktopApp {
                 snapshot.metrics.last_duration_us
             ),
             Some(ExecutionSnapshot::Runtime(snapshot)) => format!(
-                "Runtime aktiv | Projekt={} | State={:?}",
+                "Runtime active | Project={} | State={:?}",
                 snapshot.project_name, snapshot.state
             ),
-            None => "Simulation nicht aktiv".to_string(),
+            None => "Simulation not active".to_string(),
         };
 
         let mut content = column![
             text("Simulate Controller").size(24),
-            text("Offline closed-loop simulation from the stored continuous-time state-space model. No OPC-UA is used.").size(14),
+            text("Offline closed-loop simulation from the stored continuous-time state-space model. No OPC UA is used.").size(14),
             row![start_button, stop_button, text(summary).size(13)]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -3638,16 +3632,18 @@ impl DesktopApp {
 
         if matches!(self.active_snapshot, Some(ExecutionSnapshot::Runtime(_))) {
             content =
-                content.push(text("Runtime läuft: Für Simulation erst Runtime stoppen.").size(13));
+                content.push(text("Runtime running: For Simulation first Runtime stop.").size(13));
         }
 
         if model_preview.is_none() {
             content = content.push(
                 container(
                     column![
-                        text("Zuerst ein lineares Zustandsraummodell definieren.").size(16),
-                        text("Die Simulation benötigt das gespeicherte A/B/C/D-Modell aus \"Define Model\".")
-                            .size(14),
+                        text("Define a linear state-space model first.").size(16),
+                        text(
+                            "The simulation requires the saved A/B/C/D model from \"Define Model\"."
+                        )
+                        .size(14),
                     ]
                     .spacing(8),
                 )
@@ -3692,7 +3688,7 @@ impl DesktopApp {
                 .push(self.simulation_named_rows_section(
                     "Live setpoints",
                     "cv",
-                    "soll",
+                    "setpoint",
                     &self.simulation_editor.cv_setpoints,
                     structural_editable || live_editable,
                     Message::SimulationCvSetpointChanged,
@@ -3700,7 +3696,7 @@ impl DesktopApp {
                 .push(self.simulation_named_rows_section(
                     "Initial CV values",
                     "cv",
-                    "ist",
+                    "process_value",
                     &self.simulation_editor.cv_initials,
                     structural_editable,
                     Message::SimulationCvInitialChanged,
@@ -3901,9 +3897,9 @@ impl DesktopApp {
             button("Cancel")
         };
         let use_button = if can_use {
-            button("Use Parameters").on_press(Message::UseOptimizedParametersPressed)
+            button("Use parameters").on_press(Message::UseOptimizedparametersPressed)
         } else {
-            button("Use Parameters")
+            button("Use parameters")
         };
 
         let progress_line = self
@@ -3928,7 +3924,7 @@ impl DesktopApp {
                     )
                 })
             })
-            .unwrap_or_else(|| "Noch kein Optimierungslauf gestartet.".to_string());
+            .unwrap_or_else(|| "Noch no Optimierungslauf started.".to_string());
 
         let mut content = column![
             text("Parameter Optimization").size(24),
@@ -3947,20 +3943,18 @@ impl DesktopApp {
 
         if execution_active {
             content = content.push(
-                text("Runtime oder Simulation läuft: Für Parameteroptimierung erst stoppen.")
+                text("Runtime or Simulation running: For parameter optimization first stop.")
                     .size(13),
             );
         }
 
-        content = content.push(text("Controller Parameters").size(18));
+        content = content.push(text("Controller parameters").size(18));
         content = content.push(
-            text("Start reflects the value currently saved in Regellogik. Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles. Valid setting edits are saved automatically.")
+            text("Start reflects the value currently saved in Control Strategy. Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles. Valid setting edits are saved automatically.")
                 .size(13),
         );
         if self.optimization_editor.param_rows.is_empty() {
-            content = content.push(text(
-                "Keine aktiven numerischen Controller-Parameter vorhanden.",
-            ));
+            content = content.push(text("No active numeric controller parameters available."));
         } else {
             let parameter_col = Length::Fixed(320.0);
             let fixed_col = Length::Fixed(130.0);
@@ -4267,7 +4261,7 @@ impl DesktopApp {
             })
             .unwrap_or_default();
         for warning in warnings {
-            content = content.push(text(format!("Warnung: {warning}")).size(13));
+            content = content.push(text(format!("Warning: {warning}")).size(13));
         }
 
         container(
@@ -4309,7 +4303,7 @@ impl DesktopApp {
     {
         let mut content = column![text(title).size(16)].spacing(6);
         if rows.is_empty() {
-            content = content.push(text("Keine Kanäle vorhanden.").size(13));
+            content = content.push(text("No channels available.").size(13));
         }
         for (index, row_data) in rows.iter().enumerate() {
             let input = if editable {
@@ -4408,20 +4402,20 @@ impl DesktopApp {
     fn control_function_tests_view(&self, runtime_running: bool) -> Element<'_, Message> {
         let can_run = self.selected_project.is_some() && !runtime_running;
         let run_button = if can_run {
-            button("Tests ausführen").on_press(Message::RunControlFunctionTestsPressed)
+            button("Run Tests").on_press(Message::RunControlFunctionTestsPressed)
         } else {
-            button("Tests ausführen")
+            button("Run Tests")
         };
 
         let runtime_hint = if runtime_running {
-            "Ausführung läuft: Offline-Tests sind erst nach Stop verfügbar."
+            "Execution running: Offline tests are available after execution stops."
         } else {
-            "Die aktive Regellogik wird offline geprüft. Bei großen Räumen wird automatisch auf Einzel-Sweeps pro Dimension zurückgefallen."
+            "The active control strategy is tested offline. Large case spaces automatically fall back to single-axis sweeps per dimension."
         };
 
         let mut content = column![
             text("Control Function Tests").size(24),
-            text("Sweep-Tests prüfen die Funktion über Eingänge und Online-Parameter, erfassen Fehlerfälle und messen Ausführungszeiten.").size(15),
+            text("Sweep tests exercise the function across inputs and online parameters, capture error cases and measure execution times.").size(15),
             row![run_button, text(runtime_hint).size(13)]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -4431,7 +4425,7 @@ impl DesktopApp {
 
         content = content.push(text("Input Sweeps").size(18));
         if self.control_function_tests.input_rows.is_empty() {
-            content = content.push(text("Keine Eingänge konfiguriert."));
+            content = content.push(text("No inputs configured."));
         } else {
             for (index, row_data) in self.control_function_tests.input_rows.iter().enumerate() {
                 content = content.push(self.control_function_sweep_row_view(
@@ -4447,9 +4441,9 @@ impl DesktopApp {
             }
         }
 
-        content = content.push(text("Online Parameter Sweeps").size(18));
+        content = content.push(text("Online parameters Sweeps").size(18));
         if self.control_function_tests.param_rows.is_empty() {
-            content = content.push(text("Keine Online-Parameter aktiv."));
+            content = content.push(text("No online parameters active."));
         } else {
             let scope = ParameterHierarchyScope::ControlTests;
             let hierarchy = visible_parameter_hierarchy(
@@ -4505,7 +4499,7 @@ impl DesktopApp {
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                     row![
-                        text("Fälle").width(Length::Fixed(160.0)),
+                        text("cases").width(Length::Fixed(160.0)),
                         text(report.execution.executed_case_count.to_string()),
                     ]
                     .spacing(10)
@@ -4554,9 +4548,9 @@ impl DesktopApp {
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                     row![
-                        text("Output-Prüfung").width(Length::Fixed(160.0)),
+                        text("Output-check").width(Length::Fixed(160.0)),
                         text(format!(
-                            "{} invalid | {} außerhalb Limits | {} unerwartet",
+                            "{} invalid | {} outside Limits | {} unexpected",
                             report.outputs.invalid_output_cases,
                             report.outputs.out_of_limit_cases,
                             report.outputs.unexpected_output_cases
@@ -4572,7 +4566,7 @@ impl DesktopApp {
             content = content.push(text("Letzter Lauf").size(18)).push(summary);
 
             if !report.issue_cases.is_empty() {
-                content = content.push(text("Auffällige Fälle").size(16));
+                content = content.push(text("notable cases").size(16));
                 for case in &report.issue_cases {
                     content = content.push(text(format_case_preview(case)).size(14));
                     for detail in &case.details {
@@ -4582,7 +4576,7 @@ impl DesktopApp {
             }
 
             if !report.slowest_cases.is_empty() {
-                content = content.push(text("Langsamste Fälle").size(16));
+                content = content.push(text("Slowest cases").size(16));
                 for case in &report.slowest_cases {
                     content = content.push(text(format_case_preview(case)).size(14));
                 }
@@ -4660,20 +4654,20 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
 
         let save_button = if can_save {
-            button("Kommunikation speichern").on_press(Message::SaveCommunicationPressed)
+            button("Communication save").on_press(Message::SaveCommunicationPressed)
         } else {
-            button("Kommunikation speichern")
+            button("Communication save")
         };
 
         let runtime_hint = if runtime_running {
-            "Ausführung läuft: Für Kommunikations-Änderungen erst stoppen."
+            "Execution is running. Stop it before communication changes."
         } else {
             ""
         };
 
         container(
             column![
-                text("OPC-UA Basis-Konfiguration").size(20),
+                text("OPC UA Basic Configuration").size(20),
                 row![
                     text("Protokoll").width(Length::Fixed(120.0)),
                     text("opc_ua").size(15),
@@ -4682,7 +4676,7 @@ impl DesktopApp {
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
                 row![
-                    text("Server Adresse").width(Length::Fixed(120.0)),
+                    text("Server address").width(Length::Fixed(120.0)),
                     text_input(
                         "opc.tcp://127.0.0.1:4840",
                         &self.communication_editor.endpoint_url
@@ -4693,16 +4687,15 @@ impl DesktopApp {
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
                 row![
-                    text("Kommunikationszeit")
-                        .width(Length::Fixed(120.0)),
+                    text("Communicationszeit").width(Length::Fixed(120.0)),
                     text_input("io_cycle_ms", &self.communication_editor.io_cycle_ms)
                         .on_input(Message::CommunicationCycleChanged)
                         .width(Length::Fixed(180.0)),
-                    text("ms: Read/Write Intervall für OPC-UA I/O").size(14),
+                    text("ms: Read/Write interval for OPC UA I/O").size(14),
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
-                text("Hinweis: Effektive minimale I/O-Rate wird zusätzlich durch runtime.cycle_ms begrenzt.")
+                text("Note: Effective minimum I/O rate is also limited by runtime.cycle_ms.")
                     .size(13),
                 text(runtime_hint).size(13),
                 save_button
@@ -4729,7 +4722,7 @@ impl DesktopApp {
                 text("Typ").width(Length::Fixed(70.0)),
                 kind_pick,
                 text(if runtime_running {
-                    "Ausführung läuft: Speichern deaktiviert"
+                    "Execution is running: saving is disabled"
                 } else {
                     ""
                 })
@@ -4746,7 +4739,7 @@ impl DesktopApp {
                     row![
                         text("Read Tag").width(Length::Fixed(90.0)),
                         text_input(
-                            "OPC-UA Tagname (z.B. ns=2;s=WD.Counter)",
+                            "OPC UA Tagname (z.B. ns=2;s=WD.Counter)",
                             &self.watchdog_editor.read_tag
                         )
                         .on_input(Message::WatchdogReadTagChanged)
@@ -4759,7 +4752,7 @@ impl DesktopApp {
                     row![
                         text("Write Tag").width(Length::Fixed(90.0)),
                         text_input(
-                            "OPC-UA Tagname (z.B. ns=2;s=WD.Mirror)",
+                            "OPC UA Tagname (z.B. ns=2;s=WD.Mirror)",
                             &self.watchdog_editor.write_tag
                         )
                         .on_input(Message::WatchdogWriteTagChanged)
@@ -4774,7 +4767,7 @@ impl DesktopApp {
                         text_input("mirror_cycle_ms", &self.watchdog_editor.mirror_cycle_ms)
                             .on_input(Message::WatchdogCycleChanged)
                             .width(Length::Fixed(180.0)),
-                        text("ms: Read -> Write Intervall").size(14)
+                        text("ms: Read -> Write interval").size(14)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
@@ -4785,18 +4778,18 @@ impl DesktopApp {
                         text_input("stale_timeout_ms", &self.watchdog_editor.stale_timeout_ms)
                             .on_input(Message::WatchdogTimeoutChanged)
                             .width(Length::Fixed(180.0)),
-                        text("ms: Fault wenn Read nicht mehr ändert").size(14)
+                        text("ms: Fault when Read not mehr changes").size(14)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                 )
-                .push(text("Hinweis: Read/Write sind OPC-UA Tagnamen der Variablen.").size(13));
+                .push(text("Note: Read/Write are OPC UA tag names for the variables.").size(13));
         }
 
         let save_button = if can_save {
-            button("Watchdog speichern").on_press(Message::SaveWatchdogPressed)
+            button("Watchdog save").on_press(Message::SaveWatchdogPressed)
         } else {
-            button("Watchdog speichern")
+            button("Watchdog save")
         };
         let test_button = if can_save {
             button("Watchdog testen").on_press(Message::TestWatchdogPressed)
@@ -4813,8 +4806,8 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
         let mut mv_col = column![
             row![
-                text("MVs (manipulierende Variablen)").size(18),
-                button("+ Zeile").on_press(Message::AddMvNameRow)
+                text("MVs (manipulierende Variables)").size(18),
+                button("+ row").on_press(Message::AddMvNameRow)
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
@@ -4831,8 +4824,8 @@ impl DesktopApp {
 
         let mut cv_col = column![
             row![
-                text("CVs (Regelgrößen)").size(18),
-                button("+ Zeile").on_press(Message::AddCvNameRow)
+                text("CVs (Controlled Variables)").size(18),
+                button("+ row").on_press(Message::AddCvNameRow)
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
@@ -4849,8 +4842,8 @@ impl DesktopApp {
 
         let mut dv_col = column![
             row![
-                text("DVs (Störgrößen)").size(18),
-                button("+ Zeile").on_press(Message::AddDvNameRow)
+                text("DVs (Disturbance Variables)").size(18),
+                button("+ row").on_press(Message::AddDvNameRow)
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
@@ -4866,20 +4859,20 @@ impl DesktopApp {
         }
 
         let save_button = if can_save {
-            button("Variablen speichern").on_press(Message::SaveVariablesPressed)
+            button("Variables save").on_press(Message::SaveVariablesPressed)
         } else {
-            button("Variablen speichern")
+            button("Variables save")
         };
 
         let hint = if runtime_running {
-            text("Ausführung läuft: Für strukturelle Änderungen erst stoppen.").size(13)
+            text("Execution is running. Stop it before structural changes.").size(13)
         } else {
             text("").size(13)
         };
 
         let main_content = column![
-            text("Ein- und Ausgänge definieren").size(20),
-            text("Hier werden nur Namen für MV/CV/DV festgelegt. OPC-UA-Adressen folgen im nächsten Schritt \"I/O definieren\".").size(13),
+            text("Define Inputs and Outputs").size(20),
+            text("Here be only names for MV/CV/DV defined. OPC UA-addresses follow in the next step \"I/O define\".").size(13),
             mv_col,
             cv_col,
             dv_col,
@@ -4908,11 +4901,11 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
         let can_test = self.selected_project.is_some();
         let has_any_names = self.variables.has_any();
-        let mut content = column![text("I/O definieren").size(20)].spacing(10);
+        let mut content = column![text("Define I/O").size(20)].spacing(10);
 
         if !has_any_names {
             content = content.push(text(
-                "Keine MV/CV/DV-Namen vorhanden. Bitte zuerst \"Ein- und Ausgänge definieren\" ausfüllen.",
+                "No MV/CV/DV names available. First \"Define Inputs and Outputs\" complete.",
             ));
         } else {
             let header = row![
@@ -4927,11 +4920,11 @@ impl DesktopApp {
 
             content = content.push(header);
             content = content.push(
-                text("Hinweis: test_read/test_write laufen über die Buttons unten; test_write nutzt befüllte write-value-Felder.")
+                text("Note: test_read/test_write run through the buttons below; test_write uses populated write-value fields.")
                     .size(13),
             );
             content = content.push(
-                text("MV: MV_WRITE/MV_READ/HL/LL/Enable mit optionaler OPC-Adresse (für Abschluss nicht Pflicht)")
+                text("MV: MV_WRITE/MV_READ/HL/LL/Enable with optionaler OPC-address (for completion not required)")
                     .size(13),
             );
             for (index, row_data) in self.mv_io_rows.iter().enumerate() {
@@ -5007,7 +5000,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("CV: SOLL/IST/Sollband/Enable mit optionaler OPC-Adresse (Sollband alternativ als init value)")
+                text("CV: SETPOINT/PROCESS VALUE/DEADBAND/Enable with optionaler OPC-address (Deadband alternatively as init value)")
                     .size(13),
             );
             for (index, row_data) in self.cv_io_rows.iter().enumerate() {
@@ -5015,12 +5008,13 @@ impl DesktopApp {
                     column![
                         text(format!("CV: {}", row_data.name)).size(16),
                         row![
-                            text("SOLL").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.soll)
-                                .on_input(move |value| Message::CvSollChanged(index, value))
+                            text("SETPOINT").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.setpoint)
+                                .on_input(move |value| Message::CvSetpointChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
-                            text_input("read", &row_data.read_soll).width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_setpoint)
+                                .width(Length::FillPortion(2)),
                             text_input("write", &row_data.test_write)
                                 .on_input(move |value| Message::CvTestWriteChanged(index, value))
                                 .width(Length::FillPortion(2)),
@@ -5028,27 +5022,28 @@ impl DesktopApp {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("IST").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.ist)
+                            text("PROCESS VALUE").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.process_value)
                                 .on_input(move |value| Message::CvIstChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
-                            text_input("read", &row_data.read_ist).width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_process_value)
+                                .width(Length::FillPortion(2)),
                             text_input("write", "").width(Length::FillPortion(2)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("Sollband").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.sollband_opc)
-                                .on_input(move |value| Message::CvSollbandOpcChanged(index, value))
+                            text("Deadband").width(Length::FillPortion(2)),
+                            text_input("opc", &row_data.deadband_opc)
+                                .on_input(move |value| Message::CvDeadbandOpcChanged(index, value))
                                 .width(Length::FillPortion(3)),
-                            text_input("init", &row_data.sollband_value)
-                                .on_input(move |value| Message::CvSollbandValueChanged(
+                            text_input("init", &row_data.deadband_value)
+                                .on_input(move |value| Message::CvDeadbandValueChanged(
                                     index, value
                                 ))
                                 .width(Length::FillPortion(2)),
-                            text_input("read", &row_data.read_sollband)
+                            text_input("read", &row_data.read_deadband)
                                 .width(Length::FillPortion(2)),
                             text_input("write", "").width(Length::FillPortion(2)),
                         ]
@@ -5071,7 +5066,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("DV: READ/Enable mit optionaler OPC-Adresse (für Abschluss nicht Pflicht)")
+                text("DV: READ/Enable with optionaler OPC-address (for completion not required)")
                     .size(13),
             );
             for (index, row_data) in self.dv_io_rows.iter().enumerate() {
@@ -5107,9 +5102,9 @@ impl DesktopApp {
         }
 
         let save_button = if can_save {
-            button("I/O Definition speichern").on_press(Message::SaveIoDefinitionPressed)
+            button("I/O definition save").on_press(Message::SaveIoDefinitionPressed)
         } else {
-            button("I/O Definition speichern")
+            button("I/O definition save")
         };
         let test_read_button = if can_test {
             button("test_read").on_press(Message::TestIoDefinitionReadPressed)
@@ -5123,7 +5118,7 @@ impl DesktopApp {
         };
 
         let hint = if runtime_running {
-            text("Ausführung läuft: Für strukturelle Änderungen erst stoppen.").size(13)
+            text("Execution is running. Stop it before structural changes.").size(13)
         } else {
             text("").size(13)
         };
@@ -5172,20 +5167,22 @@ impl DesktopApp {
         .width(Length::Fixed(260.0));
 
         let mut content = column![
-            text("Regelstrategie").size(20),
-            row![text("Auswahl").width(Length::Fixed(90.0)), kind_pick]
+            text("Control Strategy").size(20),
+            row![text("Selection").width(Length::Fixed(90.0)), kind_pick]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
-            text("Nur kompatible Strategien für die aktuelle I/O-Definition erscheinen in der Auswahl.")
-                .size(13),
+            text(
+                "Only compatible strategies for the current I/O definition appear in the selection."
+            )
+            .size(13),
         ]
         .spacing(10);
 
         if selected_kind == LogicKindChoice::PController {
             content = content.push(
                 row![
-                    text("P-Regler CV->MV Zuordnung").size(16),
-                    button("+ Paar").on_press(Message::AddPControllerPair)
+                    text("P Controller CV-to-MV Assignment").size(16),
+                    button("+ pair").on_press(Message::AddPControllerPair)
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -5222,20 +5219,20 @@ impl DesktopApp {
                 );
             }
         } else if selected_kind == LogicKindChoice::LinearMpc {
-            content = content.push(text("Linear MPC Startwerte").size(16));
+            content = content.push(text("Linear MPC initial values").size(16));
             content = content.push(text(
-                "Diese Werte werden beim Speichern als Online-Parameter angelegt und bleiben später live änderbar.",
+                "These values are created as online parameters when saved and remain later live editable.",
             ).size(14));
 
             if self.logic_editor.mpc_params.is_empty() {
                 content = content.push(text(
-                    "Keine Linear-MPC-Parameter verfügbar. Bitte zuerst Modell, Variablen und I/O speichern.",
+                    "No Linear MPC parameters are available. Save the model, variables, and I/O first.",
                 ).size(14));
             } else {
                 content = content.push(
                     row![
                         text("Parameter").width(Length::FillPortion(2)),
-                        text("Startwert").width(Length::FillPortion(1)),
+                        text("Initial Value").width(Length::FillPortion(1)),
                     ]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
@@ -5272,7 +5269,7 @@ impl DesktopApp {
                             content = content.push(
                                 row![
                                     parameter_leaf(&label, depth, Length::FillPortion(2)),
-                                    text_input("Wert", &row_data.value)
+                                    text_input("value", &row_data.value)
                                         .on_input(move |value| Message::MpcParamChanged(
                                             index, value
                                         ))
@@ -5286,19 +5283,19 @@ impl DesktopApp {
                 }
             }
         } else {
-            content = content.push(text("Eigene Regellogik ist aktiv.").size(14));
+            content = content.push(text("Custom Control Strategy is active.").size(14));
         }
 
         if selected_kind == LogicKindChoice::CustomRust {
             let template_button = if can_run_custom_actions {
-                button("Template generieren").on_press(Message::GenerateLogicTemplatePressed)
+                button("Generate Template").on_press(Message::GenerateLogicTemplatePressed)
             } else {
-                button("Template generieren")
+                button("Generate Template")
             };
             let build_button = if can_run_custom_actions {
-                button("Strategie prüfen/builden").on_press(Message::BuildCustomLogicPressed)
+                button("Build and Check Strategy").on_press(Message::BuildCustomLogicPressed)
             } else {
-                button("Strategie prüfen/builden")
+                button("Build and Check Strategy")
             };
 
             content = content.push(text("Custom Rust (cdylib)").size(16)).push(
@@ -5337,9 +5334,9 @@ impl DesktopApp {
                     text(format!(
                         "Status: {}{}",
                         if self.logic_editor.custom_compatible {
-                            "kompatibel"
+                            "compatible"
                         } else {
-                            "nicht kompatibel"
+                            "incompatible"
                         },
                         if self.logic_editor.custom_status.trim().is_empty() {
                             String::new()
@@ -5354,15 +5351,15 @@ impl DesktopApp {
 
             if !self.logic_editor.custom_compatible {
                 content = content.push(text(
-                    "Hinweis: Eigene Regellogik kann erst nach erfolgreichem Build und Kompatibilitätscheck gespeichert werden.",
+                    "Note: Custom Control Strategy can only be saved after a successful build and compatibility check.",
                 ));
             }
         }
 
         let save_button = if can_save {
-            button("Regellogik speichern").on_press(Message::SaveLogicPressed)
+            button("Save Control Strategy").on_press(Message::SaveLogicPressed)
         } else {
-            button("Regellogik speichern")
+            button("Save Control Strategy")
         };
 
         container(column![scrollable(content).height(Length::Fill), save_button].spacing(10))
@@ -5383,9 +5380,9 @@ impl DesktopApp {
             button("CSV importieren")
         };
         let save_button = if available && !execution_active {
-            button("Parameter speichern").on_press(Message::SaveKalmanParametersPressed)
+            button("Save Parameters").on_press(Message::SaveKalmanParametersPressed)
         } else {
-            button("Parameter speichern")
+            button("Save Parameters")
         };
         let run_button =
             if available && !execution_active && self.kalman_tuning_editor.dataset.is_some() {
@@ -5394,15 +5391,17 @@ impl DesktopApp {
                 button("Run Observer")
             };
         let plots_button = if self.kalman_tuning_editor.has_results && self.web_bind.is_some() {
-            button("Interaktive Plots öffnen").on_press(Message::OpenKalmanPlotsPressed)
+            button("Interactive Open plots").on_press(Message::OpenKalmanPlotsPressed)
         } else {
-            button("Interaktive Plots öffnen")
+            button("Interactive Open plots")
         };
 
         let mut content = column![
             text("Kalman Filter Tuning").size(24),
-            text("Historische Messdaten offline mit dem Linear-MPC-Kalman-Observer auswerten.")
-                .size(14),
+            text(
+                "Historische measurement data offline with the Linear-MPC-Kalman-Observer evaluate."
+            )
+            .size(14),
             row![
                 import_button,
                 button("?").on_press(Message::ToggleKalmanTuningHelp)
@@ -5420,10 +5419,10 @@ impl DesktopApp {
                 container(
                     column![
                         text("CSV-Anforderungen").size(17),
-                        text("UTF-8, Komma als Trennzeichen, mindestens zwei Datenzeilen."),
-                        text("Spalte 'time': RFC 3339 / ISO 8601 mit Zeitzone, z. B. 2026-06-13T14:30:00.123+02:00."),
-                        text(format!("Pflichtspalten: {}", required.join(", "))),
-                        text("CV-, MV- und DV-Spalten verwenden exakt die konfigurierten Variablennamen. Zusätzliche Spalten werden ignoriert."),
+                        text("UTF-8, comma as delimiter, at least zwei data rows."),
+                        text("column 'time': RFC 3339 / ISO 8601 with time zone, for example 2026-06-13T14:30:00.123+02:00."),
+                        text(format!("Required columns: {}", required.join(", "))),
+                        text("CV-, MV- and DV-columns use exakt the configured variable names. Additional columns be ignored."),
                     ]
                     .spacing(5),
                 )
@@ -5433,7 +5432,7 @@ impl DesktopApp {
 
         if !available {
             content = content.push(text(
-                "Verfügbar nach Speichern einer kompatiblen Linear-MPC-Regellogik mit linearem Zustandsraummodell.",
+                "Available after saving a compatible Linear MPC control strategy with linear state-space model.",
             ));
         }
         if let Some(dataset) = &self.kalman_tuning_editor.dataset {
@@ -5448,7 +5447,7 @@ impl DesktopApp {
                 .map(DateTime::to_rfc3339)
                 .unwrap_or_default();
             content = content.push(text(format!(
-                "Import: {} | {} Zeilen | {} bis {}",
+                "Import: {} | {} rows | {} bis {}",
                 dataset.file_name,
                 dataset.row_count(),
                 first,
@@ -5456,12 +5455,12 @@ impl DesktopApp {
             )));
         }
 
-        content = content.push(text("Kalman-Parameter").size(18));
+        content = content.push(text("Kalman parameters").size(18));
         for (index, param) in self.kalman_tuning_editor.params.iter().enumerate() {
             content = content.push(
                 row![
                     text(&param.key).width(Length::FillPortion(2)),
-                    text_input("Wert", &param.value)
+                    text_input("value", &param.value)
                         .on_input(move |value| Message::KalmanParamChanged(index, value))
                         .width(Length::FillPortion(1)),
                 ]
@@ -5476,7 +5475,7 @@ impl DesktopApp {
         );
         if self.web_bind.is_none() {
             content = content.push(text(
-                "Interaktive Plots benötigen die lokale Web-API; Desktop ohne --no-web starten.",
+                "Interactive Plots berequireden the local Web-API; Desktop without --no-web start.",
             ));
         }
 
@@ -5489,11 +5488,11 @@ impl DesktopApp {
 
     fn params_view(&self) -> Element<'_, Message> {
         let execution_active = self.execution_active();
-        let mut content = column![text("Online Parameter").size(20)].spacing(10);
+        let mut content = column![text("Online Parameters").size(20)].spacing(10);
 
         if self.has_configured_variables() {
-            content =
-                content.push(text("Konfigurierte Variablen (für Regellogik verfügbar):").size(15));
+            content = content
+                .push(text("Configured variables (for Control Strategy available):").size(15));
             for line in self.configured_variable_lines() {
                 content = content.push(text(line));
             }
@@ -5501,7 +5500,7 @@ impl DesktopApp {
         }
 
         if self.logic_params.is_empty() {
-            content = content.push(text("Keine Parameter vorhanden."));
+            content = content.push(text("No parameters available."));
         } else {
             let scope = ParameterHierarchyScope::Online;
             let hierarchy = visible_parameter_hierarchy(
@@ -5550,7 +5549,7 @@ impl DesktopApp {
                                 parameter_leaf(&label, depth, Length::FillPortion(2)),
                                 text(format_logic_param_value(&current))
                                     .width(Length::FillPortion(1)),
-                                text_input("Neuer Wert", &input_value)
+                                text_input("Neuer value", &input_value)
                                     .on_input(move |value| {
                                         Message::ParamInputChanged(key.clone(), value)
                                     })
@@ -5573,15 +5572,15 @@ impl DesktopApp {
 
     fn plots_view(&self) -> Element<'_, Message> {
         let open_web_button = if self.web_bind.is_some() {
-            button("Interaktive Web-Plots öffnen").on_press(Message::OpenPlotsWebPressed)
+            button("Interactive Web-Open plots").on_press(Message::OpenPlotsWebPressed)
         } else {
-            button("Interaktive Web-Plots öffnen")
+            button("Interactive Web-Open plots")
         };
 
         let web_hint = if self.web_bind.is_some() {
-            "Öffnet /plots der lokalen Web-API im Browser."
+            "Opens /plots the local Web-API in the browser."
         } else {
-            "Web API deaktiviert. Für interaktive Plots Desktop ohne --no-web starten."
+            "Web API disabled. For interactive Plots Desktop without --no-web start."
         };
 
         let mut content = column![
@@ -5594,7 +5593,7 @@ impl DesktopApp {
         let plot_lines = build_plot_lines(&self.samples, 48);
 
         if plot_lines.is_empty() {
-            content = content.push(text("Noch keine Plotdaten vorhanden."));
+            content = content.push(text("No plot data available yet."));
         } else {
             for line in plot_lines {
                 content = content.push(text(line).size(14));
@@ -5639,28 +5638,28 @@ impl DesktopApp {
                 }
 
                 if active_dimensions == 0 {
-                    "Fallraum: nur Basisfall".to_string()
+                    "Case space: only baseline case".to_string()
                 } else if full_factorial_cases <= 4_096 {
                     format!(
-                        "Fallraum: Vollfaktoriell {} + 1 Basisfall",
+                        "Case space: Full factorial {} + 1 baseline case",
                         full_factorial_cases
                     )
                 } else {
                     format!(
-                        "Fallraum: Vollfaktoriell {} zu groß, Fallback auf {} Einzel-Sweeps + Basisfall",
+                        "Case space: Full factorial {} is too large, fallback on {} single-axis sweeps + baseline case",
                         full_factorial_cases,
                         single_axis_cases - 1
                     )
                 }
             }
-            Err(err) => format!("Sweep-Konfiguration prüfen: {err}"),
+            Err(err) => format!("Check sweep configuration: {err}"),
         }
     }
 
     fn status_view(&self) -> Element<'_, Message> {
         let mut line = self.status_message.clone();
         if let Some(err) = &self.error_message {
-            line = format!("{} | Fehler: {}", line, err);
+            line = format!("{} | Error: {}", line, err);
         }
         container(text(line).size(14)).padding(8).into()
     }
@@ -5861,10 +5860,10 @@ fn cv_band_defaults_from_editor_rows(rows: &[CvIoEditorRow]) -> HashMap<String, 
     let mut defaults = HashMap::new();
     for row in rows {
         let name = row.name.trim();
-        if name.is_empty() || !row.sollband_opc.trim().is_empty() {
+        if name.is_empty() || !row.deadband_opc.trim().is_empty() {
             continue;
         }
-        if let Ok(value) = row.sollband_value.trim().parse::<f64>() {
+        if let Ok(value) = row.deadband_value.trim().parse::<f64>() {
             defaults.insert(name.to_string(), value);
         }
     }
@@ -5880,7 +5879,7 @@ fn parse_logic_param_input(
             .trim()
             .parse::<f64>()
             .map(LogicParamValue::F64)
-            .map_err(|_| "erwarte Zahl (f64)".to_string()),
+            .map_err(|_| "erwarte number (f64)".to_string()),
         LogicParamValue::Bool(_) => parse_bool(raw)
             .map(LogicParamValue::Bool)
             .ok_or_else(|| "erwarte bool: true/false/1/0".to_string()),
@@ -5959,7 +5958,7 @@ fn load_projects_task(project_service: ProjectService) -> Task<Message> {
         async move {
             project_service
                 .list_projects()
-                .map_err(|err| format!("Projekte konnten nicht geladen werden: {err}"))
+                .map_err(|err| format!("Projects could not be loaded: {err}"))
         },
         Message::ProjectsLoaded,
     )
@@ -5970,10 +5969,10 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
         async move {
             let sidebar_tasks = project_service
                 .sidebar_tasks(&project_name)
-                .map_err(|err| format!("Sidebar-Aufgaben konnten nicht geladen werden: {err}"))?;
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+                .map_err(|err| format!("Sidebar tasks could not be loaded: {err}"))?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             cfg.sync_active_online_params();
             cfg.normalize_simulation_config();
             cfg.normalize_optimization_config();
@@ -6071,7 +6070,7 @@ fn create_project_task(project_service: ProjectService, project_name: String) ->
             project_service
                 .create_project(&project_name)
                 .map(|_| project_name)
-                .map_err(|err| format!("Projekt konnte nicht erstellt werden: {err}"))
+                .map_err(|err| format!("Project could not be created: {err}"))
         },
         Message::ProjectCreated,
     )
@@ -6087,8 +6086,8 @@ fn start_runtime_task(
             runtime
                 .start(&project_service, &project_name)
                 .await
-                .map_err(|err| format!("Runtime konnte nicht gestartet werden: {err}"))?;
-            Ok(format!("Runtime für '{}' gestartet", project_name))
+                .map_err(|err| format!("Runtime could not be started: {err}"))?;
+            Ok(format!("Started runtime for '{}'", project_name))
         },
         Message::RuntimeActionFinished,
     )
@@ -6100,8 +6099,8 @@ fn stop_runtime_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             runtime
                 .stop()
                 .await
-                .map_err(|err| format!("Runtime konnte nicht gestoppt werden: {err}"))?;
-            Ok("Runtime gestoppt".to_string())
+                .map_err(|err| format!("Runtime could not be stopped: {err}"))?;
+            Ok("Runtime stopped".to_string())
         },
         Message::RuntimeActionFinished,
     )
@@ -6115,9 +6114,9 @@ fn start_simulation_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             cfg.simulation = build_simulation_config_from_editor(
                 &editor,
                 &cfg.variables,
@@ -6126,14 +6125,12 @@ fn start_simulation_task(
             )?;
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| {
-                    format!("Simulationseinstellungen konnten nicht gespeichert werden: {err}")
-                })?;
+                .map_err(|err| format!("Simulation settings could not be saved: {err}"))?;
             runtime
                 .start_simulation(&project_service, &project_name)
                 .await
-                .map_err(|err| format!("Simulation konnte nicht gestartet werden: {err}"))?;
-            Ok(format!("Simulation für '{}' gestartet", project_name))
+                .map_err(|err| format!("Simulation could not be started: {err}"))?;
+            Ok(format!("Started simulation for '{}'", project_name))
         },
         Message::SimulationActionFinished,
     )
@@ -6145,8 +6142,8 @@ fn stop_simulation_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             runtime
                 .stop_simulation()
                 .await
-                .map_err(|err| format!("Simulation konnte nicht gestoppt werden: {err}"))?;
-            Ok("Simulation gestoppt".to_string())
+                .map_err(|err| format!("Simulation could not be stopped: {err}"))?;
+            Ok("Simulation stopped".to_string())
         },
         Message::SimulationActionFinished,
     )
@@ -6156,7 +6153,7 @@ fn open_url_task(url: String) -> Task<Message> {
     Task::perform(
         async move {
             open_url_in_browser(&url)?;
-            Ok(format!("Browser geöffnet: {}", url))
+            Ok(format!("Browser opened: {}", url))
         },
         Message::PlotsWebOpened,
     )
@@ -6186,7 +6183,7 @@ fn open_url_in_browser(url: &str) -> Result<(), String> {
 
     cmd.spawn()
         .map(|_| ())
-        .map_err(|err| format!("Browser konnte nicht geöffnet werden: {err}"))
+        .map_err(|err| format!("Browser could not be opened: {err}"))
 }
 
 fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
@@ -6195,7 +6192,7 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             let snapshot = runtime
                 .active_state()
                 .await
-                .map_err(|err| format!("Status konnte nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("Status could not be read: {err}"))?;
 
             if snapshot.is_none() {
                 return Ok(RefreshData {
@@ -6208,11 +6205,11 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             let params = runtime
                 .active_get_params()
                 .await
-                .map_err(|err| format!("Parameter konnten nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("parameter could not be read: {err}"))?;
             let samples = runtime
                 .active_read_plots(400)
                 .await
-                .map_err(|err| format!("Plotdaten konnten nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("plot data could not be read: {err}"))?;
 
             Ok(RefreshData {
                 snapshot,
@@ -6238,12 +6235,12 @@ fn set_param_task(
             let params = runtime
                 .active_set_params(updates.clone())
                 .await
-                .map_err(|err| format!("Parameter konnten nicht gesetzt werden: {err}"))?;
+                .map_err(|err| format!("parameter could not be set: {err}"))?;
 
             if let Some(project_name) = runtime.active_project().await {
                 project_service
                     .update_logic_params(&project_name, updates)
-                    .map_err(|err| format!("Parameterpersistenz fehlgeschlagen: {err}"))?;
+                    .map_err(|err| format!("parameterpersistenz failed: {err}"))?;
             }
 
             Ok(ParamApplyResult { key, params })
@@ -6255,16 +6252,16 @@ fn set_param_task(
 fn parse_communication_editor(editor: &CommunicationEditorState) -> Result<(String, u64), String> {
     let endpoint_url = editor.endpoint_url.trim().to_string();
     if endpoint_url.is_empty() {
-        return Err("Kommunikation benötigt eine OPC-UA Server-Adresse".to_string());
+        return Err("Communication requires a OPC UA server address".to_string());
     }
 
     let io_cycle_ms = editor
         .io_cycle_ms
         .trim()
         .parse::<u64>()
-        .map_err(|_| "communication.io_cycle_ms muss eine ganze Zahl sein".to_string())?;
+        .map_err(|_| "communication.io_cycle_ms must be an integer".to_string())?;
     if io_cycle_ms == 0 {
-        return Err("communication.io_cycle_ms muss > 0 sein".to_string());
+        return Err("communication.io_cycle_ms must be > 0".to_string());
     }
 
     Ok((endpoint_url, io_cycle_ms))
@@ -6277,9 +6274,9 @@ fn save_communication_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             let (endpoint_url, io_cycle_ms) = parse_communication_editor(&editor)?;
             cfg.communication.endpoint_url = endpoint_url;
@@ -6287,9 +6284,9 @@ fn save_communication_task(
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Kommunikation konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Communication could not be saved: {err}"))?;
 
-            Ok(format!("Kommunikation für '{}' gespeichert", project_name))
+            Ok(format!("Saved communication for '{}'", project_name))
         },
         Message::CommunicationSaved,
     )
@@ -6303,24 +6300,26 @@ fn parse_watchdog_editor(editor: &WatchdogEditorState) -> Result<WatchdogConfig,
             let write_node = editor.write_tag.trim().to_string();
             if read_node.is_empty() || write_node.is_empty() {
                 return Err(
-                    "Watchdog counter_mirror benötigt OPC-UA Read/Write Tagnamen".to_string(),
+                    "Watchdog counter_mirror requires OPC UA Read/Write tag names".to_string(),
                 );
             }
 
-            let mirror_cycle_ms =
-                editor.mirror_cycle_ms.trim().parse::<u64>().map_err(|_| {
-                    "Watchdog mirror_cycle_ms muss eine ganze Zahl sein".to_string()
-                })?;
+            let mirror_cycle_ms = editor
+                .mirror_cycle_ms
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "Watchdog mirror_cycle_ms must be an integer".to_string())?;
             if mirror_cycle_ms == 0 {
-                return Err("Watchdog mirror_cycle_ms muss > 0 sein".to_string());
+                return Err("Watchdog mirror_cycle_ms must be > 0".to_string());
             }
 
-            let stale_timeout_ms =
-                editor.stale_timeout_ms.trim().parse::<u64>().map_err(|_| {
-                    "Watchdog stale_timeout_ms muss eine ganze Zahl sein".to_string()
-                })?;
+            let stale_timeout_ms = editor
+                .stale_timeout_ms
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "Watchdog stale_timeout_ms must be an integer".to_string())?;
             if stale_timeout_ms == 0 {
-                return Err("Watchdog stale_timeout_ms muss > 0 sein".to_string());
+                return Err("Watchdog stale_timeout_ms must be > 0".to_string());
             }
 
             Ok(WatchdogConfig::CounterMirror {
@@ -6340,17 +6339,17 @@ fn save_watchdog_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             cfg.watchdog = parse_watchdog_editor(&editor)?;
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Watchdog konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Watchdog could not be saved: {err}"))?;
 
-            Ok(format!("Watchdog für '{}' gespeichert", project_name))
+            Ok(format!("Saved watchdog for '{}'", project_name))
         },
         Message::WatchdogSaved,
     )
@@ -6363,14 +6362,14 @@ fn test_watchdog_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             let watchdog = parse_watchdog_editor(&editor)?;
 
             match watchdog {
                 WatchdogConfig::None => {
-                    Ok("Watchdog ist auf 'none' gestellt (kein Test nötig).".to_string())
+                    Ok("Watchdog is on 'none' set (no Test required).".to_string())
                 }
                 WatchdogConfig::CounterMirror {
                     read_node,
@@ -6379,20 +6378,18 @@ fn test_watchdog_task(
                     stale_timeout_ms,
                 } => {
                     let adapter = OpcUaClientAdapter::new(cfg.communication.endpoint_url.clone());
-                    adapter.connect().await.map_err(|err| {
-                        format!("Watchdog-Test: OPC-UA Verbindung fehlgeschlagen: {err}")
-                    })?;
+                    adapter
+                        .connect()
+                        .await
+                        .map_err(|err| format!("watchdog test: OPC UA Verbindung failed: {err}"))?;
 
                     let read_value = adapter.read(&read_node).await.map_err(|err| {
-                        format!(
-                            "Watchdog-Test: Lesen von '{}' fehlgeschlagen: {err}",
-                            read_node
-                        )
+                        format!("watchdog test: reading from '{}' failed: {err}", read_node)
                     })?;
 
                     let counter = read_value.as_f64().ok_or_else(|| {
                         format!(
-                            "Watchdog-Test: Read-Tag '{}' ist kein f64-Zählerwert",
+                            "watchdog test: Read-Tag '{}' is not an f64 counter value",
                             read_node
                         )
                     })?;
@@ -6401,14 +6398,11 @@ fn test_watchdog_task(
                         .write(&write_node, SignalValue::F64(counter))
                         .await
                         .map_err(|err| {
-                            format!(
-                                "Watchdog-Test: Schreiben auf '{}' fehlgeschlagen: {err}",
-                                write_node
-                            )
+                            format!("watchdog test: writing on '{}' failed: {err}", write_node)
                         })?;
 
                     Ok(format!(
-                        "Watchdog-Test OK: '{}' ({counter:.3}) -> '{}' | cycle={}ms timeout={}ms",
+                        "watchdog test OK: '{}' ({counter:.3}) -> '{}' | cycle={}ms timeout={}ms",
                         read_node, write_node, mirror_cycle_ms, stale_timeout_ms
                     ))
                 }
@@ -6427,17 +6421,17 @@ fn save_variables_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             cfg.variables = build_variable_catalog(&mv_rows, &cv_rows, &dv_rows)?;
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Variablen konnten nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Variables could not be saved: {err}"))?;
 
-            Ok(format!("Variablen für '{}' gespeichert", project_name))
+            Ok(format!("Saved variables for '{}'", project_name))
         },
         Message::VariablesSaved,
     )
@@ -6453,9 +6447,9 @@ fn test_io_read_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             let endpoint_url = if endpoint_url_from_editor.trim().is_empty() {
                 cfg.communication.endpoint_url
@@ -6465,7 +6459,7 @@ fn test_io_read_task(
 
             let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
             adapter.connect().await.map_err(|err| {
-                format!("I/O Read-Test: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
+                format!("I/O Read-Test: OPC UA Verbindung failed ({endpoint_url}): {err}")
             })?;
 
             let mut mv_values = Vec::with_capacity(mv_rows.len());
@@ -6486,14 +6480,14 @@ fn test_io_read_task(
 
             let mut cv_values = Vec::with_capacity(cv_rows.len());
             for row in &cv_rows {
-                let soll = read_optional_tag(&adapter, row.soll.trim()).await;
-                let ist = read_optional_tag(&adapter, row.ist.trim()).await;
-                let sollband = read_optional_tag(&adapter, row.sollband_opc.trim()).await;
+                let setpoint = read_optional_tag(&adapter, row.setpoint.trim()).await;
+                let process_value = read_optional_tag(&adapter, row.process_value.trim()).await;
+                let deadband = read_optional_tag(&adapter, row.deadband_opc.trim()).await;
                 let enable = read_optional_tag(&adapter, row.enable.trim()).await;
                 cv_values.push(CvReadValues {
-                    soll,
-                    ist,
-                    sollband,
+                    setpoint,
+                    process_value,
+                    deadband,
                     enable,
                 });
             }
@@ -6524,9 +6518,9 @@ fn test_io_write_all_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             let endpoint_url = if endpoint_url_from_editor.trim().is_empty() {
                 cfg.communication.endpoint_url
@@ -6536,7 +6530,7 @@ fn test_io_write_all_task(
 
             let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
             adapter.connect().await.map_err(|err| {
-                format!("test_write: OPC-UA Verbindung fehlgeschlagen ({endpoint_url}): {err}")
+                format!("test_write: OPC UA Verbindung failed ({endpoint_url}): {err}")
             })?;
 
             let mut write_count = 0usize;
@@ -6548,33 +6542,29 @@ fn test_io_write_all_task(
                     continue;
                 }
                 let value = parse_test_write_value(raw_value)?;
-                adapter.write(address, value).await.map_err(|err| {
-                    format!(
-                        "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
-                        address
-                    )
-                })?;
+                adapter
+                    .write(address, value)
+                    .await
+                    .map_err(|err| format!("test_write: writing on '{}' failed: {err}", address))?;
                 write_count += 1;
             }
 
             for row in &cv_rows {
-                let address = row.soll.trim();
+                let address = row.setpoint.trim();
                 let raw_value = row.test_write.trim();
                 if address.is_empty() || raw_value.is_empty() {
                     continue;
                 }
                 let value = parse_test_write_value(raw_value)?;
-                adapter.write(address, value).await.map_err(|err| {
-                    format!(
-                        "test_write: Schreiben auf '{}' fehlgeschlagen: {err}",
-                        address
-                    )
-                })?;
+                adapter
+                    .write(address, value)
+                    .await
+                    .map_err(|err| format!("test_write: writing on '{}' failed: {err}", address))?;
                 write_count += 1;
             }
 
             Ok(format!(
-                "test_write abgeschlossen: {} Schreibvorgänge",
+                "test_write completed: {} write operations",
                 write_count
             ))
         },
@@ -6594,22 +6584,22 @@ fn save_io_definition_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             let vars = build_variable_catalog(&mv_name_rows, &cv_name_rows, &dv_name_rows)?;
             cfg.variables = vars.clone();
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
             cfg.rebuild_runtime_io_from_definition()
-                .map_err(|err| format!("I/O-Ableitung fehlgeschlagen: {err}"))?;
+                .map_err(|err| format!("I/O-Ableitung failed: {err}"))?;
             sync_io_initial_value_online_params(&mut cfg);
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("I/O Definition konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("I/O definition could not be saved: {err}"))?;
 
-            Ok(format!("I/O Definition für '{}' gespeichert", project_name))
+            Ok(format!("Saved I/O definition for '{}'", project_name))
         },
         Message::IoDefinitionSaved,
     )
@@ -6622,17 +6612,17 @@ fn save_model_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             cfg.model = build_model_config_from_editor(&editor, &cfg.variables)?;
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Model konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Model could not be saved: {err}"))?;
 
-            Ok(format!("Model for '{}' saved", project_name))
+            Ok(format!("Saved model for '{}'", project_name))
         },
         Message::ModelSaved,
     )
@@ -6647,9 +6637,9 @@ fn sync_simulation_editor_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             cfg.simulation = build_simulation_config_from_editor(
                 &editor,
                 &cfg.variables,
@@ -6658,22 +6648,18 @@ fn sync_simulation_editor_task(
             )?;
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| {
-                    format!("Simulationseinstellungen konnten nicht gespeichert werden: {err}")
-                })?;
+                .map_err(|err| format!("Simulation settings could not be saved: {err}"))?;
 
             if apply_live {
                 runtime
                     .apply_simulation_live_config(cfg.simulation.clone())
                     .await
                     .map_err(|err| {
-                        format!(
-                            "Simulationseinstellungen konnten nicht live übernommen werden: {err}"
-                        )
+                        format!("Simulation settings could not be applied live: {err}")
                     })?;
-                Ok("Simulationseinstellungen live aktualisiert".to_string())
+                Ok("Simulation settings live updated".to_string())
             } else {
-                Ok("Simulationseinstellungen gespeichert".to_string())
+                Ok("Simulation settings saved".to_string())
             }
         },
         Message::SimulationLiveUpdated,
@@ -6687,13 +6673,13 @@ fn save_optimization_config_now(
 ) -> Result<(), String> {
     let mut cfg = project_service
         .load_config(project_name)
-        .map_err(|err| format!("Projektkonfiguration konnte nicht geladen werden: {err}"))?;
+        .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
     cfg.sync_active_online_params();
     cfg.optimization = build_optimization_config_from_editor(editor)?;
     cfg.normalize_optimization_config();
     project_service
         .save_config(project_name, &cfg)
-        .map_err(|err| format!("Optimierungseinstellungen konnten nicht gespeichert werden: {err}"))
+        .map_err(|err| format!("Optimization settings could not be saved: {err}"))
 }
 
 fn autosave_optimization_task(
@@ -6705,7 +6691,7 @@ fn autosave_optimization_task(
         async move {
             save_optimization_config_now(&project_service, &project_name, &editor)?;
             Ok(format!(
-                "Optimierungseinstellungen für '{}' automatisch gespeichert",
+                "Automatically saved optimization settings for '{}'",
                 project_name
             ))
         },
@@ -6720,15 +6706,14 @@ fn apply_optimized_parameters_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            apply_optimized_parameters(&project_service, &project_name, &updates).map_err(
-                |err| format!("Optimierte Parameter konnten nicht übernommen werden: {err}"),
-            )?;
+            apply_optimized_parameters(&project_service, &project_name, &updates)
+                .map_err(|err| format!("Optimized parameter could not be applied: {err}"))?;
             Ok(format!(
-                "Optimierte Parameter für '{}' übernommen",
+                "Applied optimized parameters for '{}'",
                 project_name
             ))
         },
-        Message::OptimizedParametersApplied,
+        Message::OptimizedparametersApplied,
     )
 }
 
@@ -6815,7 +6800,7 @@ fn build_simulation_config_from_editor(
     if !allow_manual_cv_offsets {
         if let Some(model) = linear_model {
             config.cv_offsets = derive_initial_cv_offsets(model, &config, vars).map_err(|err| {
-                format!("CV offsets konnten nicht aus den Initialwerten berechnet werden: {err}")
+                format!("CV offsets could not be calculated from the initial values: {err}")
             })?;
         }
     }
@@ -7002,9 +6987,9 @@ fn save_logic_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
             cfg.logic.kind = editor.selected_kind.into();
             cfg.logic.custom_rust.strategy_name = editor.custom_strategy_name.trim().to_string();
@@ -7019,22 +7004,22 @@ fn save_logic_task(
                     continue;
                 }
                 if cv.is_empty() || mv.is_empty() {
-                    return Err("Jedes P-Paar braucht CV und MV".to_string());
+                    return Err("Each P-pair requires CV and MV".to_string());
                 }
                 let kp = row
                     .kp
                     .trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("Ungültiges kp für Paar {} -> {}", cv, mv))?;
+                    .map_err(|_| format!("Invalid kp for pair {} -> {}", cv, mv))?;
                 let bias = row
                     .bias
                     .trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("Ungültiges bias für Paar {} -> {}", cv, mv))?;
+                    .map_err(|_| format!("Invalid bias for pair {} -> {}", cv, mv))?;
                 pairs.push(PControllerPairConfig { cv, mv, kp, bias });
             }
             if cfg.logic.kind == LogicKind::PController && pairs.is_empty() {
-                return Err("Für P-Regler bitte mindestens ein CV->MV Paar anlegen".to_string());
+                return Err("For P Controller please at least a CV->MV pair create".to_string());
             }
             cfg.logic.p_controller.pairs = pairs.clone();
             cfg.logic.params = existing_params;
@@ -7051,14 +7036,14 @@ fn save_logic_task(
             if cfg.logic.kind == LogicKind::LinearMpc {
                 if editor.mpc_params.is_empty() {
                     return Err(
-                        "Linear MPC braucht gespeicherte Startwerte. Bitte Modell, Variablen und I/O prüfen."
+                        "Linear MPC requires saved initial values. Please Model, Variables and I/O check."
                             .to_string(),
                     );
                 }
                 for row in editor.mpc_params {
                     let key = row.key.trim();
                     let value = row.value.trim().parse::<f64>().map_err(|_| {
-                        format!("Ungültiger Linear-MPC-Startwert für '{}'", row.key)
+                        format!("Invalid Linear-MPC-initial value for '{}'", row.key)
                     })?;
                     cfg.logic
                         .params
@@ -7071,15 +7056,15 @@ fn save_logic_task(
                 && !cfg.logic.custom_rust.is_compatible_with(&cfg.io)
             {
                 return Err(
-                    "Eigene Regellogik ist aktuell nicht kompatibel mit der I/O-Definition"
+                    "Custom Control Strategy is currently incompatible with the I/O definition"
                         .to_string(),
                 );
             }
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Regellogik konnte nicht gespeichert werden: {err}"))?;
-            Ok(format!("Regellogik für '{}' gespeichert", project_name))
+                .map_err(|err| format!("Control Strategy could not be saved: {err}"))?;
+            Ok(format!("Saved control strategy for '{}'", project_name))
         },
         Message::LogicSaved,
     )
@@ -7092,7 +7077,7 @@ fn parse_kalman_parameter_rows(rows: &[MpcParamEditorRow]) -> Result<HashMap<Str
             .value
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("Ungültiger Kalman-Parameter '{}'", row.key))?;
+            .map_err(|_| format!("Invalid Kalman parameters '{}'", row.key))?;
         values.insert(row.key.clone(), value);
     }
     validate_kalman_parameters(&values).map_err(|err| err.to_string())?;
@@ -7110,7 +7095,7 @@ fn import_kalman_csv_task(vars: VariableCatalogConfig) -> Task<Message> {
             };
             import_csv(&path, &vars)
                 .map(Some)
-                .map_err(|err| format!("CSV konnte nicht importiert werden: {err}"))
+                .map_err(|err| format!("CSV could not be imported: {err}"))
         },
         Message::KalmanCsvImported,
     )
@@ -7130,12 +7115,10 @@ fn save_kalman_parameters_task(
                 .collect::<HashMap<_, _>>();
             project_service
                 .update_logic_params(&project_name, updates.clone())
-                .map_err(|err| {
-                    format!("Kalman-Parameter konnten nicht gespeichert werden: {err}")
-                })?;
+                .map_err(|err| format!("Kalman parameters could not be saved: {err}"))?;
             Ok(updates)
         },
-        Message::KalmanParametersSaved,
+        Message::KalmanparametersSaved,
     )
 }
 
@@ -7148,12 +7131,12 @@ fn run_observer_task(
     Task::perform(
         async move {
             let parameters = parse_kalman_parameter_rows(&rows)?;
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             if !cfg.kalman_tuning_available() {
                 return Err(
-                    "Kalman-Tuning benötigt gespeicherte kompatible Linear-MPC-Regellogik"
+                    "Kalman tuning requires saved compatible Linear MPC control strategy"
                         .to_string(),
                 );
             }
@@ -7161,7 +7144,7 @@ fn run_observer_task(
                 .model
                 .as_ref()
                 .and_then(ModelConfig::linear_state_space)
-                .ok_or_else(|| "Lineares Zustandsraummodell fehlt".to_string())?;
+                .ok_or_else(|| "Lineares state-space model is missing".to_string())?;
             let result = run_observer(
                 &project_name,
                 &dataset,
@@ -7170,11 +7153,11 @@ fn run_observer_task(
                 cfg.runtime.cycle_ms,
                 &parameters,
             )
-            .map_err(|err| format!("Observer konnte nicht ausgeführt werden: {err}"))?;
+            .map_err(|err| format!("Observer could not be executed: {err}"))?;
             let rows = result.timestamps.len();
             tuning_store().put(result);
             Ok(format!(
-                "Observer für '{project_name}' über {rows} Zeilen ausgeführt"
+                "Observer executed for '{project_name}' across {rows} rows"
             ))
         },
         Message::ObserverFinished,
@@ -7187,11 +7170,11 @@ fn generate_logic_template_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             if cfg.io.outputs.is_empty() {
-                return Err("I/O ist leer. Bitte zuerst 'I/O definieren' abschließen.".to_string());
+                return Err("I/O is empty. Complete the I/O definition first.".to_string());
             }
 
             let project_dir = project_service.project_dir(&project_name);
@@ -7199,11 +7182,11 @@ fn generate_logic_template_task(
             let strategy_root = project_dir.join("logic").join("custom_strategy");
             let src_dir = strategy_root.join("src");
             fs::create_dir_all(&src_dir)
-                .map_err(|err| format!("Template-Ordner konnte nicht erstellt werden: {err}"))?;
+                .map_err(|err| format!("template directory could not be created: {err}"))?;
 
             let cargo_toml = render_custom_cargo_toml(&strategy_name);
             fs::write(strategy_root.join("Cargo.toml"), cargo_toml)
-                .map_err(|err| format!("Cargo.toml konnte nicht geschrieben werden: {err}"))?;
+                .map_err(|err| format!("Cargo.toml could not be written: {err}"))?;
 
             let required_inputs: Vec<String> = cfg
                 .io
@@ -7221,15 +7204,13 @@ fn generate_logic_template_task(
                 src_dir.join("lib.rs"),
                 render_custom_template(&required_inputs, &required_outputs),
             )
-            .map_err(|err| format!("Template lib.rs konnte nicht geschrieben werden: {err}"))?;
+            .map_err(|err| format!("Template lib.rs could not be written: {err}"))?;
 
             fs::write(
                 src_dir.join("generated_dispatch.rs"),
                 render_generated_dispatch(&[]),
             )
-            .map_err(|err| {
-                format!("generated_dispatch.rs konnte nicht geschrieben werden: {err}")
-            })?;
+            .map_err(|err| format!("generated_dispatch.rs could not be written: {err}"))?;
 
             let artifact_name = format!("{}{}{}", dylib_prefix(), strategy_name, dylib_extension());
             let source_rel = "logic/custom_strategy/src/lib.rs".to_string();
@@ -7243,19 +7224,17 @@ fn generate_logic_template_task(
             cfg.logic.custom_rust.required_outputs = required_outputs;
             cfg.logic.custom_rust.compatible = false;
             cfg.logic.custom_rust.last_build_message =
-                "Template erzeugt. Bitte 'Strategie prüfen/builden' ausführen.".to_string();
+                "Template generated. Run 'Build and Check Strategy'.".to_string();
             if cfg.logic.kind == LogicKind::CustomRust {
                 cfg.logic.kind = LogicKind::PController;
             }
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| {
-                    format!("Template-Konfiguration konnte nicht gespeichert werden: {err}")
-                })?;
+                .map_err(|err| format!("template configuration could not be saved: {err}"))?;
 
             Ok(format!(
-                "Template für '{}' erzeugt unter {}",
+                "Template for '{}' generated under {}",
                 project_name,
                 strategy_root.display()
             ))
@@ -7267,9 +7246,9 @@ fn generate_logic_template_task(
 fn build_custom_logic_task(project_service: ProjectService, project_name: String) -> Task<Message> {
     Task::perform(
         async move {
-            let mut cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let mut cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             let project_dir = project_service.project_dir(&project_name);
             let strategy_root = project_dir.join("logic").join("custom_strategy");
             let source_rel = if cfg.logic.custom_rust.source_path.trim().is_empty() {
@@ -7280,23 +7259,22 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
             let source_path = project_dir.join(&source_rel);
             if !source_path.exists() {
                 return Err(format!(
-                    "Custom source nicht gefunden: {}",
+                    "Custom source not found: {}",
                     source_path.display()
                 ));
             }
 
             let source = fs::read_to_string(&source_path)
-                .map_err(|err| format!("Custom source konnte nicht gelesen werden: {err}"))?;
+                .map_err(|err| format!("Custom source could not be read: {err}"))?;
             let schema = parse_custom_parameter_schema_from_source(&source)
-                .map_err(|err| format!("Signatur ungültig: {err}"))?;
+                .map_err(|err| format!("signature invalid: {err}"))?;
 
             let generated_dispatch_path = source_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join("generated_dispatch.rs");
-            fs::write(&generated_dispatch_path, render_generated_dispatch(&schema)).map_err(
-                |err| format!("generated_dispatch.rs konnte nicht geschrieben werden: {err}"),
-            )?;
+            fs::write(&generated_dispatch_path, render_generated_dispatch(&schema))
+                .map_err(|err| format!("generated_dispatch.rs could not be written: {err}"))?;
 
             let output = Command::new("cargo")
                 .arg("build")
@@ -7304,23 +7282,20 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
                 .arg("--manifest-path")
                 .arg(strategy_root.join("Cargo.toml"))
                 .output()
-                .map_err(|err| format!("cargo build konnte nicht gestartet werden: {err}"))?;
+                .map_err(|err| format!("cargo build could not be started: {err}"))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 cfg.logic.custom_rust.compatible = false;
-                cfg.logic.custom_rust.last_build_message =
-                    first_line_or(&stderr, "Build fehlgeschlagen");
+                cfg.logic.custom_rust.last_build_message = first_line_or(&stderr, "Build failed");
                 project_service
                     .save_config(&project_name, &cfg)
                     .map_err(|err| {
-                        format!(
-                            "Konfiguration konnte nach Build-Fehler nicht gespeichert werden: {err}"
-                        )
+                        format!("Configuration could not be saved after the build error: {err}")
                     })?;
                 return Err(format!(
-                    "Build fehlgeschlagen: {}",
-                    first_line_or(&stderr, "Unbekannter Fehler")
+                    "Build failed: {}",
+                    first_line_or(&stderr, "Unknown error")
                 ));
             }
 
@@ -7338,28 +7313,26 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
             let artifact_path = project_dir.join(&artifact_rel);
             if !artifact_path.exists() {
                 return Err(format!(
-                    "Build erfolgreich, aber Artefakt fehlt: {}",
+                    "Build succeeded, but artifact is missing: {}",
                     artifact_path.display()
                 ));
             }
 
             let contract = inspect_custom_library_contract(&artifact_path).map_err(|err| {
-                format!("Build ok, aber Metadaten aus cdylib konnten nicht gelesen werden: {err}")
+                format!("Build succeeded, but metadata from cdylib could not be read: {err}")
             })?;
 
             if schema_signature(&schema) != schema_signature(&contract.parameter_schema) {
                 cfg.logic.custom_rust.compatible = false;
                 cfg.logic.custom_rust.last_build_message =
-                    "Build erfolgreich, aber Parameter-Schema in cdylib passt nicht zur control-Signatur".to_string();
+                    "Build succeeded, but parameter schema in the cdylib does not match the control signature".to_string();
                 project_service
                     .save_config(&project_name, &cfg)
                     .map_err(|err| {
-                        format!(
-                            "Konfiguration konnte nach Schema-Fehler nicht gespeichert werden: {err}"
-                        )
+                        format!("Configuration could not be saved after the schema error: {err}")
                     })?;
                 return Err(
-                    "Build erfolgreich, aber Parameter-Schema in cdylib passt nicht zur control-Signatur".to_string(),
+                    "Build succeeded, but parameter schema in the cdylib does not match the control signature".to_string(),
                 );
             }
 
@@ -7387,10 +7360,10 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
             cfg.logic.custom_rust.required_outputs = contract.required_outputs.clone();
             cfg.logic.custom_rust.compatible = strict_io_match;
             cfg.logic.custom_rust.last_build_message = if strict_io_match {
-                "Build erfolgreich".to_string()
+                "Build succeeded".to_string()
             } else {
                 format!(
-                    "Build erfolgreich, aber I/O-Mismatch: {}",
+                    "Build succeeded, but I/O mismatch: {}",
                     summarize_io_mismatch(
                         &expected_inputs,
                         &expected_outputs,
@@ -7404,16 +7377,16 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Custom-Logik konnte nicht gespeichert werden: {err}"))?;
+                .map_err(|err| format!("Custom logic could not be saved: {err}"))?;
 
             if strict_io_match {
                 Ok(format!(
-                    "Custom-Strategie gebaut und kompatibel für '{}'",
+                    "Built compatible custom strategy for '{}'",
                     project_name
                 ))
             } else {
                 Ok(format!(
-                    "Custom-Strategie gebaut, aber I/O-Mismatch für '{}'",
+                    "Built custom strategy for '{}', but its I/O contract does not match",
                     project_name,
                 ))
             }
@@ -7429,13 +7402,13 @@ fn run_control_function_tests_task(
 ) -> Task<Message> {
     Task::perform(
         async move {
-            let cfg = project_service.load_config(&project_name).map_err(|err| {
-                format!("Projektkonfiguration konnte nicht geladen werden: {err}")
-            })?;
+            let cfg = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             let selections = build_control_function_sweep_selections(&test_state)?;
             let project_dir = project_service.project_dir(&project_name);
             run_control_function_tests(&cfg, &project_dir, &selections)
-                .map_err(|err| format!("Control Function Tests fehlgeschlagen: {err}"))
+                .map_err(|err| format!("Control Function Tests failed: {err}"))
         },
         Message::ControlFunctionTestsFinished,
     )
@@ -7538,17 +7511,17 @@ fn summarize_io_mismatch(
         parts.push(format!("fehlende inputs [{}]", missing_in.join(", ")));
     }
     if !extra_in.is_empty() {
-        parts.push(format!("zusätzliche inputs [{}]", extra_in.join(", ")));
+        parts.push(format!("additional inputs [{}]", extra_in.join(", ")));
     }
     if !missing_out.is_empty() {
         parts.push(format!("fehlende outputs [{}]", missing_out.join(", ")));
     }
     if !extra_out.is_empty() {
-        parts.push(format!("zusätzliche outputs [{}]", extra_out.join(", ")));
+        parts.push(format!("additional outputs [{}]", extra_out.join(", ")));
     }
 
     if parts.is_empty() {
-        "unbekannte Abweichung".to_string()
+        "unknown mismatch".to_string()
     } else {
         parts.join("; ")
     }
@@ -7627,19 +7600,19 @@ impl ParamValue {{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartApcContext {{
-    // Aktueller Runtime-State.
+    // Current runtime state.
     pub state: RuntimeState,
-    // Aktueller Input-Snapshot (alle verfügbaren Eingänge).
+    // Current input snapshot (all available inputs).
     pub inputs: HashMap<String, SignalValue>,
-    // Aktuelle Online-Parameter.
+    // Current online parameters.
     pub params: HashMap<String, ParamValue>,
-    // Historie der Inputs (ältest -> neuest).
+    // History of inputs (oldest -> newest).
     #[serde(default)]
     pub input_history: HashMap<String, Vec<SignalValue>>,
-    // Historie der Outputs (ältest -> neuest).
+    // History of outputs (oldest -> newest).
     #[serde(default)]
     pub output_history: HashMap<String, Vec<SignalValue>>,
-    // Historie der Online-Parameter (ältest -> neuest).
+    // History of online parameters (oldest -> newest).
     #[serde(default)]
     pub param_history: HashMap<String, Vec<ParamValue>>,
 }}
@@ -7647,7 +7620,7 @@ pub struct SmartApcContext {{
 #[derive(Debug, Clone, Default)]
 pub struct SmartApcOutputs {{
     pub values: HashMap<String, SignalValue>,
-    // Zusätzliche User-Logs aus der Regelstrategie.
+    // Additional user logs from the Control Strategy.
     pub logs: Vec<UserLogEntry>,
 }}
 
@@ -7735,20 +7708,20 @@ const REQUIRED_OUTPUTS: &[&str] = &{required_outputs_json};
 
 pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     // -----------------------------------------------------------------------------------------
-    // TEMPLATE HINWEISE
-    // 1) ctx.inputs enthält den aktuellen Zykluswert je Signal.
-    // 2) ctx.input_history/output_history/param_history enthalten Verlaufswerte (ältest -> neuest).
-    // 3) Zusätzliche Parameter können als weitere Funktionsargumente ergänzt werden:
-    //    z. B. `pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64)`.
-    //    Diese werden automatisch als Online-Parameter geführt.
-    // 4) Alle benötigten `mv.*.write` Outputs setzen.
-    // 5) Eigene Logs können über out.log(...), out.log_value(...), out.log_values(...) erzeugt werden.
-    // 6) Optionale Zukunftsplots als F64-Werte loggen:
+    // TEMPLATE NOTES
+    // 1) ctx.inputs contains the current cycle value per signal.
+    // 2) ctx.input_history/output_history/param_history contain historical values (oldest -> newest).
+    // 3) Additional parameters can be added as function arguments:
+    //    for example `pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64)`.
+    //    These are automatically managed as online parameters.
+    // 4) All required `mv.*.write` outputs must be set.
+    // 5) Custom logs can be generated with out.log(...), out.log_value(...), out.log_values(...).
+    // 6) Optional future plots as log F64 values:
     //    - future_pred_without_control.cv.<cv>.k01
     //    - future_pred_with_control.cv.<cv>.k01
     //    - future_pred_with_control.mv.<mv>.k01
-    //    Beispiel: values.insert("future_pred_with_control.cv.y1.k01".into(), SignalValue::F64(y_pred));
-    //    Danach out.log_future_prediction_values(values) aufrufen.
+    //    Example: values.insert("future_pred_with_control.cv.y1.k01".into(), SignalValue::F64(y_pred));
+    //    Then call out.log_future_prediction_values(values).
     // -----------------------------------------------------------------------------------------
     let _ = ctx;
     // Template default: set every required MV.write output.
@@ -7886,7 +7859,7 @@ async fn read_optional_tag(adapter: &OpcUaClientAdapter, address: &str) -> Strin
 fn parse_test_write_value(raw: &str) -> Result<SignalValue, String> {
     let value = raw
         .parse::<f64>()
-        .map_err(|_| format!("test_write: '{}' ist kein gültiger f64-Wert", raw))?;
+        .map_err(|_| format!("test_write: '{}' is not a valid f64 value", raw))?;
     Ok(SignalValue::F64(value))
 }
 
@@ -7911,10 +7884,10 @@ fn build_variable_catalog(
     };
 
     vars.validate()
-        .map_err(|err| format!("Variablen ungültig: {err}"))?;
+        .map_err(|err| format!("Variables invalid: {err}"))?;
 
     if !vars.has_any() {
-        return Err("Bitte mindestens eine Variable (MV/CV/DV) definieren".to_string());
+        return Err("Define at least one variable (MV/CV/DV)".to_string());
     }
 
     vars.mvs.sort();
@@ -7934,7 +7907,7 @@ fn build_io_definition(
         let row = mv_rows
             .iter()
             .find(|row| row.name == *name)
-            .ok_or_else(|| format!("MV '{}' fehlt in I/O Definition", name))?;
+            .ok_or_else(|| format!("MV '{}' is missing in I/O definition", name))?;
 
         let mv_write = row.mv_write.trim().to_string();
         let mv_read = row.mv_read.trim().to_string();
@@ -7945,7 +7918,7 @@ fn build_io_definition(
                 row.hl
                     .trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("MV '{}' HL ist keine gültige Zahl", name))?,
+                    .map_err(|_| format!("MV '{}' HL is not a valid number", name))?,
             )
         };
         let ll = if row.ll.trim().is_empty() {
@@ -7955,7 +7928,7 @@ fn build_io_definition(
                 row.ll
                     .trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("MV '{}' LL ist keine gültige Zahl", name))?,
+                    .map_err(|_| format!("MV '{}' LL is not a valid number", name))?,
             )
         };
         if let (Some(ll), Some(hl)) = (ll, hl) {
@@ -7981,29 +7954,29 @@ fn build_io_definition(
         let row = cv_rows
             .iter()
             .find(|row| row.name == *name)
-            .ok_or_else(|| format!("CV '{}' fehlt in I/O Definition", name))?;
+            .ok_or_else(|| format!("CV '{}' is missing in I/O definition", name))?;
 
-        let soll = row.soll.trim().to_string();
-        let ist = row.ist.trim().to_string();
+        let setpoint = row.setpoint.trim().to_string();
+        let process_value = row.process_value.trim().to_string();
 
-        let sollband_value = if row.sollband_value.trim().is_empty() {
+        let deadband_value = if row.deadband_value.trim().is_empty() {
             None
         } else {
             Some(
-                row.sollband_value
+                row.deadband_value
                     .trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("CV '{}' Sollband-Wert ist keine gültige Zahl", name))?,
+                    .map_err(|_| format!("CV '{}' deadband value is not a valid number", name))?,
             )
         };
-        let sollband_opc = optional_trimmed(&row.sollband_opc);
+        let deadband_opc = optional_trimmed(&row.deadband_opc);
 
         cvs.push(CvIoDefinition {
             name: name.clone(),
-            soll,
-            ist,
-            sollband_opc,
-            sollband_value,
+            setpoint,
+            process_value,
+            deadband_opc,
+            deadband_value,
             enable: optional_trimmed(&row.enable),
         });
     }
@@ -8013,7 +7986,7 @@ fn build_io_definition(
         let row = dv_rows
             .iter()
             .find(|row| row.name == *name)
-            .ok_or_else(|| format!("DV '{}' fehlt in I/O Definition", name))?;
+            .ok_or_else(|| format!("DV '{}' is missing in I/O definition", name))?;
         let read = row.read.trim().to_string();
         dvs.push(DvIoDefinition {
             name: name.clone(),
@@ -8025,9 +7998,9 @@ fn build_io_definition(
     let io_definition = crate::project_config::IoDefinitionConfig { mvs, cvs, dvs };
     io_definition
         .validate(vars)
-        .map_err(|err| format!("I/O Definition ungültig: {err}"))?;
+        .map_err(|err| format!("I/O definition invalid: {err}"))?;
     if !io_definition.is_complete_for(vars) {
-        return Err("I/O Definition ist unvollständig".to_string());
+        return Err("I/O definition is incomplete".to_string());
     }
     Ok(io_definition)
 }
@@ -8054,7 +8027,7 @@ fn start_web_task(
 
             let listener = tokio::net::TcpListener::bind(bind)
                 .await
-                .map_err(|err| format!("Web API konnte nicht an {} binden: {}", bind, err))?;
+                .map_err(|err| format!("Web API could not bind to {}: {}", bind, err))?;
 
             tokio::spawn(async move {
                 if let Err(err) = axum::serve(listener, build_router(state)).await {
@@ -8062,7 +8035,7 @@ fn start_web_task(
                 }
             });
 
-            Ok(format!("Web API läuft auf http://{}", bind))
+            Ok(format!("Web API running on http://{}", bind))
         },
         Message::WebStarted,
     )
@@ -8650,19 +8623,19 @@ fn build_control_function_selection(
             .min
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("Sweep '{}' min ist keine gültige Zahl", row.name))?;
+            .map_err(|_| format!("Sweep '{}' min is not a valid number", row.name))?;
         let max = row
             .max
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("Sweep '{}' max ist keine gültige Zahl", row.name))?;
+            .map_err(|_| format!("Sweep '{}' max is not a valid number", row.name))?;
         let samples = row
             .samples
             .trim()
             .parse::<usize>()
-            .map_err(|_| format!("Sweep '{}' samples ist keine gültige Ganzzahl", row.name))?;
+            .map_err(|_| format!("Sweep '{}' samples is not a valid integer", row.name))?;
         if samples == 0 {
-            return Err(format!("Sweep '{}' braucht mindestens 1 Sample", row.name));
+            return Err(format!("Sweep '{}' requires at least one sample", row.name));
         }
 
         let (min, max) = if min <= max { (min, max) } else { (max, min) };
@@ -8681,8 +8654,8 @@ fn build_control_function_selection(
 
 fn format_sweep_mode(mode: SweepExecutionMode) -> &'static str {
     match mode {
-        SweepExecutionMode::FullFactorial => "vollfaktoriell",
-        SweepExecutionMode::SingleAxisFallback => "Einzel-Sweeps",
+        SweepExecutionMode::FullFactorial => "full factorial",
+        SweepExecutionMode::SingleAxisFallback => "single-axis sweeps",
     }
 }
 
@@ -8829,12 +8802,12 @@ fn parse_named_value_rows(
             .value
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("{} '{}' ist keine gültige Zahl", label, row.name))?;
+            .map_err(|_| format!("{} '{}' is not a valid number", label, row.name))?;
         if !parsed.is_finite() {
-            return Err(format!("{} '{}' muss endlich sein", label, row.name));
+            return Err(format!("{} '{}' must be finite", label, row.name));
         }
         if require_non_negative && parsed < 0.0 {
-            return Err(format!("{} '{}' muss >= 0 sein", label, row.name));
+            return Err(format!("{} '{}' must be >= 0", label, row.name));
         }
         values.insert(row.name.clone(), parsed);
     }
@@ -8959,7 +8932,7 @@ mod tests {
         let keys = [
             "mpc.kalman.state.2.q",
             "custom_gain",
-            "io.cv.y1.sollband",
+            "io.cv.y1.deadband",
             "p.y1.u1.kp",
             "mpc.control_horizon",
             "mpc.kalman.state.1.q",
@@ -9007,8 +8980,8 @@ mod tests {
                 },
                 ParameterHierarchyItem::Parameter {
                     index: 2,
-                    key: "io.cv.y1.sollband".to_string(),
-                    label: "sollband".to_string(),
+                    key: "io.cv.y1.deadband".to_string(),
+                    label: "deadband".to_string(),
                     depth: 3,
                 },
                 ParameterHierarchyItem::Heading {
@@ -9125,7 +9098,7 @@ mod tests {
             [
                 "mpc.control_horizon",
                 "mpc.kalman.cv.y1.r",
-                "io.cv.y1.sollband",
+                "io.cv.y1.deadband",
             ]
             .iter()
             .enumerate()
@@ -9149,7 +9122,7 @@ mod tests {
         )));
         assert!(visible.iter().any(|item| matches!(
             item,
-            ParameterHierarchyItem::Parameter { key, .. } if key == "io.cv.y1.sollband"
+            ParameterHierarchyItem::Parameter { key, .. } if key == "io.cv.y1.deadband"
         )));
 
         let other_scope =
@@ -9176,10 +9149,10 @@ mod tests {
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: "ns=2;s=y1_target".to_string(),
-            ist: "ns=2;s=y1_value".to_string(),
-            sollband_opc: None,
-            sollband_value: Some(0.5),
+            setpoint: "ns=2;s=y1_target".to_string(),
+            process_value: "ns=2;s=y1_value".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(0.5),
             enable: None,
         });
 
@@ -9194,7 +9167,7 @@ mod tests {
             Some(&LogicParamValue::F64(-10.0))
         );
         assert_eq!(
-            cfg.logic.params.get("io.cv.y1.sollband"),
+            cfg.logic.params.get("io.cv.y1.deadband"),
             Some(&LogicParamValue::F64(0.5))
         );
     }
@@ -9220,10 +9193,10 @@ mod tests {
         });
         cfg.io_definition.cvs.push(CvIoDefinition {
             name: "y1".to_string(),
-            soll: "cv.y1.soll".to_string(),
-            ist: "cv.y1.ist".to_string(),
-            sollband_opc: None,
-            sollband_value: Some(0.25),
+            setpoint: "cv.y1.setpoint".to_string(),
+            process_value: "cv.y1.process_value".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(0.25),
             enable: None,
         });
         cfg.logic.kind = LogicKind::LinearMpc;
