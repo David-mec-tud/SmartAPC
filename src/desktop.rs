@@ -15,11 +15,13 @@ use std::{
 
 use anyhow::anyhow;
 use iced::{
-    Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
-    application, mouse, time,
+    Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
+    application,
+    font::Weight,
+    mouse, time,
     widget::{
-        button, canvas, checkbox, column, container, pick_list, row, scrollable, text, text_editor,
-        text_input,
+        Space, button, canvas, checkbox, column, container, pick_list, row, scrollable, text,
+        text_editor, text_input,
     },
 };
 
@@ -920,12 +922,56 @@ fn parameter_hierarchy<'a>(
 }
 
 fn parameter_heading(label: &str, depth: usize) -> Element<'static, Message> {
-    let size = 20_u32.saturating_sub((depth.min(4) as u32) * 2);
-    text(label.to_string()).size(size).into()
+    row![
+        parameter_hierarchy_indent(depth),
+        text(parameter_heading_label(label, depth))
+            .size(parameter_heading_size(depth))
+            .font(Font {
+                weight: Weight::Bold,
+                ..Font::DEFAULT
+            })
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn parameter_heading_size(depth: usize) -> u32 {
+    match depth {
+        0 => 24,
+        1 => 20,
+        2 => 18,
+        _ => 16,
+    }
+}
+
+fn parameter_heading_label(label: &str, depth: usize) -> String {
+    if depth == 0 {
+        label.to_string()
+    } else {
+        format!("• {label}")
+    }
 }
 
 fn parameter_leaf_label(label: &str) -> String {
     format!("• {label}")
+}
+
+fn parameter_hierarchy_indent(depth: usize) -> Space {
+    Space::new().width(Length::Fixed(parameter_hierarchy_indent_px(depth)))
+}
+
+fn parameter_hierarchy_indent_px(depth: usize) -> f32 {
+    depth.saturating_sub(1) as f32 * 18.0
+}
+
+fn parameter_leaf(label: &str, depth: usize, width: Length) -> Element<'static, Message> {
+    row![
+        parameter_hierarchy_indent(depth),
+        text(parameter_leaf_label(label)).font(Font::DEFAULT)
+    ]
+    .width(width)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 #[derive(Debug, Clone)]
@@ -3686,7 +3732,12 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter { index, label, .. } => {
+                    ParameterHierarchyItem::Parameter {
+                        index,
+                        label,
+                        depth,
+                        ..
+                    } => {
                         let row_data = &self.optimization_editor.param_rows[index];
                         let fixed_toggle = if can_edit {
                             checkbox(row_data.fixed)
@@ -3717,7 +3768,7 @@ impl DesktopApp {
                             .optimization_parameter_display_value(&row_data.key, &row_data.start);
                         content = content.push(
                             row![
-                                text(parameter_leaf_label(&label)).width(parameter_col),
+                                parameter_leaf(&label, depth, parameter_col),
                                 fixed_toggle,
                                 start_input.width(numeric_col),
                                 min_input.width(numeric_col),
@@ -4121,6 +4172,7 @@ impl DesktopApp {
                     index,
                     row_data,
                     &row_data.name,
+                    0,
                     Message::ControlTestInputEnabledToggled,
                     Message::ControlTestInputMinChanged,
                     Message::ControlTestInputMaxChanged,
@@ -4145,13 +4197,19 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter { index, label, .. } => {
+                    ParameterHierarchyItem::Parameter {
+                        index,
+                        label,
+                        depth,
+                        ..
+                    } => {
                         let row_data = &self.control_function_tests.param_rows[index];
                         let label = parameter_leaf_label(&label);
                         content = content.push(self.control_function_sweep_row_view(
                             index,
                             row_data,
                             &label,
+                            depth,
                             Message::ControlTestParamEnabledToggled,
                             Message::ControlTestParamMinChanged,
                             Message::ControlTestParamMaxChanged,
@@ -4268,6 +4326,7 @@ impl DesktopApp {
         index: usize,
         row_data: &ControlFunctionSweepRowState,
         label: &str,
+        depth: usize,
         enabled_message: FEnabled,
         min_message: FMin,
         max_message: FMax,
@@ -4314,7 +4373,12 @@ impl DesktopApp {
             .align_y(iced::Alignment::Center),
         };
 
-        container(row).padding(6).into()
+        container(row![
+            parameter_hierarchy_indent(depth),
+            row.width(Length::Fill)
+        ])
+        .padding(6)
+        .into()
     }
 
     fn communication_editor_view(&self, runtime_running: bool) -> Element<'_, Message> {
@@ -4914,12 +4978,16 @@ impl DesktopApp {
                         ParameterHierarchyItem::Heading { label, depth } => {
                             content = content.push(parameter_heading(&label, depth));
                         }
-                        ParameterHierarchyItem::Parameter { index, label, .. } => {
+                        ParameterHierarchyItem::Parameter {
+                            index,
+                            label,
+                            depth,
+                            ..
+                        } => {
                             let row_data = &self.logic_editor.mpc_params[index];
                             content = content.push(
                                 row![
-                                    text(parameter_leaf_label(&label))
-                                        .width(Length::FillPortion(2)),
+                                    parameter_leaf(&label, depth, Length::FillPortion(2)),
                                     text_input("Wert", &row_data.value)
                                         .on_input(move |value| Message::MpcParamChanged(
                                             index, value
@@ -5047,7 +5115,9 @@ impl DesktopApp {
                     ParameterHierarchyItem::Heading { label, depth } => {
                         content = content.push(parameter_heading(&label, depth));
                     }
-                    ParameterHierarchyItem::Parameter { key, label, .. } => {
+                    ParameterHierarchyItem::Parameter {
+                        key, label, depth, ..
+                    } => {
                         let current = self
                             .logic_params
                             .get(&key)
@@ -5068,7 +5138,7 @@ impl DesktopApp {
 
                         content = content.push(
                             row![
-                                text(parameter_leaf_label(&label)).width(Length::FillPortion(2)),
+                                parameter_leaf(&label, depth, Length::FillPortion(2)),
                                 text(format_logic_param_value(&current))
                                     .width(Length::FillPortion(1)),
                                 text_input("Neuer Wert", &input_value)
@@ -8361,8 +8431,9 @@ mod tests {
     use super::{
         LogicEditorState, ModelEditorState, ModelKindChoice, ParameterHierarchyItem,
         SimulationEditorState, build_model_config_from_editor, build_simulation_config_from_editor,
-        parameter_hierarchy, parse_matrix_import_text, resize_string_matrix,
-        sync_io_initial_value_online_params,
+        parameter_heading_label, parameter_heading_size, parameter_hierarchy,
+        parameter_hierarchy_indent_px, parameter_leaf_label, parse_matrix_import_text,
+        resize_string_matrix, sync_io_initial_value_online_params,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -8504,6 +8575,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parameter_hierarchy_presentation_uses_heading_levels_bullets_and_deep_indent() {
+        assert_eq!(parameter_heading_label("mpc", 0), "mpc");
+        assert_eq!(parameter_heading_label("kalman", 1), "• kalman");
+        assert_eq!(parameter_heading_label("cv", 2), "• cv");
+        assert_eq!(parameter_leaf_label("r"), "• r");
+
+        assert_eq!(parameter_heading_size(0), 24);
+        assert_eq!(parameter_heading_size(1), 20);
+        assert_eq!(parameter_heading_size(2), 18);
+        assert_eq!(parameter_heading_size(3), 16);
+
+        assert_eq!(parameter_hierarchy_indent_px(0), 0.0);
+        assert_eq!(parameter_hierarchy_indent_px(1), 0.0);
+        assert_eq!(parameter_hierarchy_indent_px(2), 18.0);
+        assert_eq!(parameter_hierarchy_indent_px(3), 36.0);
     }
 
     #[test]
