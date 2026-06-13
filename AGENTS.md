@@ -37,7 +37,7 @@
 - Prefer clear names and small composable functions over dense logic.
 - Add high-signal comments for non-obvious behavior, contracts, and data flow.
 - Generated templates/scaffolds must include usage-oriented comments, not just placeholders.
-- ask if I want to commit after finishing the task.
+- Ask whether the user wants to commit after finishing the task.
 
 ## 6. Commit Conventions
 - Prefer multiple clean commits grouped by subsystem/behavior.
@@ -53,7 +53,7 @@
 - Keep strategy compatibility logic strict: selected strategy must match current I/O contract.
 - Keep online parameters limited to:
   - active logic parameters
-  - active static I/O parameters (values without OPC address that are runtime-editable)
+  - active static I/O parameters (values without an OPC UA Node ID that are runtime-editable)
 - Ensure logging additions are structured and testable (runtime log entries must be machine-parseable).
 
 ## 9. Custom Rust Strategy Workflow (Quick Reference)
@@ -70,7 +70,7 @@
 - Start desktop app:
   - `cargo run -- desktop --project-root ./projects`
 - In GUI:
-  - Configure OPC-UA endpoint and watchdog.
+  - Configure OPC UA endpoint and watchdog.
   - Run I/O read/write test.
   - Start runtime and verify plot/log updates.
 - This smoke test is recommended, not mandatory for every change.

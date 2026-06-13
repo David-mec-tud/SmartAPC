@@ -97,13 +97,13 @@ impl ProjectConfig {
         } = &self.watchdog
         {
             if read_node.trim().is_empty() || write_node.trim().is_empty() {
-                bail!("watchdog counter_mirror requires read_node and write_node");
+                bail!("Counter-mirror watchdog requires read_node and write_node");
             }
             if *mirror_cycle_ms == 0 {
-                bail!("watchdog mirror_cycle_ms must be > 0");
+                bail!("Watchdog mirror_cycle_ms must be greater than 0");
             }
             if *stale_timeout_ms == 0 {
-                bail!("watchdog stale_timeout_ms must be > 0");
+                bail!("Watchdog stale_timeout_ms must be greater than 0");
             }
         }
 
@@ -174,10 +174,10 @@ impl ProjectConfig {
 
     pub fn build_simulation_io_and_limits(&self) -> Result<(IoConfig, LimitsConfig)> {
         if !self.variables.has_any() {
-            bail!("simulation requires configured MV/CV/DV names");
+            bail!("Simulation requires configured MV, CV, or DV names");
         }
         if !self.io_definition.is_complete_for(&self.variables) {
-            bail!("simulation requires a complete I/O definition");
+            bail!("Simulation requires a complete I/O definition");
         }
 
         let io = self.build_simulation_logic_io()?;
@@ -192,7 +192,7 @@ impl ProjectConfig {
                 .expect("checked by is_complete_for");
 
             let (Some(ll), Some(hl)) = (row.ll, row.hl) else {
-                bail!("simulation requires numeric MV limits for '{}'", name);
+                bail!("Simulation requires numeric MV limits for '{}'", name);
             };
             limits.insert(
                 format!("mv.{}.write", name),
@@ -209,11 +209,11 @@ impl ProjectConfig {
 
     pub fn validate_for_simulation(&self) -> Result<()> {
         let Some(model) = self.model.as_ref() else {
-            bail!("simulation requires a configured model");
+            bail!("Simulation requires a configured model");
         };
         model.validate(&self.variables)?;
         if model.linear_state_space().is_none() {
-            bail!("simulation requires a linear state-space model");
+            bail!("Simulation requires a linear state-space model");
         }
 
         let (io, limits) = self.build_simulation_io_and_limits()?;
@@ -238,7 +238,9 @@ impl ProjectConfig {
             if configured {
                 return Ok(self.io.clone());
             }
-            bail!("selected logic is not configured for current runtime I/O definition");
+            bail!(
+                "The selected control strategy is not configured for the current runtime I/O definition"
+            );
         }
 
         match self.logic.kind {
@@ -312,10 +314,10 @@ impl ProjectConfig {
 
     fn build_minimal_custom_rust_simulation_io(&self) -> Result<IoConfig> {
         if !self.logic.custom_rust.compatible {
-            bail!("custom_rust strategy is not marked compatible");
+            bail!("Custom Rust strategy is not marked as compatible");
         }
         if self.logic.custom_rust.required_outputs.is_empty() {
-            bail!("custom_rust strategy has no required outputs");
+            bail!("Custom Rust strategy has no required outputs");
         }
 
         let mut inputs = Vec::new();
@@ -486,10 +488,10 @@ impl ProjectConfig {
             .as_ref()
             .and_then(ModelConfig::linear_state_space)
         else {
-            return Some("linear_mpc requires a linear_state_space model".to_string());
+            return Some("Linear MPC requires a linear state-space model".to_string());
         };
         if self.variables.mvs.is_empty() || self.variables.cvs.is_empty() {
-            return Some("linear_mpc requires at least one MV and one CV".to_string());
+            return Some("Linear MPC requires at least one MV and one CV".to_string());
         }
 
         let expected_u_order: Vec<_> = self
@@ -500,10 +502,10 @@ impl ProjectConfig {
             .chain(self.variables.dvs.iter().cloned())
             .collect();
         if model.u_order != expected_u_order {
-            return Some("linear_mpc model u_order must match MV then DV order".to_string());
+            return Some("Linear MPC model u_order must list MVs before DVs".to_string());
         }
         if model.y_order != self.variables.cvs {
-            return Some("linear_mpc model y_order must match CV order".to_string());
+            return Some("Linear MPC model y_order must match the CV order".to_string());
         }
 
         let input_names: HashSet<_> = io.inputs.iter().map(|point| point.name.as_str()).collect();
@@ -513,22 +515,22 @@ impl ProjectConfig {
             let setpoint = format!("cv.{cv}.setpoint");
             let process_value = format!("cv.{cv}.process_value");
             if !input_names.contains(setpoint.as_str()) {
-                return Some(format!("linear_mpc requires input '{setpoint}'"));
+                return Some(format!("Linear MPC requires input '{setpoint}'"));
             }
             if !input_names.contains(process_value.as_str()) {
-                return Some(format!("linear_mpc requires input '{process_value}'"));
+                return Some(format!("Linear MPC requires input '{process_value}'"));
             }
         }
         for mv in &self.variables.mvs {
             let write = format!("mv.{mv}.write");
             if !output_names.contains(write.as_str()) {
-                return Some(format!("linear_mpc requires output '{write}'"));
+                return Some(format!("Linear MPC requires output '{write}'"));
             }
         }
         for dv in &self.variables.dvs {
             let read = format!("dv.{dv}.read");
             if !input_names.contains(read.as_str()) {
-                return Some(format!("linear_mpc requires input '{read}'"));
+                return Some(format!("Linear MPC requires input '{read}'"));
             }
         }
 
@@ -857,7 +859,10 @@ impl IoDefinitionConfig {
         for row in &self.mvs {
             if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
                 if ll > hl {
-                    bail!("mv '{}' has ll > hl", row.name);
+                    bail!(
+                        "MV '{}' has a lower limit greater than its upper limit",
+                        row.name
+                    );
                 }
             }
         }
@@ -897,7 +902,7 @@ impl IoDefinitionConfig {
         vars: &VariableCatalogConfig,
     ) -> Result<(IoConfig, LimitsConfig)> {
         if !self.is_complete_for(vars) {
-            bail!("io_definition is incomplete for configured variables");
+            bail!("I/O definition is incomplete for the configured variables");
         }
 
         let mut inputs = Vec::new();
@@ -1354,11 +1359,11 @@ impl PControllerLogicConfig {
         let mut seen = HashSet::new();
         for pair in &self.pairs {
             if pair.cv.trim().is_empty() || pair.mv.trim().is_empty() {
-                bail!("p_controller pair requires non-empty cv and mv");
+                bail!("P controller pair requires a CV and an MV");
             }
             let key = format!("{}->{}", pair.cv.trim(), pair.mv.trim());
             if !seen.insert(key) {
-                bail!("duplicate p_controller pair '{}->{}'", pair.cv, pair.mv);
+                bail!("duplicate P controller pair '{}->{}'", pair.cv, pair.mv);
             }
             if !pair.kp.is_finite() || !pair.bias.is_finite() {
                 bail!(
@@ -1373,16 +1378,16 @@ impl PControllerLogicConfig {
                 let process_value = format!("cv.{}.process_value", pair.cv);
                 let mv_write = format!("mv.{}.write", pair.mv);
                 if !input_set.contains(setpoint.as_str()) {
-                    bail!("p_controller pair references missing input '{}'", setpoint);
+                    bail!("P controller pair references missing input '{}'", setpoint);
                 }
                 if !input_set.contains(process_value.as_str()) {
                     bail!(
-                        "p_controller pair references missing input '{}'",
+                        "P controller pair references missing input '{}'",
                         process_value
                     );
                 }
                 if !output_set.contains(mv_write.as_str()) {
-                    bail!("p_controller pair references missing output '{}'", mv_write);
+                    bail!("P controller pair references missing output '{}'", mv_write);
                 }
             }
         }
@@ -1465,12 +1470,18 @@ impl CustomRustLogicConfig {
         if self.compatible {
             for required in &self.required_inputs {
                 if !input_set.contains(required.as_str()) {
-                    bail!("custom logic requires unknown input '{}'", required);
+                    bail!(
+                        "custom control strategy requires unknown input '{}'",
+                        required
+                    );
                 }
             }
             for required in &self.required_outputs {
                 if !output_set.contains(required.as_str()) {
-                    bail!("custom logic requires unknown output '{}'", required);
+                    bail!(
+                        "custom control strategy requires unknown output '{}'",
+                        required
+                    );
                 }
             }
         }
@@ -1483,7 +1494,7 @@ impl CustomRustLogicConfig {
                 bail!("custom_rust.source_path must not be empty when compatible=true");
             }
             if io.outputs.is_empty() {
-                bail!("custom logic cannot be compatible without runtime outputs");
+                bail!("custom control strategy cannot be compatible without runtime outputs");
             }
         }
 
@@ -3038,7 +3049,7 @@ description = "SmartAPC controller runtime"
         cfg.logic.kind = LogicKind::LinearMpc;
 
         let err = cfg.validate().expect_err("linear_mpc requires model");
-        assert!(err.to_string().contains("linear_state_space model"));
+        assert!(err.to_string().contains("linear state-space model"));
     }
 
     #[test]

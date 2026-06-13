@@ -514,7 +514,7 @@ impl LinearMpcLogic {
         let mv_count = self.vars.mvs.len();
         let variable_count = mv_count * control_horizon;
         if variable_count == 0 {
-            bail!("linear_mpc requires at least one MV");
+            bail!("Linear MPC requires at least one MV");
         }
 
         let q_diag = DVector::from_iterator(

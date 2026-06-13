@@ -37,9 +37,9 @@ enum Backend {
     },
 }
 
-/// V1 OPC-UA client adapter.
+/// V1 OPC UA client adapter.
 ///
-/// - `opc.tcp://...` endpoints use a real OPC-UA client transport.
+/// - `opc.tcp://...` endpoints use a real OPC UA client transport.
 /// - `mock://...` endpoints keep an in-memory node store for tests/offline runs.
 pub struct OpcUaClientAdapter {
     endpoint_url: String,
@@ -94,10 +94,10 @@ impl OpcUaClientAdapter {
 
     fn ensure_online(&self) -> anyhow::Result<()> {
         if !self.connected.load(Ordering::SeqCst) {
-            bail!("OPC-UA client is not connected");
+            bail!("OPC UA client is not connected");
         }
         if self.force_fault.load(Ordering::SeqCst) {
-            bail!("OPC-UA client is in forced fault mode");
+            bail!("OPC UA client is in forced fault mode");
         }
         Ok(())
     }
@@ -119,7 +119,7 @@ impl OpcUaClientAdapter {
             v => v
                 .as_f64()
                 .map(SignalValue::F64)
-                .ok_or_else(|| anyhow!("unsupported OPC-UA variant for signal conversion")),
+                .ok_or_else(|| anyhow!("unsupported OPC UA variant for signal conversion")),
         }
     }
 
@@ -131,11 +131,11 @@ impl OpcUaClientAdapter {
 
         let guard = lock.lock();
         let Some(state) = guard.as_ref() else {
-            bail!("OPC-UA client session is not initialized");
+            bail!("OPC UA client session is not initialized");
         };
 
         if state.event_loop_handle.is_finished() {
-            bail!("OPC-UA session event loop has terminated");
+            bail!("OPC UA session event loop has terminated");
         }
 
         Ok(Arc::clone(&state.session))
@@ -174,7 +174,7 @@ impl ProtocolAdapter for OpcUaClientAdapter {
                     .session_retry_limit(1)
                     .client()
                     .map_err(|errs| {
-                        anyhow!("failed to build OPC-UA client: {}", errs.join(", "))
+                        anyhow!("failed to build OPC UA client: {}", errs.join(", "))
                     })?;
 
                 let endpoint: EndpointDescription = (
@@ -188,7 +188,7 @@ impl ProtocolAdapter for OpcUaClientAdapter {
                 let (session, event_loop) = client
                     .connect_to_matching_endpoint(endpoint, IdentityToken::Anonymous)
                     .await
-                    .map_err(|e| anyhow!("failed to connect OPC-UA session: {e:?}"))?;
+                    .map_err(|e| anyhow!("failed to connect OPC UA session: {e:?}"))?;
 
                 let event_loop_handle = event_loop.spawn();
 
@@ -198,7 +198,7 @@ impl ProtocolAdapter for OpcUaClientAdapter {
                         .unwrap_or(false);
                 if !connected {
                     event_loop_handle.abort();
-                    bail!("OPC-UA session failed to reach connected state");
+                    bail!("OPC UA session failed to reach connected state");
                 }
 
                 let mut guard = state.lock();
@@ -232,22 +232,22 @@ impl ProtocolAdapter for OpcUaClientAdapter {
                 let values = session
                     .read(&read_values, TimestampsToReturn::Neither, 0.0)
                     .await
-                    .map_err(|status| anyhow!("OPC-UA read request failed: {status:?}"))?;
+                    .map_err(|status| anyhow!("OPC UA read request failed: {status:?}"))?;
 
                 let value = values
                     .into_iter()
                     .next()
-                    .ok_or_else(|| anyhow!("OPC-UA read returned no values"))?;
+                    .ok_or_else(|| anyhow!("OPC UA read returned no values"))?;
 
                 if let Some(status) = value.status {
                     if status.is_bad() {
-                        bail!("OPC-UA read value status is bad: {status:?}");
+                        bail!("OPC UA read value status is bad: {status:?}");
                     }
                 }
 
                 let variant = value
                     .value
-                    .ok_or_else(|| anyhow!("OPC-UA read value has no payload"))?;
+                    .ok_or_else(|| anyhow!("OPC UA read value has no payload"))?;
                 Self::variant_to_signal(variant)
             }
         }
@@ -271,15 +271,15 @@ impl ProtocolAdapter for OpcUaClientAdapter {
                         Self::signal_to_variant(value),
                     )])
                     .await
-                    .map_err(|status| anyhow!("OPC-UA write request failed: {status:?}"))?;
+                    .map_err(|status| anyhow!("OPC UA write request failed: {status:?}"))?;
 
                 let status = statuses
                     .first()
                     .copied()
-                    .ok_or_else(|| anyhow!("OPC-UA write returned no status"))?;
+                    .ok_or_else(|| anyhow!("OPC UA write returned no status"))?;
 
                 if status.is_bad() {
-                    bail!("OPC-UA write was rejected: {status:?}");
+                    bail!("OPC UA write was rejected: {status:?}");
                 }
 
                 Ok(())
@@ -521,7 +521,7 @@ mod tests {
         let fake_plc = FakePlcServer::start().await.expect("start fake PLC");
 
         let adapter = OpcUaClientAdapter::new(fake_plc.endpoint_url.clone());
-        adapter.connect().await.expect("connect OPC-UA client");
+        adapter.connect().await.expect("connect OPC UA client");
 
         let c1 = adapter
             .read(&fake_plc.wd_counter_node)

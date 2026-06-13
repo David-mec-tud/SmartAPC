@@ -1436,8 +1436,8 @@ enum Message {
     OptimizationAutosaved(Result<String, String>),
     StartOptimizationPressed,
     CancelOptimizationPressed,
-    UseOptimizedparametersPressed,
-    OptimizedparametersApplied(Result<String, String>),
+    UseOptimizedParametersPressed,
+    OptimizedParametersApplied(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     AddPControllerPair,
     PPairCvChanged(usize, String),
@@ -1450,7 +1450,7 @@ enum Message {
     ImportKalmanCsvPressed,
     KalmanCsvImported(Result<Option<KalmanDataset>, String>),
     SaveKalmanParametersPressed,
-    KalmanparametersSaved(Result<HashMap<String, LogicParamValue>, String>),
+    KalmanParametersSaved(Result<HashMap<String, LogicParamValue>, String>),
     RunObserverPressed,
     ObserverFinished(Result<String, String>),
     OpenKalmanPlotsPressed,
@@ -1806,7 +1806,7 @@ impl DesktopApp {
                     match result {
                         Ok(report) => {
                             self.status_message = if report.cancelled {
-                                "parameter optimization cancelled".to_string()
+                                "Parameter optimization cancelled".to_string()
                             } else if report.converged {
                                 format!(
                                     "Parameter optimization converged: Score {:.6}",
@@ -1814,7 +1814,7 @@ impl DesktopApp {
                                 )
                             } else {
                                 format!(
-                                    "parameter optimization completed: Score {:.6}",
+                                    "Parameter optimization completed: score {:.6}",
                                     report.best_score
                                 )
                             };
@@ -2014,7 +2014,7 @@ impl DesktopApp {
             Message::SaveKalmanParametersPressed => {
                 if self.execution_active() {
                     self.error_message =
-                        Some("Execution running. parameter cannot be saved.".to_string());
+                        Some("Execution is running. Parameters cannot be saved.".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
@@ -2027,7 +2027,7 @@ impl DesktopApp {
                     self.kalman_tuning_editor.params.clone(),
                 )
             }
-            Message::KalmanparametersSaved(result) => {
+            Message::KalmanParametersSaved(result) => {
                 match result {
                     Ok(params) => {
                         for (key, value) in params {
@@ -2043,7 +2043,7 @@ impl DesktopApp {
             Message::RunObserverPressed => {
                 if self.execution_active() {
                     self.error_message =
-                        Some("Execution running. Observer-Replay is disabled.".to_string());
+                        Some("Execution is running. Observer replay is disabled.".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
@@ -2076,8 +2076,10 @@ impl DesktopApp {
                 let (Some(base), Some(project)) =
                     (self.plots_web_url(), self.selected_project.as_ref())
                 else {
-                    self.error_message =
-                        Some("Web API is disabled. Desktop without --no-web start.".to_string());
+                    self.error_message = Some(
+                        "The Web API is disabled. Start the desktop app without --no-web."
+                            .to_string(),
+                    );
                     return Task::none();
                 };
                 let base = base.trim_end_matches("/plots");
@@ -2361,7 +2363,7 @@ impl DesktopApp {
                     self.param_dirty_keys.remove(&updated.key);
                     self.logic_params = updated.params;
                     self.refresh_param_inputs_preserving_dirty();
-                    self.status_message = "parameter applied and persisted".to_string();
+                    self.status_message = "Parameter applied and saved".to_string();
                     self.error_message = None;
                     Task::none()
                 }
@@ -2766,7 +2768,7 @@ impl DesktopApp {
                         row.read_read = value.read;
                         row.read_enable = value.enable;
                     }
-                    self.status_message = "I/O OPC UA Read-Test completed".to_string();
+                    self.status_message = "OPC UA I/O read test completed".to_string();
                     self.error_message = None;
                     Task::none()
                 }
@@ -3152,7 +3154,8 @@ impl DesktopApp {
                     return Task::none();
                 }
                 if self.optimization_job.is_some() {
-                    self.error_message = Some("parameter optimization running already".to_string());
+                    self.error_message =
+                        Some("Parameter optimization is already running".to_string());
                     return Task::none();
                 }
                 let Some(project_name) = self.selected_project.clone() else {
@@ -3201,11 +3204,12 @@ impl DesktopApp {
             Message::CancelOptimizationPressed => {
                 if let Some(job) = self.optimization_job.as_ref() {
                     job.cancel.store(true, Ordering::Relaxed);
-                    self.status_message = "parameter optimization is cancelled".to_string();
+                    self.status_message =
+                        "Parameter optimization cancellation requested".to_string();
                 }
                 Task::none()
             }
-            Message::UseOptimizedparametersPressed => {
+            Message::UseOptimizedParametersPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
                     self.error_message = Some("Select a project first".to_string());
                     return Task::none();
@@ -3220,7 +3224,7 @@ impl DesktopApp {
                     report.best_params,
                 )
             }
-            Message::OptimizedparametersApplied(result) => match result {
+            Message::OptimizedParametersApplied(result) => match result {
                 Ok(status) => {
                     self.status_message = status;
                     self.error_message = None;
@@ -3344,7 +3348,7 @@ impl DesktopApp {
                 snapshot.metrics.total_cycles,
                 snapshot.metrics.last_duration_us
             ),
-            None => "No active runtime or simulation".to_string(),
+            None => "No runtime or simulation is active".to_string(),
         };
 
         container(row![start_button, stop_button, text(summary).size(14)].spacing(12))
@@ -3422,7 +3426,7 @@ impl DesktopApp {
             SetupPage::Simulation => self.simulation_editor_view(),
             SetupPage::Deployment => self.placeholder_page_view(
                 SetupPage::Deployment,
-                "Here is next a Deployment-wizard (Install/Start/Stop) for Windows-Service-operation.",
+                "Deployment wizard placeholder for installing, starting, and stopping a Windows service.",
             ),
             SetupPage::Params => self.params_view(),
             SetupPage::Plots => self.plots_view(),
@@ -3438,7 +3442,8 @@ impl DesktopApp {
             column![
                 text(page.title()).size(24),
                 text(description).size(15),
-                text("Status: placeholder page, still no input fields.").size(14)
+                text("Status: This placeholder page does not contain any input fields yet.")
+                    .size(14)
             ]
             .spacing(12),
         )
@@ -3491,9 +3496,8 @@ impl DesktopApp {
         .spacing(12);
 
         if runtime_running {
-            content = content.push(
-                text("Runtime or Simulation running: first stop, then Model change.").size(13),
-            );
+            content = content
+                .push(text("Stop the runtime or simulation before changing the model.").size(13));
         }
 
         if self.model_editor.selected_kind == ModelKindChoice::None {
@@ -3593,14 +3597,14 @@ impl DesktopApp {
         let can_stop = simulation_running;
 
         let start_button = if can_start {
-            button("Simulation Start").on_press(Message::StartSimulationPressed)
+            button("Start Simulation").on_press(Message::StartSimulationPressed)
         } else {
-            button("Simulation Start")
+            button("Start Simulation")
         };
         let stop_button = if can_stop {
-            button("Simulation Stop").on_press(Message::StopSimulationPressed)
+            button("Stop Simulation").on_press(Message::StopSimulationPressed)
         } else {
-            button("Simulation Stop")
+            button("Stop Simulation")
         };
 
         let summary = match &self.active_snapshot {
@@ -3616,7 +3620,7 @@ impl DesktopApp {
                 "Runtime active | Project={} | State={:?}",
                 snapshot.project_name, snapshot.state
             ),
-            None => "Simulation not active".to_string(),
+            None => "No simulation is active".to_string(),
         };
 
         let mut content = column![
@@ -3625,14 +3629,13 @@ impl DesktopApp {
             row![start_button, stop_button, text(summary).size(13)]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
-            text("Simulation settings are saved automatically when the current input is valid.")
+            text("Simulation settings are saved automatically when all current values are valid.")
                 .size(13)
         ]
         .spacing(12);
 
         if matches!(self.active_snapshot, Some(ExecutionSnapshot::Runtime(_))) {
-            content =
-                content.push(text("Runtime running: For Simulation first Runtime stop.").size(13));
+            content = content.push(text("Stop the runtime before starting a simulation.").size(13));
         }
 
         if model_preview.is_none() {
@@ -3897,9 +3900,9 @@ impl DesktopApp {
             button("Cancel")
         };
         let use_button = if can_use {
-            button("Use parameters").on_press(Message::UseOptimizedparametersPressed)
+            button("Apply Optimized Parameters").on_press(Message::UseOptimizedParametersPressed)
         } else {
-            button("Use parameters")
+            button("Apply Optimized Parameters")
         };
 
         let progress_line = self
@@ -3924,7 +3927,7 @@ impl DesktopApp {
                     )
                 })
             })
-            .unwrap_or_else(|| "Noch no Optimierungslauf started.".to_string());
+            .unwrap_or_else(|| "No optimization run has started yet.".to_string());
 
         let mut content = column![
             text("Parameter Optimization").size(24),
@@ -3943,14 +3946,14 @@ impl DesktopApp {
 
         if execution_active {
             content = content.push(
-                text("Runtime or Simulation running: For parameter optimization first stop.")
+                text("Stop the runtime or simulation before starting parameter optimization.")
                     .size(13),
             );
         }
 
         content = content.push(text("Controller parameters").size(18));
         content = content.push(
-            text("Start reflects the value currently saved in Control Strategy. Fixed keeps a parameter at Start. Optimized parameters are sampled inside Min/Max; horizon parameters are rounded to whole cycles. Valid setting edits are saved automatically.")
+            text("Start is the value currently saved for the control strategy. Fixed excludes a parameter from optimization. Optimized values are sampled within the minimum and maximum bounds; horizon parameters are rounded to whole cycles. Valid changes are saved automatically.")
                 .size(13),
         );
         if self.optimization_editor.param_rows.is_empty() {
@@ -4231,7 +4234,7 @@ impl DesktopApp {
         content = content
             .push(text("Convergence").size(18))
             .push(
-                text("Best robust objective as weighted mean over CV channels; lower is better.")
+                text("Best robust objective, calculated as the weighted mean across CV channels; lower is better.")
                     .size(13),
             )
             .push(
@@ -4408,14 +4411,14 @@ impl DesktopApp {
         };
 
         let runtime_hint = if runtime_running {
-            "Execution running: Offline tests are available after execution stops."
+            "Execution is running. Offline tests are available after it stops."
         } else {
             "The active control strategy is tested offline. Large case spaces automatically fall back to single-axis sweeps per dimension."
         };
 
         let mut content = column![
             text("Control Function Tests").size(24),
-            text("Sweep tests exercise the function across inputs and online parameters, capture error cases and measure execution times.").size(15),
+            text("Sweep tests exercise the function across inputs and online parameters, capture error cases, and measure execution times.").size(15),
             row![run_button, text(runtime_hint).size(13)]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -4441,9 +4444,9 @@ impl DesktopApp {
             }
         }
 
-        content = content.push(text("Online parameters Sweeps").size(18));
+        content = content.push(text("Online Parameter Sweeps").size(18));
         if self.control_function_tests.param_rows.is_empty() {
-            content = content.push(text("No online parameters active."));
+            content = content.push(text("No active online parameters."));
         } else {
             let scope = ParameterHierarchyScope::ControlTests;
             let hierarchy = visible_parameter_hierarchy(
@@ -4493,19 +4496,19 @@ impl DesktopApp {
             let summary = container(
                 column![
                     row![
-                        text("Modus").width(Length::Fixed(160.0)),
+                        text("Mode").width(Length::Fixed(160.0)),
                         text(format_sweep_mode(report.execution.mode)),
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                     row![
-                        text("cases").width(Length::Fixed(160.0)),
+                        text("Cases").width(Length::Fixed(160.0)),
                         text(report.execution.executed_case_count.to_string()),
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                     row![
-                        text("Suite gesamt").width(Length::Fixed(160.0)),
+                        text("Total Suite Time").width(Length::Fixed(160.0)),
                         text(format!("{:.1} ms", report.execution.total_wall_time_ms)),
                     ]
                     .spacing(10)
@@ -4535,7 +4538,7 @@ impl DesktopApp {
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
-                    text("Validierung").size(15),
+                    text("Validation").size(15),
                     row![
                         text("Status").width(Length::Fixed(160.0)),
                         text(format!(
@@ -4548,9 +4551,9 @@ impl DesktopApp {
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                     row![
-                        text("Output-check").width(Length::Fixed(160.0)),
+                        text("Output Check").width(Length::Fixed(160.0)),
                         text(format!(
-                            "{} invalid | {} outside Limits | {} unexpected",
+                            "{} invalid | {} outside limits | {} unexpected",
                             report.outputs.invalid_output_cases,
                             report.outputs.out_of_limit_cases,
                             report.outputs.unexpected_output_cases
@@ -4563,10 +4566,10 @@ impl DesktopApp {
             )
             .padding(10);
 
-            content = content.push(text("Letzter Lauf").size(18)).push(summary);
+            content = content.push(text("Latest Run").size(18)).push(summary);
 
             if !report.issue_cases.is_empty() {
-                content = content.push(text("notable cases").size(16));
+                content = content.push(text("Notable Cases").size(16));
                 for case in &report.issue_cases {
                     content = content.push(text(format_case_preview(case)).size(14));
                     for detail in &case.details {
@@ -4576,7 +4579,7 @@ impl DesktopApp {
             }
 
             if !report.slowest_cases.is_empty() {
-                content = content.push(text("Slowest cases").size(16));
+                content = content.push(text("Slowest Cases").size(16));
                 for case in &report.slowest_cases {
                     content = content.push(text(format_case_preview(case)).size(14));
                 }
@@ -4611,7 +4614,7 @@ impl DesktopApp {
             .label(label.to_string())
             .on_toggle(move |checked| enabled_message(index, checked))
             .width(Length::FillPortion(3));
-        let baseline = text(format!("Basis: {}", row_data.baseline_label))
+        let baseline = text(format!("Baseline: {}", row_data.baseline_label))
             .width(Length::FillPortion(2))
             .size(13);
 
@@ -4654,9 +4657,9 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
 
         let save_button = if can_save {
-            button("Communication save").on_press(Message::SaveCommunicationPressed)
+            button("Save Communication").on_press(Message::SaveCommunicationPressed)
         } else {
-            button("Communication save")
+            button("Save Communication")
         };
 
         let runtime_hint = if runtime_running {
@@ -4667,16 +4670,16 @@ impl DesktopApp {
 
         container(
             column![
-                text("OPC UA Basic Configuration").size(20),
+                text("OPC UA Communication").size(20),
                 row![
-                    text("Protokoll").width(Length::Fixed(120.0)),
-                    text("opc_ua").size(15),
-                    text("(V1 fest)").size(13)
+                    text("Protocol").width(Length::Fixed(120.0)),
+                    text("OPC UA").size(15),
+                    text("(fixed in V1)").size(13)
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
                 row![
-                    text("Server address").width(Length::Fixed(120.0)),
+                    text("Endpoint URL").width(Length::Fixed(120.0)),
                     text_input(
                         "opc.tcp://127.0.0.1:4840",
                         &self.communication_editor.endpoint_url
@@ -4687,15 +4690,15 @@ impl DesktopApp {
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
                 row![
-                    text("Communicationszeit").width(Length::Fixed(120.0)),
+                    text("Polling Interval").width(Length::Fixed(120.0)),
                     text_input("io_cycle_ms", &self.communication_editor.io_cycle_ms)
                         .on_input(Message::CommunicationCycleChanged)
                         .width(Length::Fixed(180.0)),
-                    text("ms: Read/Write interval for OPC UA I/O").size(14),
+                    text("ms: OPC UA I/O polling interval").size(14),
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
-                text("Note: Effective minimum I/O rate is also limited by runtime.cycle_ms.")
+                text("The effective minimum I/O rate is also limited by runtime.cycle_ms.")
                     .size(13),
                 text(runtime_hint).size(13),
                 save_button
@@ -4719,7 +4722,7 @@ impl DesktopApp {
         let mut content = column![
             text("Watchdog Editor").size(20),
             row![
-                text("Typ").width(Length::Fixed(70.0)),
+                text("Type").width(Length::Fixed(70.0)),
                 kind_pick,
                 text(if runtime_running {
                     "Execution is running: saving is disabled"
@@ -4737,37 +4740,31 @@ impl DesktopApp {
             content = content
                 .push(
                     row![
-                        text("Read Tag").width(Length::Fixed(90.0)),
-                        text_input(
-                            "OPC UA Tagname (z.B. ns=2;s=WD.Counter)",
-                            &self.watchdog_editor.read_tag
-                        )
-                        .on_input(Message::WatchdogReadTagChanged)
-                        .width(Length::Fill)
+                        text("Read Node ID").width(Length::Fixed(110.0)),
+                        text_input("e.g. ns=2;s=WD.Counter", &self.watchdog_editor.read_tag)
+                            .on_input(Message::WatchdogReadTagChanged)
+                            .width(Length::Fill)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                 )
                 .push(
                     row![
-                        text("Write Tag").width(Length::Fixed(90.0)),
-                        text_input(
-                            "OPC UA Tagname (z.B. ns=2;s=WD.Mirror)",
-                            &self.watchdog_editor.write_tag
-                        )
-                        .on_input(Message::WatchdogWriteTagChanged)
-                        .width(Length::Fill)
+                        text("Write Node ID").width(Length::Fixed(110.0)),
+                        text_input("e.g. ns=2;s=WD.Mirror", &self.watchdog_editor.write_tag)
+                            .on_input(Message::WatchdogWriteTagChanged)
+                            .width(Length::Fill)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                 )
                 .push(
                     row![
-                        text("Zyklus").width(Length::Fixed(90.0)),
+                        text("Cycle").width(Length::Fixed(90.0)),
                         text_input("mirror_cycle_ms", &self.watchdog_editor.mirror_cycle_ms)
                             .on_input(Message::WatchdogCycleChanged)
                             .width(Length::Fixed(180.0)),
-                        text("ms: Read -> Write interval").size(14)
+                        text("ms: interval between reading and writing the counter").size(14)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
@@ -4778,23 +4775,23 @@ impl DesktopApp {
                         text_input("stale_timeout_ms", &self.watchdog_editor.stale_timeout_ms)
                             .on_input(Message::WatchdogTimeoutChanged)
                             .width(Length::Fixed(180.0)),
-                        text("ms: Fault when Read not mehr changes").size(14)
+                        text("ms: report a fault when the read value stops changing").size(14)
                     ]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                 )
-                .push(text("Note: Read/Write are OPC UA tag names for the variables.").size(13));
+                .push(text("The read and write fields must contain OPC UA Node IDs.").size(13));
         }
 
         let save_button = if can_save {
-            button("Watchdog save").on_press(Message::SaveWatchdogPressed)
+            button("Save Watchdog").on_press(Message::SaveWatchdogPressed)
         } else {
-            button("Watchdog save")
+            button("Save Watchdog")
         };
         let test_button = if can_save {
-            button("Watchdog testen").on_press(Message::TestWatchdogPressed)
+            button("Test Watchdog").on_press(Message::TestWatchdogPressed)
         } else {
-            button("Watchdog testen")
+            button("Test Watchdog")
         };
 
         container(content.push(row![save_button, test_button].spacing(10)))
@@ -4806,7 +4803,7 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
         let mut mv_col = column![
             row![
-                text("MVs (manipulierende Variables)").size(18),
+                text("MVs (Manipulated Variables)").size(18),
                 button("+ row").on_press(Message::AddMvNameRow)
             ]
             .spacing(10)
@@ -4859,9 +4856,9 @@ impl DesktopApp {
         }
 
         let save_button = if can_save {
-            button("Variables save").on_press(Message::SaveVariablesPressed)
+            button("Save Variables").on_press(Message::SaveVariablesPressed)
         } else {
-            button("Variables save")
+            button("Save Variables")
         };
 
         let hint = if runtime_running {
@@ -4872,7 +4869,7 @@ impl DesktopApp {
 
         let main_content = column![
             text("Define Inputs and Outputs").size(20),
-            text("Here be only names for MV/CV/DV defined. OPC UA-addresses follow in the next step \"I/O define\".").size(13),
+            text("Define the MV, CV, and DV names here. Configure their OPC UA Node IDs in the next step, \"Define I/O\".").size(13),
             mv_col,
             cv_col,
             dv_col,
@@ -4905,26 +4902,26 @@ impl DesktopApp {
 
         if !has_any_names {
             content = content.push(text(
-                "No MV/CV/DV names available. First \"Define Inputs and Outputs\" complete.",
+                "No MV, CV, or DV names are available. Complete \"Define Inputs and Outputs\" first.",
             ));
         } else {
             let header = row![
-                text("Unterparameter").width(Length::FillPortion(2)),
-                text("opc address").width(Length::FillPortion(3)),
-                text("optional init value").width(Length::FillPortion(2)),
-                text("read value").width(Length::FillPortion(2)),
-                text("write value").width(Length::FillPortion(2)),
+                text("Signal").width(Length::FillPortion(2)),
+                text("OPC UA Node ID").width(Length::FillPortion(3)),
+                text("Optional Initial Value").width(Length::FillPortion(2)),
+                text("Read Value").width(Length::FillPortion(2)),
+                text("Write Test Value").width(Length::FillPortion(2)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center);
 
             content = content.push(header);
             content = content.push(
-                text("Note: test_read/test_write run through the buttons below; test_write uses populated write-value fields.")
+                text("Use the buttons below to run read and write tests. The write test uses the populated write-value fields.")
                     .size(13),
             );
             content = content.push(
-                text("MV: MV_WRITE/MV_READ/HL/LL/Enable with optionaler OPC-address (for completion not required)")
+                text("MV: configure MV_WRITE, MV_READ, HL, LL, and Enable with optional OPC UA Node IDs.")
                     .size(13),
             );
             for (index, row_data) in self.mv_io_rows.iter().enumerate() {
@@ -4933,7 +4930,7 @@ impl DesktopApp {
                         text(format!("MV: {}", row_data.name)).size(16),
                         row![
                             text("MV_WRITE").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.mv_write)
+                            text_input("Node ID", &row_data.mv_write)
                                 .on_input(move |value| Message::MvWriteChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -4947,7 +4944,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("MV_READ").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.mv_read)
+                            text_input("Node ID", &row_data.mv_read)
                                 .on_input(move |value| Message::MvReadChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -4959,7 +4956,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("HL").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.hl_opc)
+                            text_input("Node ID", &row_data.hl_opc)
                                 .on_input(move |value| Message::MvHlOpcChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", &row_data.hl)
@@ -4972,7 +4969,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("LL").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.ll_opc)
+                            text_input("Node ID", &row_data.ll_opc)
                                 .on_input(move |value| Message::MvLlOpcChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", &row_data.ll)
@@ -4985,7 +4982,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("Enable").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.enable)
+                            text_input("Node ID", &row_data.enable)
                                 .on_input(move |value| Message::MvEnableChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5000,7 +4997,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("CV: SETPOINT/PROCESS VALUE/DEADBAND/Enable with optionaler OPC-address (Deadband alternatively as init value)")
+                text("CV: configure SETPOINT, PROCESS VALUE, DEADBAND, and Enable with optional OPC UA Node IDs. Deadband can also use a static initial value.")
                     .size(13),
             );
             for (index, row_data) in self.cv_io_rows.iter().enumerate() {
@@ -5009,7 +5006,7 @@ impl DesktopApp {
                         text(format!("CV: {}", row_data.name)).size(16),
                         row![
                             text("SETPOINT").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.setpoint)
+                            text_input("Node ID", &row_data.setpoint)
                                 .on_input(move |value| Message::CvSetpointChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5023,7 +5020,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("PROCESS VALUE").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.process_value)
+                            text_input("Node ID", &row_data.process_value)
                                 .on_input(move |value| Message::CvIstChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5035,7 +5032,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("Deadband").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.deadband_opc)
+                            text_input("Node ID", &row_data.deadband_opc)
                                 .on_input(move |value| Message::CvDeadbandOpcChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", &row_data.deadband_value)
@@ -5051,7 +5048,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("Enable").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.enable)
+                            text_input("Node ID", &row_data.enable)
                                 .on_input(move |value| Message::CvEnableChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5066,8 +5063,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("DV: READ/Enable with optionaler OPC-address (for completion not required)")
-                    .size(13),
+                text("DV: configure READ and Enable with optional OPC UA Node IDs.").size(13),
             );
             for (index, row_data) in self.dv_io_rows.iter().enumerate() {
                 content = content.push(
@@ -5075,7 +5071,7 @@ impl DesktopApp {
                         text(format!("DV: {}", row_data.name)).size(16),
                         row![
                             text("READ").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.read)
+                            text_input("Node ID", &row_data.read)
                                 .on_input(move |value| Message::DvReadChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5086,7 +5082,7 @@ impl DesktopApp {
                         .align_y(iced::Alignment::Center),
                         row![
                             text("Enable").width(Length::FillPortion(2)),
-                            text_input("opc", &row_data.enable)
+                            text_input("Node ID", &row_data.enable)
                                 .on_input(move |value| Message::DvEnableChanged(index, value))
                                 .width(Length::FillPortion(3)),
                             text_input("init", "").width(Length::FillPortion(2)),
@@ -5102,19 +5098,19 @@ impl DesktopApp {
         }
 
         let save_button = if can_save {
-            button("I/O definition save").on_press(Message::SaveIoDefinitionPressed)
+            button("Save I/O Definition").on_press(Message::SaveIoDefinitionPressed)
         } else {
-            button("I/O definition save")
+            button("Save I/O Definition")
         };
         let test_read_button = if can_test {
-            button("test_read").on_press(Message::TestIoDefinitionReadPressed)
+            button("Run Read Test").on_press(Message::TestIoDefinitionReadPressed)
         } else {
-            button("test_read")
+            button("Run Read Test")
         };
         let test_write_button = if can_test {
-            button("test_write").on_press(Message::TestIoDefinitionWritePressed)
+            button("Run Write Test").on_press(Message::TestIoDefinitionWritePressed)
         } else {
-            button("test_write")
+            button("Run Write Test")
         };
 
         let hint = if runtime_running {
@@ -5151,7 +5147,7 @@ impl DesktopApp {
         if self.linear_mpc_available() {
             available.push(LogicKindChoice::LinearMpc);
         }
-        // Custom logic must remain selectable so its template/build tools are reachable.
+        // The custom control strategy must remain selectable so its template and build tools are reachable.
         available.push(LogicKindChoice::CustomRust);
         let selected_kind = if available.contains(&self.logic_editor.selected_kind) {
             self.logic_editor.selected_kind
@@ -5181,7 +5177,7 @@ impl DesktopApp {
         if selected_kind == LogicKindChoice::PController {
             content = content.push(
                 row![
-                    text("P Controller CV-to-MV Assignment").size(16),
+                    text("P Controller CV-to-MV Mapping").size(16),
                     button("+ pair").on_press(Message::AddPControllerPair)
                 ]
                 .spacing(10)
@@ -5221,7 +5217,7 @@ impl DesktopApp {
         } else if selected_kind == LogicKindChoice::LinearMpc {
             content = content.push(text("Linear MPC initial values").size(16));
             content = content.push(text(
-                "These values are created as online parameters when saved and remain later live editable.",
+                "These values become online parameters when saved and remain editable during execution.",
             ).size(14));
 
             if self.logic_editor.mpc_params.is_empty() {
@@ -5283,7 +5279,7 @@ impl DesktopApp {
                 }
             }
         } else {
-            content = content.push(text("Custom Control Strategy is active.").size(14));
+            content = content.push(text("The custom control strategy is active.").size(14));
         }
 
         if selected_kind == LogicKindChoice::CustomRust {
@@ -5351,7 +5347,7 @@ impl DesktopApp {
 
             if !self.logic_editor.custom_compatible {
                 content = content.push(text(
-                    "Note: Custom Control Strategy can only be saved after a successful build and compatibility check.",
+                    "The custom control strategy can only be saved after a successful build and compatibility check.",
                 ));
             }
         }
@@ -5375,9 +5371,9 @@ impl DesktopApp {
             .find(|task| task.id == "kalman_tuning")
             .is_some_and(|task| task.configured);
         let import_button = if available && !execution_active {
-            button("CSV importieren").on_press(Message::ImportKalmanCsvPressed)
+            button("Import CSV").on_press(Message::ImportKalmanCsvPressed)
         } else {
-            button("CSV importieren")
+            button("Import CSV")
         };
         let save_button = if available && !execution_active {
             button("Save Parameters").on_press(Message::SaveKalmanParametersPressed)
@@ -5391,15 +5387,15 @@ impl DesktopApp {
                 button("Run Observer")
             };
         let plots_button = if self.kalman_tuning_editor.has_results && self.web_bind.is_some() {
-            button("Interactive Open plots").on_press(Message::OpenKalmanPlotsPressed)
+            button("Open Interactive Plots").on_press(Message::OpenKalmanPlotsPressed)
         } else {
-            button("Interactive Open plots")
+            button("Open Interactive Plots")
         };
 
         let mut content = column![
             text("Kalman Filter Tuning").size(24),
             text(
-                "Historische measurement data offline with the Linear-MPC-Kalman-Observer evaluate."
+                "Evaluate historical measurement data offline with the Linear MPC Kalman observer."
             )
             .size(14),
             row![
@@ -5418,11 +5414,11 @@ impl DesktopApp {
             content = content.push(
                 container(
                     column![
-                        text("CSV-Anforderungen").size(17),
-                        text("UTF-8, comma as delimiter, at least zwei data rows."),
-                        text("column 'time': RFC 3339 / ISO 8601 with time zone, for example 2026-06-13T14:30:00.123+02:00."),
+                        text("CSV Requirements").size(17),
+                        text("Use UTF-8 encoding, comma-separated values, and at least two data rows."),
+                        text("The 'time' column must contain RFC 3339 or ISO 8601 timestamps with a time zone, for example 2026-06-13T14:30:00.123+02:00."),
                         text(format!("Required columns: {}", required.join(", "))),
-                        text("CV-, MV- and DV-columns use exakt the configured variable names. Additional columns be ignored."),
+                        text("CV, MV, and DV columns must use the exact configured variable names. Additional columns are ignored."),
                     ]
                     .spacing(5),
                 )
@@ -5432,7 +5428,7 @@ impl DesktopApp {
 
         if !available {
             content = content.push(text(
-                "Available after saving a compatible Linear MPC control strategy with linear state-space model.",
+                "This feature is available after you save a compatible Linear MPC control strategy with a linear state-space model.",
             ));
         }
         if let Some(dataset) = &self.kalman_tuning_editor.dataset {
@@ -5447,7 +5443,7 @@ impl DesktopApp {
                 .map(DateTime::to_rfc3339)
                 .unwrap_or_default();
             content = content.push(text(format!(
-                "Import: {} | {} rows | {} bis {}",
+                "Import: {} | {} rows | {} to {}",
                 dataset.file_name,
                 dataset.row_count(),
                 first,
@@ -5475,7 +5471,7 @@ impl DesktopApp {
         );
         if self.web_bind.is_none() {
             content = content.push(text(
-                "Interactive Plots berequireden the local Web-API; Desktop without --no-web start.",
+                "Interactive plots require the local Web API. Start the desktop app without --no-web.",
             ));
         }
 
@@ -5492,7 +5488,7 @@ impl DesktopApp {
 
         if self.has_configured_variables() {
             content = content
-                .push(text("Configured variables (for Control Strategy available):").size(15));
+                .push(text("Configured variables available to the control strategy:").size(15));
             for line in self.configured_variable_lines() {
                 content = content.push(text(line));
             }
@@ -5549,7 +5545,7 @@ impl DesktopApp {
                                 parameter_leaf(&label, depth, Length::FillPortion(2)),
                                 text(format_logic_param_value(&current))
                                     .width(Length::FillPortion(1)),
-                                text_input("Neuer value", &input_value)
+                                text_input("New value", &input_value)
                                     .on_input(move |value| {
                                         Message::ParamInputChanged(key.clone(), value)
                                     })
@@ -5572,15 +5568,15 @@ impl DesktopApp {
 
     fn plots_view(&self) -> Element<'_, Message> {
         let open_web_button = if self.web_bind.is_some() {
-            button("Interactive Web-Open plots").on_press(Message::OpenPlotsWebPressed)
+            button("Open Interactive Web Plots").on_press(Message::OpenPlotsWebPressed)
         } else {
-            button("Interactive Web-Open plots")
+            button("Open Interactive Web Plots")
         };
 
         let web_hint = if self.web_bind.is_some() {
-            "Opens /plots the local Web-API in the browser."
+            "Opens the interactive plots page in the browser."
         } else {
-            "Web API disabled. For interactive Plots Desktop without --no-web start."
+            "The Web API is disabled. Start the desktop app without --no-web to use interactive plots."
         };
 
         let mut content = column![
@@ -5638,15 +5634,15 @@ impl DesktopApp {
                 }
 
                 if active_dimensions == 0 {
-                    "Case space: only baseline case".to_string()
+                    "Test cases: baseline only".to_string()
                 } else if full_factorial_cases <= 4_096 {
                     format!(
-                        "Case space: Full factorial {} + 1 baseline case",
+                        "Test cases: {} full-factorial combinations plus 1 baseline",
                         full_factorial_cases
                     )
                 } else {
                     format!(
-                        "Case space: Full factorial {} is too large, fallback on {} single-axis sweeps + baseline case",
+                        "The full-factorial test set contains {} combinations, which exceeds the limit. Using {} single-axis sweep cases plus the baseline instead",
                         full_factorial_cases,
                         single_axis_cases - 1
                     )
@@ -5879,10 +5875,10 @@ fn parse_logic_param_input(
             .trim()
             .parse::<f64>()
             .map(LogicParamValue::F64)
-            .map_err(|_| "erwarte number (f64)".to_string()),
+            .map_err(|_| "Expected a numeric value (f64)".to_string()),
         LogicParamValue::Bool(_) => parse_bool(raw)
             .map(LogicParamValue::Bool)
-            .ok_or_else(|| "erwarte bool: true/false/1/0".to_string()),
+            .ok_or_else(|| "Expected a boolean value: true, false, 1, or 0".to_string()),
     }
 }
 
@@ -6205,11 +6201,11 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
             let params = runtime
                 .active_get_params()
                 .await
-                .map_err(|err| format!("parameter could not be read: {err}"))?;
+                .map_err(|err| format!("Parameters could not be read: {err}"))?;
             let samples = runtime
                 .active_read_plots(400)
                 .await
-                .map_err(|err| format!("plot data could not be read: {err}"))?;
+                .map_err(|err| format!("Plot data could not be read: {err}"))?;
 
             Ok(RefreshData {
                 snapshot,
@@ -6235,12 +6231,12 @@ fn set_param_task(
             let params = runtime
                 .active_set_params(updates.clone())
                 .await
-                .map_err(|err| format!("parameter could not be set: {err}"))?;
+                .map_err(|err| format!("Parameter could not be set: {err}"))?;
 
             if let Some(project_name) = runtime.active_project().await {
                 project_service
                     .update_logic_params(&project_name, updates)
-                    .map_err(|err| format!("parameterpersistenz failed: {err}"))?;
+                    .map_err(|err| format!("Parameter persistence failed: {err}"))?;
             }
 
             Ok(ParamApplyResult { key, params })
@@ -6252,7 +6248,7 @@ fn set_param_task(
 fn parse_communication_editor(editor: &CommunicationEditorState) -> Result<(String, u64), String> {
     let endpoint_url = editor.endpoint_url.trim().to_string();
     if endpoint_url.is_empty() {
-        return Err("Communication requires a OPC UA server address".to_string());
+        return Err("Communication requires an OPC UA endpoint URL".to_string());
     }
 
     let io_cycle_ms = editor
@@ -6300,7 +6296,8 @@ fn parse_watchdog_editor(editor: &WatchdogEditorState) -> Result<WatchdogConfig,
             let write_node = editor.write_tag.trim().to_string();
             if read_node.is_empty() || write_node.is_empty() {
                 return Err(
-                    "Watchdog counter_mirror requires OPC UA Read/Write tag names".to_string(),
+                    "The counter-mirror watchdog requires OPC UA read and write Node IDs"
+                        .to_string(),
                 );
             }
 
@@ -6369,7 +6366,7 @@ fn test_watchdog_task(
 
             match watchdog {
                 WatchdogConfig::None => {
-                    Ok("Watchdog is on 'none' set (no Test required).".to_string())
+                    Ok("Watchdog is disabled; no test is required.".to_string())
                 }
                 WatchdogConfig::CounterMirror {
                     read_node,
@@ -6381,15 +6378,15 @@ fn test_watchdog_task(
                     adapter
                         .connect()
                         .await
-                        .map_err(|err| format!("watchdog test: OPC UA Verbindung failed: {err}"))?;
+                        .map_err(|err| format!("Watchdog test: OPC UA connection failed: {err}"))?;
 
                     let read_value = adapter.read(&read_node).await.map_err(|err| {
-                        format!("watchdog test: reading from '{}' failed: {err}", read_node)
+                        format!("Watchdog test: reading from '{}' failed: {err}", read_node)
                     })?;
 
                     let counter = read_value.as_f64().ok_or_else(|| {
                         format!(
-                            "watchdog test: Read-Tag '{}' is not an f64 counter value",
+                            "Watchdog test: read Node ID '{}' does not contain a numeric counter value",
                             read_node
                         )
                     })?;
@@ -6398,11 +6395,11 @@ fn test_watchdog_task(
                         .write(&write_node, SignalValue::F64(counter))
                         .await
                         .map_err(|err| {
-                            format!("watchdog test: writing on '{}' failed: {err}", write_node)
+                            format!("Watchdog test: writing to '{}' failed: {err}", write_node)
                         })?;
 
                     Ok(format!(
-                        "watchdog test OK: '{}' ({counter:.3}) -> '{}' | cycle={}ms timeout={}ms",
+                        "Watchdog test passed: '{}' ({counter:.3}) -> '{}' | cycle={}ms timeout={}ms",
                         read_node, write_node, mirror_cycle_ms, stale_timeout_ms
                     ))
                 }
@@ -6459,7 +6456,7 @@ fn test_io_read_task(
 
             let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
             adapter.connect().await.map_err(|err| {
-                format!("I/O Read-Test: OPC UA Verbindung failed ({endpoint_url}): {err}")
+                format!("I/O read test: OPC UA connection failed ({endpoint_url}): {err}")
             })?;
 
             let mut mv_values = Vec::with_capacity(mv_rows.len());
@@ -6530,7 +6527,7 @@ fn test_io_write_all_task(
 
             let adapter = OpcUaClientAdapter::new(endpoint_url.clone());
             adapter.connect().await.map_err(|err| {
-                format!("test_write: OPC UA Verbindung failed ({endpoint_url}): {err}")
+                format!("I/O write test: OPC UA connection failed ({endpoint_url}): {err}")
             })?;
 
             let mut write_count = 0usize;
@@ -6542,10 +6539,9 @@ fn test_io_write_all_task(
                     continue;
                 }
                 let value = parse_test_write_value(raw_value)?;
-                adapter
-                    .write(address, value)
-                    .await
-                    .map_err(|err| format!("test_write: writing on '{}' failed: {err}", address))?;
+                adapter.write(address, value).await.map_err(|err| {
+                    format!("I/O write test: writing to '{}' failed: {err}", address)
+                })?;
                 write_count += 1;
             }
 
@@ -6556,15 +6552,14 @@ fn test_io_write_all_task(
                     continue;
                 }
                 let value = parse_test_write_value(raw_value)?;
-                adapter
-                    .write(address, value)
-                    .await
-                    .map_err(|err| format!("test_write: writing on '{}' failed: {err}", address))?;
+                adapter.write(address, value).await.map_err(|err| {
+                    format!("I/O write test: writing to '{}' failed: {err}", address)
+                })?;
                 write_count += 1;
             }
 
             Ok(format!(
-                "test_write completed: {} write operations",
+                "I/O write test completed: {} write operations",
                 write_count
             ))
         },
@@ -6592,7 +6587,7 @@ fn save_io_definition_task(
             cfg.variables = vars.clone();
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
             cfg.rebuild_runtime_io_from_definition()
-                .map_err(|err| format!("I/O-Ableitung failed: {err}"))?;
+                .map_err(|err| format!("I/O derivation failed: {err}"))?;
             sync_io_initial_value_online_params(&mut cfg);
 
             project_service
@@ -6707,13 +6702,13 @@ fn apply_optimized_parameters_task(
     Task::perform(
         async move {
             apply_optimized_parameters(&project_service, &project_name, &updates)
-                .map_err(|err| format!("Optimized parameter could not be applied: {err}"))?;
+                .map_err(|err| format!("Optimized parameters could not be applied: {err}"))?;
             Ok(format!(
                 "Applied optimized parameters for '{}'",
                 project_name
             ))
         },
-        Message::OptimizedparametersApplied,
+        Message::OptimizedParametersApplied,
     )
 }
 
@@ -7004,7 +6999,7 @@ fn save_logic_task(
                     continue;
                 }
                 if cv.is_empty() || mv.is_empty() {
-                    return Err("Each P-pair requires CV and MV".to_string());
+                    return Err("Each P controller pair requires a CV and an MV".to_string());
                 }
                 let kp = row
                     .kp
@@ -7019,7 +7014,7 @@ fn save_logic_task(
                 pairs.push(PControllerPairConfig { cv, mv, kp, bias });
             }
             if cfg.logic.kind == LogicKind::PController && pairs.is_empty() {
-                return Err("For P Controller please at least a CV->MV pair create".to_string());
+                return Err("Define at least one CV-to-MV pair for the P controller".to_string());
             }
             cfg.logic.p_controller.pairs = pairs.clone();
             cfg.logic.params = existing_params;
@@ -7036,14 +7031,14 @@ fn save_logic_task(
             if cfg.logic.kind == LogicKind::LinearMpc {
                 if editor.mpc_params.is_empty() {
                     return Err(
-                        "Linear MPC requires saved initial values. Please Model, Variables and I/O check."
+                        "Linear MPC requires saved initial parameter values. Check the model, variables, and I/O definition."
                             .to_string(),
                     );
                 }
                 for row in editor.mpc_params {
                     let key = row.key.trim();
                     let value = row.value.trim().parse::<f64>().map_err(|_| {
-                        format!("Invalid Linear-MPC-initial value for '{}'", row.key)
+                        format!("Invalid Linear MPC initial value for '{}'", row.key)
                     })?;
                     cfg.logic
                         .params
@@ -7056,14 +7051,14 @@ fn save_logic_task(
                 && !cfg.logic.custom_rust.is_compatible_with(&cfg.io)
             {
                 return Err(
-                    "Custom Control Strategy is currently incompatible with the I/O definition"
+                    "The custom control strategy is incompatible with the current I/O definition"
                         .to_string(),
                 );
             }
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Control Strategy could not be saved: {err}"))?;
+                .map_err(|err| format!("Control strategy could not be saved: {err}"))?;
             Ok(format!("Saved control strategy for '{}'", project_name))
         },
         Message::LogicSaved,
@@ -7077,7 +7072,7 @@ fn parse_kalman_parameter_rows(rows: &[MpcParamEditorRow]) -> Result<HashMap<Str
             .value
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("Invalid Kalman parameters '{}'", row.key))?;
+            .map_err(|_| format!("Invalid Kalman parameter '{}'", row.key))?;
         values.insert(row.key.clone(), value);
     }
     validate_kalman_parameters(&values).map_err(|err| err.to_string())?;
@@ -7118,7 +7113,7 @@ fn save_kalman_parameters_task(
                 .map_err(|err| format!("Kalman parameters could not be saved: {err}"))?;
             Ok(updates)
         },
-        Message::KalmanparametersSaved,
+        Message::KalmanParametersSaved,
     )
 }
 
@@ -7136,7 +7131,7 @@ fn run_observer_task(
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             if !cfg.kalman_tuning_available() {
                 return Err(
-                    "Kalman tuning requires saved compatible Linear MPC control strategy"
+                    "Kalman tuning requires a saved, compatible Linear MPC control strategy"
                         .to_string(),
                 );
             }
@@ -7144,7 +7139,7 @@ fn run_observer_task(
                 .model
                 .as_ref()
                 .and_then(ModelConfig::linear_state_space)
-                .ok_or_else(|| "Lineares state-space model is missing".to_string())?;
+                .ok_or_else(|| "Linear state-space model is missing".to_string())?;
             let result = run_observer(
                 &project_name,
                 &dataset,
@@ -7182,7 +7177,7 @@ fn generate_logic_template_task(
             let strategy_root = project_dir.join("logic").join("custom_strategy");
             let src_dir = strategy_root.join("src");
             fs::create_dir_all(&src_dir)
-                .map_err(|err| format!("template directory could not be created: {err}"))?;
+                .map_err(|err| format!("Template directory could not be created: {err}"))?;
 
             let cargo_toml = render_custom_cargo_toml(&strategy_name);
             fs::write(strategy_root.join("Cargo.toml"), cargo_toml)
@@ -7231,7 +7226,7 @@ fn generate_logic_template_task(
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("template configuration could not be saved: {err}"))?;
+                .map_err(|err| format!("Template configuration could not be saved: {err}"))?;
 
             Ok(format!(
                 "Template for '{}' generated under {}",
@@ -7259,15 +7254,15 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
             let source_path = project_dir.join(&source_rel);
             if !source_path.exists() {
                 return Err(format!(
-                    "Custom source not found: {}",
+                    "Custom strategy source not found: {}",
                     source_path.display()
                 ));
             }
 
             let source = fs::read_to_string(&source_path)
-                .map_err(|err| format!("Custom source could not be read: {err}"))?;
+                .map_err(|err| format!("Custom strategy source could not be read: {err}"))?;
             let schema = parse_custom_parameter_schema_from_source(&source)
-                .map_err(|err| format!("signature invalid: {err}"))?;
+                .map_err(|err| format!("Invalid control signature: {err}"))?;
 
             let generated_dispatch_path = source_path
                 .parent()
@@ -7377,7 +7372,7 @@ fn build_custom_logic_task(project_service: ProjectService, project_name: String
 
             project_service
                 .save_config(&project_name, &cfg)
-                .map_err(|err| format!("Custom logic could not be saved: {err}"))?;
+                .map_err(|err| format!("Custom control strategy could not be saved: {err}"))?;
 
             if strict_io_match {
                 Ok(format!(
@@ -7408,7 +7403,7 @@ fn run_control_function_tests_task(
             let selections = build_control_function_sweep_selections(&test_state)?;
             let project_dir = project_service.project_dir(&project_name);
             run_control_function_tests(&cfg, &project_dir, &selections)
-                .map_err(|err| format!("Control Function Tests failed: {err}"))
+                .map_err(|err| format!("Control function tests failed: {err}"))
         },
         Message::ControlFunctionTestsFinished,
     )
@@ -7508,13 +7503,13 @@ fn summarize_io_mismatch(
 
     let mut parts = Vec::new();
     if !missing_in.is_empty() {
-        parts.push(format!("fehlende inputs [{}]", missing_in.join(", ")));
+        parts.push(format!("missing inputs [{}]", missing_in.join(", ")));
     }
     if !extra_in.is_empty() {
         parts.push(format!("additional inputs [{}]", extra_in.join(", ")));
     }
     if !missing_out.is_empty() {
-        parts.push(format!("fehlende outputs [{}]", missing_out.join(", ")));
+        parts.push(format!("missing outputs [{}]", missing_out.join(", ")));
     }
     if !extra_out.is_empty() {
         parts.push(format!("additional outputs [{}]", extra_out.join(", ")));
@@ -7620,7 +7615,7 @@ pub struct SmartApcContext {{
 #[derive(Debug, Clone, Default)]
 pub struct SmartApcOutputs {{
     pub values: HashMap<String, SignalValue>,
-    // Additional user logs from the Control Strategy.
+    // Additional user logs emitted by the control strategy.
     pub logs: Vec<UserLogEntry>,
 }}
 
@@ -7716,7 +7711,7 @@ pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     //    These are automatically managed as online parameters.
     // 4) All required `mv.*.write` outputs must be set.
     // 5) Custom logs can be generated with out.log(...), out.log_value(...), out.log_values(...).
-    // 6) Optional future plots as log F64 values:
+    // 6) To add optional future plots, log F64 values using these keys:
     //    - future_pred_without_control.cv.<cv>.k01
     //    - future_pred_with_control.cv.<cv>.k01
     //    - future_pred_with_control.mv.<mv>.k01
@@ -7859,7 +7854,7 @@ async fn read_optional_tag(adapter: &OpcUaClientAdapter, address: &str) -> Strin
 fn parse_test_write_value(raw: &str) -> Result<SignalValue, String> {
     let value = raw
         .parse::<f64>()
-        .map_err(|_| format!("test_write: '{}' is not a valid f64 value", raw))?;
+        .map_err(|_| format!("Write-test value '{}' is not a valid number", raw))?;
     Ok(SignalValue::F64(value))
 }
 
@@ -7884,7 +7879,7 @@ fn build_variable_catalog(
     };
 
     vars.validate()
-        .map_err(|err| format!("Variables invalid: {err}"))?;
+        .map_err(|err| format!("Invalid variable configuration: {err}"))?;
 
     if !vars.has_any() {
         return Err("Define at least one variable (MV/CV/DV)".to_string());
@@ -7933,7 +7928,7 @@ fn build_io_definition(
         };
         if let (Some(ll), Some(hl)) = (ll, hl) {
             if ll > hl {
-                return Err(format!("MV '{}' hat LL > HL", name));
+                return Err(format!("MV '{}' has LL greater than HL", name));
             }
         }
 
@@ -7998,7 +7993,7 @@ fn build_io_definition(
     let io_definition = crate::project_config::IoDefinitionConfig { mvs, cvs, dvs };
     io_definition
         .validate(vars)
-        .map_err(|err| format!("I/O definition invalid: {err}"))?;
+        .map_err(|err| format!("Invalid I/O definition: {err}"))?;
     if !io_definition.is_complete_for(vars) {
         return Err("I/O definition is incomplete".to_string());
     }
@@ -8007,7 +8002,7 @@ fn build_io_definition(
 
 fn sync_io_initial_value_online_params(cfg: &mut crate::project_config::ProjectConfig) {
     // Keep only parameters that are relevant for the currently active logic.
-    // Static I/O initial values (without OPC address) are included by sync_active_online_params.
+    // Static I/O initial values (without an OPC UA Node ID) are included by sync_active_online_params.
     cfg.sync_active_online_params();
 }
 

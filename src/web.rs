@@ -489,9 +489,9 @@ async fn plots_page() -> Html<&'static str> {
       if (document.activeElement !== el.futureWindowSec) {
         el.futureWindowSec.value = String(saved.future_window_sec);
       }
-      setStatus(`Plot config saved for ${state.projectName}.`);
+      setStatus(`Plot configuration saved for ${state.projectName}.`);
     } catch (err) {
-      setStatus(`Saving plot config failed: ${err.message}`, true);
+      setStatus(`Failed to save the plot configuration: ${err.message}`, true);
     }
   }
 
@@ -1066,7 +1066,7 @@ async fn plots_page() -> Html<&'static str> {
       try {
         await loadProject(el.projectSelect.value);
       } catch (err) {
-        setStatus(`Project load failed: ${err.message}`, true);
+        setStatus(`Failed to load the project: ${err.message}`, true);
       }
     });
     const commitWindowSetting = () => {
@@ -1919,7 +1919,7 @@ mod tests {
         cfg.io.inputs.push(SignalPoint {
             name: "cv.y1.process_value".to_string(),
             signal_type: SignalType::F64,
-            address: "ns=2;s=InIst".to_string(),
+            address: "ns=2;s=InProcessValue".to_string(),
             opc_tag: None,
         });
         cfg.io.outputs.push(SignalPoint {

@@ -874,20 +874,22 @@ pub(crate) fn build_logic(
                 config.logic.params.clone(),
             );
             if !logic.is_configured() {
-                bail!("p_controller has no CV->MV pairs configured");
+                bail!("P controller has no configured CV-to-MV pairs");
             }
             Ok(Box::new(logic))
         }
         LogicKind::LinearMpc => {
             if !config.linear_mpc_is_configured_for(io) {
-                bail!("linear_mpc strategy is not compatible with current model/I/O definition");
+                bail!(
+                    "Linear MPC strategy is not compatible with the current model and I/O definition"
+                );
             }
             let model = config
                 .model
                 .as_ref()
                 .and_then(ModelConfig::linear_state_space)
                 .cloned()
-                .ok_or_else(|| anyhow!("linear_mpc requires a linear_state_space model"))?;
+                .ok_or_else(|| anyhow!("Linear MPC requires a linear state-space model"))?;
             let logic = LinearMpcLogic::new(
                 model,
                 config.variables.clone(),
@@ -896,13 +898,13 @@ pub(crate) fn build_logic(
                 config.static_cv_band_defaults(),
             );
             if !logic.is_configured() {
-                bail!("linear_mpc has no usable MV/CV model configuration");
+                bail!("Linear MPC has no usable MV/CV model configuration");
             }
             Ok(Box::new(logic))
         }
         LogicKind::CustomRust => {
             if !config.logic.custom_rust.is_compatible_with(io) {
-                bail!("custom_rust strategy is not compatible with current I/O definition");
+                bail!("Custom Rust strategy is not compatible with the current I/O definition");
             }
             let artifact_path = if Path::new(&config.logic.custom_rust.artifact_path).is_absolute()
             {

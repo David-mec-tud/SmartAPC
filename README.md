@@ -20,7 +20,7 @@ SmartAPC V1 is modular control software written in Rust for OT and industrial en
 - Native `iced` desktop application:
   - OPC UA communication and watchdog setup
   - MV/CV/DV catalog and I/O definition with OPC UA read/write tests
-  - Optional continuous state-space model with A/B/C/D import and matrix editor
+  - Optional continuous-time state-space model with A/B/C/D import and matrix editor
   - Controller simulation with speed selection, initial values, disturbances, noise, and live A/B scaling
   - Control strategy selection, control-function tests, online parameters, and SQLite plots
 - Local web API:
@@ -37,7 +37,7 @@ SmartAPC V1 is modular control software written in Rust for OT and industrial en
 
 - The deployment setup page is a placeholder; deployment API commands are available.
 
-The optional continuous state-space model uses `x_dot = A x + B u` and `y = C x + D u`.
+The optional continuous-time state-space model uses `x_dot = A x + B u` and `y = C x + D u`.
 Offline controller simulation integrates the model with fixed-step RK4 and zero-order hold per
 control cycle. The production runtime does not simulate the plant internally.
 
@@ -97,7 +97,7 @@ cargo run -- desktop --project-root ./projects
    - Define variables and I/O, for example `cv.y1.*` and `mv.u1.*`.
    - Select a control strategy and start the runtime.
 
-Virtual hardware OPC UA tags:
+Virtual hardware OPC UA Node IDs:
 
 - `ns=2;s=y1_value`
 - `ns=2;s=y1_target`
@@ -228,7 +228,7 @@ pub fn control(
 }
 ```
 
-Static I/O values without OPC addresses are exposed as online parameters:
+Static I/O values without OPC UA Node IDs are exposed as online parameters:
 
 - `io.mv.<name>.hl`
 - `io.mv.<name>.ll`
