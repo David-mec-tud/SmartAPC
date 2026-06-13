@@ -877,6 +877,7 @@ mod tests {
         cfg.rebuild_runtime_io_from_definition()
             .expect("runtime io");
         cfg.logic = LogicConfig {
+            cycle_ms: 1_000,
             kind: LogicKind::PController,
             p_controller: PControllerLogicConfig {
                 pairs: vec![PControllerPairConfig {

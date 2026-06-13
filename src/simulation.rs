@@ -172,7 +172,7 @@ impl SimulationCore {
     }
 
     pub(crate) fn target_cycle_duration(&self) -> Option<Duration> {
-        wall_cycle_duration(self.simulation.speed, self.config.runtime.cycle_ms)
+        wall_cycle_duration(self.simulation.speed, self.config.logic.cycle_ms)
     }
 
     pub(crate) fn read_plot_samples(&self, limit: usize) -> Result<Vec<SignalSample>> {
@@ -189,7 +189,7 @@ impl SimulationCore {
 
     pub(crate) fn tick_once(&mut self, target_cycle: Option<Duration>) -> Result<()> {
         let cycle_start = Instant::now();
-        let dt_s = self.config.runtime.cycle_ms as f64 / 1000.0;
+        let dt_s = self.config.logic.cycle_ms as f64 / 1000.0;
         let sample_timestamp_ms = simulation_timestamp_ms(self.simulation_time_s);
 
         let inputs = self.build_inputs();

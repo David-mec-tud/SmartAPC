@@ -267,21 +267,21 @@ impl DvIoEditorRow {
 #[derive(Debug, Clone)]
 struct CommunicationEditorState {
     endpoint_url: String,
-    io_cycle_ms: String,
+    cycle_ms: String,
 }
 
 impl CommunicationEditorState {
     fn from_config(config: &CommunicationConfig) -> Self {
         Self {
             endpoint_url: config.endpoint_url.clone(),
-            io_cycle_ms: config.io_cycle_ms.to_string(),
+            cycle_ms: config.cycle_ms.to_string(),
         }
     }
 
     fn blank() -> Self {
         Self {
             endpoint_url: "opc.tcp://127.0.0.1:4840".to_string(),
-            io_cycle_ms: "1000".to_string(),
+            cycle_ms: "1000".to_string(),
         }
     }
 }
@@ -291,7 +291,6 @@ struct WatchdogEditorState {
     kind: WatchdogKindChoice,
     read_tag: String,
     write_tag: String,
-    mirror_cycle_ms: String,
     stale_timeout_ms: String,
 }
 
@@ -302,19 +301,16 @@ impl WatchdogEditorState {
                 kind: WatchdogKindChoice::None,
                 read_tag: String::new(),
                 write_tag: String::new(),
-                mirror_cycle_ms: "1000".to_string(),
                 stale_timeout_ms: "2000".to_string(),
             },
             WatchdogConfig::CounterMirror {
                 read_node,
                 write_node,
-                mirror_cycle_ms,
                 stale_timeout_ms,
             } => Self {
                 kind: WatchdogKindChoice::CounterMirror,
                 read_tag: read_node.clone(),
                 write_tag: write_node.clone(),
-                mirror_cycle_ms: mirror_cycle_ms.to_string(),
                 stale_timeout_ms: stale_timeout_ms.to_string(),
             },
         }
@@ -758,6 +754,7 @@ impl KalmanTuningEditorState {
 
 #[derive(Debug, Clone)]
 struct LogicEditorState {
+    cycle_ms: String,
     selected_kind: LogicKindChoice,
     p_pairs: Vec<PPairEditorRow>,
     mpc_params: Vec<MpcParamEditorRow>,
@@ -788,6 +785,7 @@ impl LogicEditorState {
             &[],
         );
         Self {
+            cycle_ms: cfg.logic.cycle_ms.to_string(),
             selected_kind: cfg.logic.kind.into(),
             p_pairs,
             mpc_params,
@@ -801,6 +799,7 @@ impl LogicEditorState {
 
     fn blank() -> Self {
         Self {
+            cycle_ms: "1000".to_string(),
             selected_kind: LogicKindChoice::PController,
             p_pairs: vec![PPairEditorRow::blank()],
             mpc_params: Vec::new(),
@@ -1272,6 +1271,7 @@ struct ProjectPanelData {
     optimization_editor: ParameterOptimizationState,
     control_function_tests: ControlFunctionTestState,
     communication: CommunicationEditorState,
+    io_cycle_ms: String,
     variables: VariableCatalogConfig,
     mv_names: Vec<VariableNameRow>,
     cv_names: Vec<VariableNameRow>,
@@ -1354,7 +1354,6 @@ enum Message {
     WatchdogKindChanged(WatchdogKindChoice),
     WatchdogReadTagChanged(String),
     WatchdogWriteTagChanged(String),
-    WatchdogCycleChanged(String),
     WatchdogTimeoutChanged(String),
     SaveWatchdogPressed,
     WatchdogSaved(Result<String, String>),
@@ -1384,6 +1383,7 @@ enum Message {
     CvTestWriteChanged(usize, String),
     DvReadChanged(usize, String),
     DvEnableChanged(usize, String),
+    IoCycleChanged(String),
     TestIoDefinitionReadPressed,
     TestIoDefinitionWritePressed,
     IoReadTested(Result<IoReadTestResult, String>),
@@ -1439,6 +1439,7 @@ enum Message {
     UseOptimizedParametersPressed,
     OptimizedParametersApplied(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
+    LogicCycleChanged(String),
     AddPControllerPair,
     PPairCvChanged(usize, String),
     PPairMvChanged(usize, String),
@@ -1493,6 +1494,7 @@ struct DesktopApp {
     selected_page: SetupPage,
     new_project_name: String,
     communication_editor: CommunicationEditorState,
+    io_cycle_ms: String,
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
     logic_editor: LogicEditorState,
@@ -1539,6 +1541,7 @@ impl DesktopApp {
             selected_page: SetupPage::Communication,
             new_project_name: String::new(),
             communication_editor: CommunicationEditorState::blank(),
+            io_cycle_ms: "1000".to_string(),
             model_editor: ModelEditorState::blank(&VariableCatalogConfig::default()),
             simulation_editor: SimulationEditorState::blank(
                 &VariableCatalogConfig::default(),
@@ -1897,6 +1900,7 @@ impl DesktopApp {
                 Ok(panel) => {
                     self.sidebar_tasks = panel.sidebar_tasks;
                     self.communication_editor = panel.communication;
+                    self.io_cycle_ms = panel.io_cycle_ms;
                     self.model_editor = panel.model_editor;
                     self.simulation_editor = panel.simulation_editor;
                     self.logic_editor = panel.logic_editor;
@@ -1947,6 +1951,10 @@ impl DesktopApp {
                 if kind == LogicKindChoice::LinearMpc {
                     self.refresh_linear_mpc_editor_params();
                 }
+                Task::none()
+            }
+            Message::LogicCycleChanged(value) => {
+                self.logic_editor.cycle_ms = value;
                 Task::none()
             }
             Message::AddPControllerPair => {
@@ -2424,7 +2432,7 @@ impl DesktopApp {
                 Task::none()
             }
             Message::CommunicationCycleChanged(value) => {
-                self.communication_editor.io_cycle_ms = value;
+                self.communication_editor.cycle_ms = value;
                 Task::none()
             }
             Message::SaveCommunicationPressed => {
@@ -2471,10 +2479,6 @@ impl DesktopApp {
             }
             Message::WatchdogWriteTagChanged(value) => {
                 self.watchdog_editor.write_tag = value;
-                Task::none()
-            }
-            Message::WatchdogCycleChanged(value) => {
-                self.watchdog_editor.mirror_cycle_ms = value;
                 Task::none()
             }
             Message::WatchdogTimeoutChanged(value) => {
@@ -2719,6 +2723,10 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::IoCycleChanged(value) => {
+                self.io_cycle_ms = value;
+                Task::none()
+            }
             Message::TestIoDefinitionReadPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
                     self.error_message = Some("Select a project first".to_string());
@@ -2811,6 +2819,7 @@ impl DesktopApp {
                     self.mv_io_rows.clone(),
                     self.cv_io_rows.clone(),
                     self.dv_io_rows.clone(),
+                    self.io_cycle_ms.clone(),
                 )
             }
             Message::IoDefinitionSaved(result) => match result {
@@ -4690,16 +4699,14 @@ impl DesktopApp {
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
                 row![
-                    text("Polling Interval").width(Length::Fixed(120.0)),
-                    text_input("io_cycle_ms", &self.communication_editor.io_cycle_ms)
+                    text("Cycle Time").width(Length::Fixed(120.0)),
+                    text_input("cycle_ms", &self.communication_editor.cycle_ms)
                         .on_input(Message::CommunicationCycleChanged)
                         .width(Length::Fixed(180.0)),
-                    text("ms: OPC UA I/O polling interval").size(14),
+                    text("ms: OPC UA communication and watchdog cadence").size(14),
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
-                text("The effective minimum I/O rate is also limited by runtime.cycle_ms.")
-                    .size(13),
                 text(runtime_hint).size(13),
                 save_button
             ]
@@ -4760,17 +4767,6 @@ impl DesktopApp {
                 )
                 .push(
                     row![
-                        text("Cycle").width(Length::Fixed(90.0)),
-                        text_input("mirror_cycle_ms", &self.watchdog_editor.mirror_cycle_ms)
-                            .on_input(Message::WatchdogCycleChanged)
-                            .width(Length::Fixed(180.0)),
-                        text("ms: interval between reading and writing the counter").size(14)
-                    ]
-                    .spacing(10)
-                    .align_y(iced::Alignment::Center),
-                )
-                .push(
-                    row![
                         text("Timeout").width(Length::Fixed(90.0)),
                         text_input("stale_timeout_ms", &self.watchdog_editor.stale_timeout_ms)
                             .on_input(Message::WatchdogTimeoutChanged)
@@ -4780,7 +4776,10 @@ impl DesktopApp {
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
                 )
-                .push(text("The read and write fields must contain OPC UA Node IDs.").size(13));
+                .push(
+                    text("The watchdog is read and mirrored on every communication cycle.")
+                        .size(13),
+                );
         }
 
         let save_button = if can_save {
@@ -4898,7 +4897,19 @@ impl DesktopApp {
         let can_save = self.selected_project.is_some() && !runtime_running;
         let can_test = self.selected_project.is_some();
         let has_any_names = self.variables.has_any();
-        let mut content = column![text("Define I/O").size(20)].spacing(10);
+        let mut content = column![
+            text("Define I/O").size(20),
+            row![
+                text("I/O Cycle Time").width(Length::Fixed(140.0)),
+                text_input("cycle_ms", &self.io_cycle_ms)
+                    .on_input(Message::IoCycleChanged)
+                    .width(Length::Fixed(180.0)),
+                text("ms: must be a multiple of the communication cycle").size(14),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+        ]
+        .spacing(10);
 
         if !has_any_names {
             content = content.push(text(
@@ -5164,6 +5175,15 @@ impl DesktopApp {
 
         let mut content = column![
             text("Control Strategy").size(20),
+            row![
+                text("Controller Cycle").width(Length::Fixed(140.0)),
+                text_input("cycle_ms", &self.logic_editor.cycle_ms)
+                    .on_input(Message::LogicCycleChanged)
+                    .width(Length::Fixed(180.0)),
+                text("ms: strategy invocation and model timestep").size(14),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
             row![text("Selection").width(Length::Fixed(90.0)), kind_pick]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -6046,6 +6066,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 simulation_editor,
                 control_function_tests,
                 communication,
+                io_cycle_ms: cfg.io.cycle_ms.to_string(),
                 variables: cfg.variables.clone(),
                 mv_names,
                 cv_names,
@@ -6251,16 +6272,16 @@ fn parse_communication_editor(editor: &CommunicationEditorState) -> Result<(Stri
         return Err("Communication requires an OPC UA endpoint URL".to_string());
     }
 
-    let io_cycle_ms = editor
-        .io_cycle_ms
+    let cycle_ms = editor
+        .cycle_ms
         .trim()
         .parse::<u64>()
-        .map_err(|_| "communication.io_cycle_ms must be an integer".to_string())?;
-    if io_cycle_ms == 0 {
-        return Err("communication.io_cycle_ms must be > 0".to_string());
+        .map_err(|_| "communication.cycle_ms must be an integer".to_string())?;
+    if cycle_ms == 0 {
+        return Err("communication.cycle_ms must be > 0".to_string());
     }
 
-    Ok((endpoint_url, io_cycle_ms))
+    Ok((endpoint_url, cycle_ms))
 }
 
 fn save_communication_task(
@@ -6274,9 +6295,9 @@ fn save_communication_task(
                 .load_config(&project_name)
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
-            let (endpoint_url, io_cycle_ms) = parse_communication_editor(&editor)?;
+            let (endpoint_url, cycle_ms) = parse_communication_editor(&editor)?;
             cfg.communication.endpoint_url = endpoint_url;
-            cfg.communication.io_cycle_ms = io_cycle_ms;
+            cfg.communication.cycle_ms = cycle_ms;
 
             project_service
                 .save_config(&project_name, &cfg)
@@ -6301,15 +6322,6 @@ fn parse_watchdog_editor(editor: &WatchdogEditorState) -> Result<WatchdogConfig,
                 );
             }
 
-            let mirror_cycle_ms = editor
-                .mirror_cycle_ms
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| "Watchdog mirror_cycle_ms must be an integer".to_string())?;
-            if mirror_cycle_ms == 0 {
-                return Err("Watchdog mirror_cycle_ms must be > 0".to_string());
-            }
-
             let stale_timeout_ms = editor
                 .stale_timeout_ms
                 .trim()
@@ -6322,7 +6334,6 @@ fn parse_watchdog_editor(editor: &WatchdogEditorState) -> Result<WatchdogConfig,
             Ok(WatchdogConfig::CounterMirror {
                 read_node,
                 write_node,
-                mirror_cycle_ms,
                 stale_timeout_ms,
             })
         }
@@ -6371,7 +6382,6 @@ fn test_watchdog_task(
                 WatchdogConfig::CounterMirror {
                     read_node,
                     write_node,
-                    mirror_cycle_ms,
                     stale_timeout_ms,
                 } => {
                     let adapter = OpcUaClientAdapter::new(cfg.communication.endpoint_url.clone());
@@ -6399,8 +6409,8 @@ fn test_watchdog_task(
                         })?;
 
                     Ok(format!(
-                        "Watchdog test passed: '{}' ({counter:.3}) -> '{}' | cycle={}ms timeout={}ms",
-                        read_node, write_node, mirror_cycle_ms, stale_timeout_ms
+                        "Watchdog test passed: '{}' ({counter:.3}) -> '{}' | communication cycle={}ms timeout={}ms",
+                        read_node, write_node, cfg.communication.cycle_ms, stale_timeout_ms
                     ))
                 }
             }
@@ -6576,6 +6586,7 @@ fn save_io_definition_task(
     mv_rows: Vec<MvIoEditorRow>,
     cv_rows: Vec<CvIoEditorRow>,
     dv_rows: Vec<DvIoEditorRow>,
+    io_cycle_ms: String,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -6588,6 +6599,13 @@ fn save_io_definition_task(
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
             cfg.rebuild_runtime_io_from_definition()
                 .map_err(|err| format!("I/O derivation failed: {err}"))?;
+            cfg.io.cycle_ms = io_cycle_ms
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "io.cycle_ms must be an integer".to_string())?;
+            if cfg.io.cycle_ms == 0 {
+                return Err("io.cycle_ms must be > 0".to_string());
+            }
             sync_io_initial_value_online_params(&mut cfg);
 
             project_service
@@ -6986,6 +7004,14 @@ fn save_logic_task(
                 .load_config(&project_name)
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
 
+            cfg.logic.cycle_ms = editor
+                .cycle_ms
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "logic.cycle_ms must be an integer".to_string())?;
+            if cfg.logic.cycle_ms == 0 {
+                return Err("logic.cycle_ms must be > 0".to_string());
+            }
             cfg.logic.kind = editor.selected_kind.into();
             cfg.logic.custom_rust.strategy_name = editor.custom_strategy_name.trim().to_string();
             cfg.logic.custom_rust.source_path = editor.custom_source_path.trim().to_string();
@@ -7145,7 +7171,7 @@ fn run_observer_task(
                 &dataset,
                 model,
                 &cfg.variables,
-                cfg.runtime.cycle_ms,
+                cfg.logic.cycle_ms,
                 &parameters,
             )
             .map_err(|err| format!("Observer could not be executed: {err}"))?;
@@ -7597,6 +7623,8 @@ impl ParamValue {{
 pub struct SmartApcContext {{
     // Current runtime state.
     pub state: RuntimeState,
+    // Configured controller timestep in seconds.
+    pub cycle_time_s: f64,
     // Current input snapshot (all available inputs).
     pub inputs: HashMap<String, SignalValue>,
     // Current online parameters.
@@ -7682,6 +7710,8 @@ struct Metadata {{
 #[derive(Debug, Deserialize)]
 struct CallRequest {{
     state: RuntimeState,
+    #[serde(default)]
+    cycle_time_s: f64,
     inputs: HashMap<String, SignalValue>,
     params: HashMap<String, ParamValue>,
     #[serde(default)]
@@ -7704,7 +7734,7 @@ const REQUIRED_OUTPUTS: &[&str] = &{required_outputs_json};
 pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     // -----------------------------------------------------------------------------------------
     // TEMPLATE NOTES
-    // 1) ctx.inputs contains the current cycle value per signal.
+    // 1) ctx.inputs contains the current cycle value per signal; ctx.cycle_time_s is the timestep.
     // 2) ctx.input_history/output_history/param_history contain historical values (oldest -> newest).
     // 3) Additional parameters can be added as function arguments:
     //    for example `pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64)`.
@@ -7753,6 +7783,7 @@ pub extern "C" fn smartapc_control_json(input: *const c_char) -> *mut c_char {{
 
     let ctx = SmartApcContext {{
         state: req.state,
+        cycle_time_s: req.cycle_time_s,
         inputs: req.inputs,
         params: req.params,
         input_history: req.input_history,

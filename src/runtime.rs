@@ -30,7 +30,7 @@ use crate::{
     types::{RuntimeState, SignalType, SignalValue},
     watchdog::{
         CounterMirrorWatchdog, NoneWatchdog, WatchdogModule, WatchdogStatus,
-        mirror_cycle_or_default, stale_timeout_or_default,
+        stale_timeout_or_default,
     },
 };
 
@@ -77,7 +77,9 @@ struct RuntimeCore {
     last_duration_us: u64,
     last_jitter_us: i64,
     last_cycle_start: Option<Instant>,
-    last_io_exchange: Option<Instant>,
+    last_communication_cycle: Option<Instant>,
+    last_io_cycle: Option<Instant>,
+    last_controller_cycle: Option<Instant>,
 }
 
 impl RuntimeCore {
@@ -115,7 +117,9 @@ impl RuntimeCore {
             last_duration_us: 0,
             last_jitter_us: 0,
             last_cycle_start: None,
-            last_io_exchange: None,
+            last_communication_cycle: None,
+            last_io_cycle: None,
+            last_controller_cycle: None,
         })
     }
 
@@ -193,86 +197,79 @@ impl RuntimeCore {
 
     async fn tick_once(&mut self) -> Result<()> {
         let cycle_start = Instant::now();
-        let should_exchange_io = self.should_exchange_io(cycle_start);
+        let communication_due = cycle_due(
+            self.last_communication_cycle,
+            cycle_start,
+            self.config.communication.cycle_ms,
+        );
+        let io_due = cycle_due(self.last_io_cycle, cycle_start, self.config.io.cycle_ms);
+        let controller_due = cycle_due(
+            self.last_controller_cycle,
+            cycle_start,
+            self.config.logic.cycle_ms,
+        );
 
-        let (inputs, input_ok) = if should_exchange_io {
+        let input_ok = if io_due {
             match self.read_inputs().await {
                 Ok(inputs) => {
                     self.storage.store_signal_map("input", &inputs)?;
-                    self.last_inputs = inputs.clone();
-                    (inputs, true)
+                    self.last_inputs = inputs;
+                    true
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "failed reading inputs; entering fault path");
-                    (self.last_inputs.clone(), false)
+                    false
                 }
             }
         } else {
-            (self.last_inputs.clone(), true)
+            true
         };
 
-        let watchdog_status = match self.watchdog.tick(self.protocol.as_ref()).await {
-            Ok(status) => status,
-            Err(err) => WatchdogStatus::Fault {
-                reason: format!("watchdog tick failed: {err}"),
-            },
-        };
-        self.watchdog_status = watchdog_status.clone();
+        if communication_due {
+            let watchdog_status = match self.watchdog.tick(self.protocol.as_ref()).await {
+                Ok(status) => status,
+                Err(err) => WatchdogStatus::Fault {
+                    reason: format!("watchdog tick failed: {err}"),
+                },
+            };
+            self.watchdog_status = watchdog_status.clone();
+            let healthy_protocol = self.protocol.health() == HealthStatus::Healthy && input_ok;
+            let healthy_watchdog = !matches!(&watchdog_status, WatchdogStatus::Fault { .. });
+            self.state = self.compute_next_state(healthy_protocol && healthy_watchdog);
+            self.last_communication_cycle = Some(cycle_start);
+        }
 
-        let healthy_protocol = self.protocol.health() == HealthStatus::Healthy && input_ok;
-        let healthy_watchdog = !matches!(&watchdog_status, WatchdogStatus::Fault { .. });
-        self.state = self.compute_next_state(healthy_protocol && healthy_watchdog);
-
-        let mut cycle_outputs: Option<HashMap<String, SignalValue>> = None;
         let mut user_logs: Vec<LogicUserLog> = Vec::new();
-
-        match self.state {
-            RuntimeState::Running => {
-                let mut outputs = self.logic.step(&inputs, self.state)?;
+        if controller_due {
+            if self.state == RuntimeState::Running {
+                let mut outputs = self.logic.step(&self.last_inputs, self.state)?;
                 user_logs = self.logic.drain_user_logs();
                 apply_output_limits(&self.config, &mut outputs);
-                self.last_outputs = outputs.clone();
-                cycle_outputs = Some(outputs.clone());
-                if should_exchange_io {
-                    self.write_outputs(&outputs).await?;
-                    self.storage.store_signal_map("output", &outputs)?;
-                }
+                self.last_outputs = outputs;
             }
-            RuntimeState::Hold | RuntimeState::Alarm => {
-                if should_exchange_io && !self.last_outputs.is_empty() {
-                    self.write_outputs(&self.last_outputs).await?;
-                    self.storage
-                        .store_signal_map("output", &self.last_outputs)?;
-                    cycle_outputs = Some(self.last_outputs.clone());
-                }
-            }
-            RuntimeState::Off => {
-                // Off-state explicitly avoids writing outputs.
-            }
-        }
-
-        if should_exchange_io {
             self.store_online_param_samples()?;
             self.store_user_log_samples(&user_logs)?;
-            self.last_io_exchange = Some(cycle_start);
-            self.append_cycle_log(&inputs, cycle_outputs.as_ref(), &user_logs)?;
+            self.append_cycle_log(
+                &self.last_inputs.clone(),
+                Some(&self.last_outputs.clone()),
+                &user_logs,
+            )?;
+            let duration = cycle_start.elapsed();
+            self.update_metrics(cycle_start, duration)?;
+            self.total_cycles += 1;
+            self.last_controller_cycle = Some(cycle_start);
         }
 
-        let duration = cycle_start.elapsed();
-        self.update_metrics(cycle_start, duration)?;
-        self.total_cycles += 1;
+        if io_due {
+            if self.state != RuntimeState::Off && !self.last_outputs.is_empty() {
+                self.write_outputs(&self.last_outputs).await?;
+                self.storage
+                    .store_signal_map("output", &self.last_outputs)?;
+            }
+            self.last_io_cycle = Some(cycle_start);
+        }
 
         Ok(())
-    }
-
-    fn should_exchange_io(&self, cycle_start: Instant) -> bool {
-        match self.last_io_exchange {
-            None => true,
-            Some(last) => {
-                cycle_start.saturating_duration_since(last)
-                    >= Duration::from_millis(self.config.communication.io_cycle_ms)
-            }
-        }
     }
 
     async fn read_inputs(&self) -> Result<HashMap<String, SignalValue>> {
@@ -321,7 +318,7 @@ impl RuntimeCore {
 
     fn update_metrics(&mut self, cycle_start: Instant, duration: Duration) -> Result<()> {
         let duration_us = duration.as_micros() as u64;
-        let cycle_target_us = self.config.runtime.cycle_ms * 1_000;
+        let cycle_target_us = self.config.logic.cycle_ms * 1_000;
 
         let jitter_us = if let Some(prev_start) = self.last_cycle_start {
             let actual_interval = cycle_start
@@ -490,7 +487,7 @@ impl RuntimeManager {
 
         let (tx, mut rx) = oneshot::channel();
         let core_clone = Arc::clone(&core);
-        let cycle_ms = config.runtime.cycle_ms;
+        let cycle_ms = gcd(config.communication.cycle_ms, config.logic.cycle_ms);
         let join = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(cycle_ms));
 
@@ -851,15 +848,26 @@ fn build_watchdog(cfg: &WatchdogConfig) -> Result<Box<dyn WatchdogModule>> {
         WatchdogConfig::CounterMirror {
             read_node,
             write_node,
-            mirror_cycle_ms,
             stale_timeout_ms,
         } => Ok(Box::new(CounterMirrorWatchdog::new(
             read_node.clone(),
             write_node.clone(),
-            mirror_cycle_or_default(*mirror_cycle_ms)?,
             stale_timeout_or_default(*stale_timeout_ms)?,
         ))),
     }
+}
+
+fn cycle_due(last: Option<Instant>, now: Instant, cycle_ms: u64) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_millis(cycle_ms))
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
 }
 
 pub(crate) fn build_logic(
@@ -893,7 +901,7 @@ pub(crate) fn build_logic(
             let logic = LinearMpcLogic::new(
                 model,
                 config.variables.clone(),
-                config.runtime.cycle_ms,
+                config.logic.cycle_ms,
                 config.logic.params.clone(),
                 config.static_cv_band_defaults(),
             );
@@ -912,7 +920,11 @@ pub(crate) fn build_logic(
             } else {
                 project_dir.join(&config.logic.custom_rust.artifact_path)
             };
-            let logic = CustomRustLogic::load(artifact_path, config.logic.params.clone())?;
+            let logic = CustomRustLogic::load(
+                artifact_path,
+                config.logic.params.clone(),
+                config.logic.cycle_ms as f64 / 1_000.0,
+            )?;
             Ok(Box::new(logic))
         }
     }
@@ -1027,6 +1039,7 @@ mod tests {
             opc_tag: None,
         }];
         cfg.logic = LogicConfig {
+            cycle_ms: 1_000,
             kind: LogicKind::PController,
             p_controller: PControllerLogicConfig {
                 pairs: vec![PControllerPairConfig {
@@ -1045,7 +1058,7 @@ mod tests {
             off_timeout_ms: 200,
         };
         cfg.watchdog = WatchdogConfig::None;
-        cfg.runtime.cycle_ms = 1_000;
+        cfg.logic.cycle_ms = 1_000;
         cfg
     }
 
@@ -1149,6 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn fault_state_machine_transitions_hold_alarm_off() {
         let mut cfg = base_config();
+        cfg.communication.cycle_ms = 1;
         cfg.alarms.alarm_timeout_ms = 40;
         cfg.alarms.off_timeout_ms = 80;
 
@@ -1232,6 +1246,64 @@ mod tests {
         assert!(content.contains("\"event\":\"online_params_update\""));
         assert!(content.contains("cv.y1.setpoint"));
         assert!(content.contains("mv.u1.write"));
+    }
+
+    #[tokio::test]
+    async fn controller_output_waits_for_next_io_cycle() {
+        let mut cfg = base_config();
+        cfg.communication.cycle_ms = 100;
+        cfg.io.cycle_ms = 200;
+        cfg.logic.cycle_ms = 50;
+
+        let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-independent-cycles"));
+        seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(2.0));
+        adapter.seed_node("ns=2;s=Y1_PROCESS_VALUE", SignalValue::F64(1.0));
+
+        let storage_dir = tempdir().expect("tmp");
+        let storage = SqliteStorage::new(storage_dir.path().join("runtime.sqlite")).expect("db");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(storage_dir.path().join("runtime.log"))
+            .expect("log");
+        let mut core = RuntimeCore::new(
+            cfg,
+            adapter.clone(),
+            Box::new(NoneWatchdog),
+            Box::new(LoggingTestLogic::default()),
+            None,
+            storage,
+            log_file,
+        )
+        .await
+        .expect("runtime");
+
+        core.tick_once().await.expect("initial coincident tick");
+        adapter
+            .write("ns=2;s=U1_WRITE", SignalValue::F64(9.0))
+            .await
+            .expect("external output seed");
+
+        let now = Instant::now();
+        core.last_communication_cycle = Some(now);
+        core.last_io_cycle = Some(now);
+        core.last_controller_cycle = Some(now - Duration::from_millis(50));
+        core.tick_once().await.expect("controller-only tick");
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.expect("read output"),
+            SignalValue::F64(9.0)
+        );
+
+        let now = Instant::now();
+        core.last_communication_cycle = Some(now);
+        core.last_io_cycle = Some(now - Duration::from_millis(200));
+        core.last_controller_cycle = Some(now);
+        core.tick_once().await.expect("io-only tick");
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.expect("read output"),
+            SignalValue::F64(3.0)
+        );
     }
 
     #[tokio::test]

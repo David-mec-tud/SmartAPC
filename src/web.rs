@@ -357,7 +357,7 @@ async fn plots_page() -> Html<&'static str> {
   const state = {
     projectName: null,
     executionMode: null,
-    runtimeCycleMs: 1000,
+    controllerCycleMs: 1000,
     projects: [],
     variables: { mvs: [], cvs: [], dvs: [] },
     plotConfig: { window_sec: 180, future_window_sec: 0, mv_order: [], cv_order: [], dv_order: [], custom_plots: [] },
@@ -541,7 +541,7 @@ async fn plots_page() -> Html<&'static str> {
       api(`/api/projects/${encodeURIComponent(projectName)}/plots/config`),
     ]);
     state.variables = cfg.variables || { mvs: [], cvs: [], dvs: [] };
-    state.runtimeCycleMs = Math.max(1, Number((cfg.runtime || {}).cycle_ms || 1000));
+    state.controllerCycleMs = Math.max(1, Number((cfg.logic || {}).cycle_ms || 1000));
     state.plotConfig = plotCfg;
     normalizePlotConfig();
     el.windowSec.value = String(state.plotConfig.window_sec);
@@ -830,7 +830,7 @@ async fn plots_page() -> Html<&'static str> {
   }
 
   function futureXValues(pointCount, latestTimestampMs) {
-    const cycleMs = Math.max(1, Number(state.runtimeCycleMs || 1000));
+    const cycleMs = Math.max(1, Number(state.controllerCycleMs || 1000));
     const simulationMode = state.executionMode === "simulation";
     const out = [];
     for (let idx = 1; idx <= pointCount; idx += 1) {
@@ -885,7 +885,7 @@ async fn plots_page() -> Html<&'static str> {
   function futureOverlaySeries(kind, name, latestTimestampMs) {
     const futureSec = clampFutureWindow(Number(state.plotConfig.future_window_sec || 0));
     if (futureSec <= 0) return [];
-    const maxSteps = Math.max(1, Math.floor((futureSec * 1000) / Math.max(1, Number(state.runtimeCycleMs || 1000))));
+    const maxSteps = Math.max(1, Math.floor((futureSec * 1000) / Math.max(1, Number(state.controllerCycleMs || 1000))));
     const out = [];
 
     if (kind === "cv") {

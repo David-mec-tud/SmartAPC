@@ -466,7 +466,7 @@ fn run_step_response(
     mut logic: Box<dyn ControlLogic>,
     noise_seed: u64,
 ) -> Result<StepResponseResult> {
-    let dt_s = config.runtime.cycle_ms as f64 / 1000.0;
+    let dt_s = config.logic.cycle_ms as f64 / 1000.0;
     let steps = (config.optimization.simulation_duration_s / dt_s)
         .ceil()
         .max(1.0) as usize;

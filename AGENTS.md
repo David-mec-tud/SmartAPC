@@ -55,6 +55,8 @@
   - active logic parameters
   - active static I/O parameters (values without an OPC UA Node ID that are runtime-editable)
 - Ensure logging additions are structured and testable (runtime log entries must be machine-parseable).
+- Keep timing ownership explicit: communication/watchdog use `communication.cycle_ms`, I/O exchanges use `io.cycle_ms`, and controller/runtime simulation/tuning use `logic.cycle_ms`.
+- Keep `io.cycle_ms` aligned as a multiple of `communication.cycle_ms`; controller timing remains independent.
 
 ## 9. Custom Rust Strategy Workflow (Quick Reference)
 1. Generate template in Control Strategy tab.

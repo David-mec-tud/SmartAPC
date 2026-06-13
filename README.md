@@ -237,7 +237,11 @@ Static I/O values without OPC UA Node IDs are exposed as online parameters:
 ## Important Notes
 
 - V1 is local and OT-focused, with no cloud dependency.
-- `runtime.cycle_ms` must be at least `1000 ms` in V1.
+- Cycle times are configured independently in milliseconds:
+  - `communication.cycle_ms` drives OPC UA health checks and the watchdog.
+  - `io.cycle_ms` drives input/output exchanges and must be a multiple of the communication cycle.
+  - `logic.cycle_ms` drives controller execution, MPC/Kalman discretization, tuning, and simulation.
+- All cycle times must be greater than zero.
 
 ## API Quick Reference
 

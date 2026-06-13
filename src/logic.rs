@@ -257,6 +257,7 @@ pub struct CustomLibraryContract {
 #[derive(Debug, Serialize)]
 struct CustomCallRequest<'a> {
     state: RuntimeState,
+    cycle_time_s: f64,
     inputs: &'a HashMap<String, SignalValue>,
     params: &'a HashMap<String, LogicParamValue>,
     input_history: HashMap<String, Vec<SignalValue>>,
@@ -283,6 +284,7 @@ pub struct CustomRustLogic {
     output_history: HashMap<String, VecDeque<SignalValue>>,
     param_history: HashMap<String, VecDeque<LogicParamValue>>,
     max_history_len: usize,
+    cycle_time_s: f64,
     _initial_values: HashMap<String, SignalValue>,
 }
 
@@ -290,6 +292,7 @@ impl CustomRustLogic {
     pub fn load(
         artifact_path: impl AsRef<Path>,
         params: HashMap<String, LogicParamValue>,
+        cycle_time_s: f64,
     ) -> Result<Self> {
         // SAFETY: Loading a user-provided dynamic library is inherently unsafe.
         // This API keeps the loaded library alive for as long as function pointers are used.
@@ -357,6 +360,7 @@ impl CustomRustLogic {
             output_history: HashMap::new(),
             param_history: HashMap::new(),
             max_history_len: 300,
+            cycle_time_s,
             _initial_values: HashMap::new(),
         })
     }
@@ -480,6 +484,7 @@ impl ControlLogic for CustomRustLogic {
 
         let request = CustomCallRequest {
             state,
+            cycle_time_s: self.cycle_time_s,
             inputs,
             params: &active_params,
             input_history: Self::snapshot_signal_history(&self.input_history),

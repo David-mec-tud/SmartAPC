@@ -57,6 +57,12 @@ impl ProjectConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.communication.validate()?;
+        if self.io.cycle_ms == 0 {
+            bail!("io.cycle_ms must be > 0");
+        }
+        if self.io.cycle_ms % self.communication.cycle_ms != 0 {
+            bail!("io.cycle_ms must be a multiple of communication.cycle_ms");
+        }
         self.variables.validate()?;
         self.io_definition.validate(&self.variables)?;
         self.io.validate()?;
@@ -77,8 +83,8 @@ impl ProjectConfig {
         )?;
         self.plots.validate()?;
 
-        if self.runtime.cycle_ms < 1_000 {
-            bail!("runtime.cycle_ms must be >= 1000 ms for V1");
+        if self.logic.cycle_ms == 0 {
+            bail!("logic.cycle_ms must be > 0");
         }
 
         if self.alarms.alarm_timeout_ms == 0 {
@@ -92,15 +98,11 @@ impl ProjectConfig {
         if let WatchdogConfig::CounterMirror {
             read_node,
             write_node,
-            mirror_cycle_ms,
             stale_timeout_ms,
         } = &self.watchdog
         {
             if read_node.trim().is_empty() || write_node.trim().is_empty() {
                 bail!("Counter-mirror watchdog requires read_node and write_node");
-            }
-            if *mirror_cycle_ms == 0 {
-                bail!("Watchdog mirror_cycle_ms must be greater than 0");
             }
             if *stale_timeout_ms == 0 {
                 bail!("Watchdog stale_timeout_ms must be greater than 0");
@@ -164,9 +166,10 @@ impl ProjectConfig {
     }
 
     pub fn rebuild_runtime_io_from_definition(&mut self) -> Result<()> {
-        let (io, limits) = self
+        let (mut io, limits) = self
             .io_definition
             .to_runtime_io_and_limits(&self.variables)?;
+        io.cycle_ms = self.io.cycle_ms;
         self.io = io;
         self.limits = limits;
         Ok(())
@@ -273,7 +276,11 @@ impl ProjectConfig {
             }
         }
 
-        IoConfig { inputs, outputs }
+        IoConfig {
+            inputs,
+            outputs,
+            ..IoConfig::default()
+        }
     }
 
     fn build_minimal_linear_mpc_simulation_io(&self) -> IoConfig {
@@ -309,7 +316,11 @@ impl ProjectConfig {
             ));
         }
 
-        IoConfig { inputs, outputs }
+        IoConfig {
+            inputs,
+            outputs,
+            ..IoConfig::default()
+        }
     }
 
     fn build_minimal_custom_rust_simulation_io(&self) -> Result<IoConfig> {
@@ -361,7 +372,11 @@ impl ProjectConfig {
             ));
         }
 
-        Ok(IoConfig { inputs, outputs })
+        Ok(IoConfig {
+            inputs,
+            outputs,
+            ..IoConfig::default()
+        })
     }
 
     pub fn sync_active_online_params(&mut self) {
@@ -568,7 +583,7 @@ impl ProjectConfig {
                 "communication",
                 "Configure OPC UA Communication",
                 !self.communication.endpoint_url.trim().is_empty()
-                    && self.communication.io_cycle_ms > 0,
+                    && self.communication.cycle_ms > 0,
             ),
             SidebarTask::new(
                 "watchdog",
@@ -733,8 +748,8 @@ fn normalize_custom_traces(traces: &[CustomPlotTraceConfig]) -> Vec<CustomPlotTr
 pub struct CommunicationConfig {
     pub protocol: ProtocolKind,
     pub endpoint_url: String,
-    #[serde(default = "default_communication_io_cycle_ms")]
-    pub io_cycle_ms: u64,
+    #[serde(default = "default_cycle_ms")]
+    pub cycle_ms: u64,
 }
 
 impl Default for CommunicationConfig {
@@ -742,7 +757,7 @@ impl Default for CommunicationConfig {
         Self {
             protocol: ProtocolKind::OpcUa,
             endpoint_url: "opc.tcp://127.0.0.1:4840".to_string(),
-            io_cycle_ms: default_communication_io_cycle_ms(),
+            cycle_ms: default_cycle_ms(),
         }
     }
 }
@@ -752,15 +767,11 @@ impl CommunicationConfig {
         if self.endpoint_url.trim().is_empty() {
             bail!("communication.endpoint_url must not be empty");
         }
-        if self.io_cycle_ms == 0 {
-            bail!("communication.io_cycle_ms must be > 0");
+        if self.cycle_ms == 0 {
+            bail!("communication.cycle_ms must be > 0");
         }
         Ok(())
     }
-}
-
-const fn default_communication_io_cycle_ms() -> u64 {
-    1_000
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -776,15 +787,9 @@ pub enum WatchdogConfig {
     CounterMirror {
         read_node: String,
         write_node: String,
-        #[serde(default = "default_watchdog_mirror_cycle_ms")]
-        mirror_cycle_ms: u64,
         #[serde(default = "default_watchdog_stale_timeout_ms")]
         stale_timeout_ms: u64,
     },
-}
-
-const fn default_watchdog_mirror_cycle_ms() -> u64 {
-    1_000
 }
 
 const fn default_watchdog_stale_timeout_ms() -> u64 {
@@ -1044,7 +1049,11 @@ impl IoDefinitionConfig {
         }
 
         Ok((
-            IoConfig { inputs, outputs },
+            IoConfig {
+                inputs,
+                outputs,
+                ..IoConfig::default()
+            },
             LimitsConfig { values: limits },
         ))
     }
@@ -1149,10 +1158,24 @@ pub struct DvIoDefinition {
     pub enable: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoConfig {
+    #[serde(default = "default_cycle_ms")]
+    pub cycle_ms: u64,
+    #[serde(default)]
     pub inputs: Vec<SignalPoint>,
+    #[serde(default)]
     pub outputs: Vec<SignalPoint>,
+}
+
+impl Default for IoConfig {
+    fn default() -> Self {
+        Self {
+            cycle_ms: default_cycle_ms(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
 }
 
 impl IoConfig {
@@ -1209,6 +1232,8 @@ pub struct NumericLimit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogicConfig {
+    #[serde(default = "default_cycle_ms")]
+    pub cycle_ms: u64,
     #[serde(default)]
     pub kind: LogicKind,
     #[serde(default)]
@@ -1224,6 +1249,7 @@ pub struct LogicConfig {
 impl Default for LogicConfig {
     fn default() -> Self {
         Self {
+            cycle_ms: default_cycle_ms(),
             kind: LogicKind::PController,
             p_controller: PControllerLogicConfig::default(),
             custom_rust: CustomRustLogicConfig::default(),
@@ -2378,8 +2404,6 @@ fn remap_matrix_rows_and_columns(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
-    #[serde(default = "default_cycle_ms")]
-    pub cycle_ms: u64,
     #[serde(default)]
     pub execution_time_test: bool,
 }
@@ -2387,7 +2411,6 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            cycle_ms: default_cycle_ms(),
             execution_time_test: true,
         }
     }
@@ -2440,12 +2463,71 @@ impl DeploymentConfig {
 }
 
 pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
-    let mut cfg: ProjectConfig = toml::from_str(input).context("failed to parse project TOML")?;
+    let mut value: toml::Value = toml::from_str(input).context("failed to parse project TOML")?;
+    migrate_legacy_timing(&mut value);
+    let mut cfg: ProjectConfig = value.try_into().context("failed to decode project TOML")?;
     cfg.normalize_model_config();
     cfg.normalize_simulation_config();
     cfg.normalize_optimization_config();
     cfg.validate()?;
     Ok(cfg)
+}
+
+fn migrate_legacy_timing(value: &mut toml::Value) {
+    let Some(root) = value.as_table_mut() else {
+        return;
+    };
+
+    let legacy_io_cycle = root
+        .get_mut("communication")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|communication| {
+            communication
+                .remove("io_cycle_ms")
+                .and_then(|value| value.as_integer())
+        });
+
+    if let Some(cycle_ms) = legacy_io_cycle {
+        let communication = root
+            .entry("communication")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("communication table");
+        communication
+            .entry("cycle_ms")
+            .or_insert(toml::Value::Integer(cycle_ms));
+
+        let io = root
+            .entry("io")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("io table");
+        io.entry("cycle_ms")
+            .or_insert(toml::Value::Integer(cycle_ms));
+    }
+
+    let legacy_controller_cycle = root
+        .get_mut("runtime")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|runtime| {
+            runtime
+                .remove("cycle_ms")
+                .and_then(|value| value.as_integer())
+        });
+    if let Some(cycle_ms) = legacy_controller_cycle {
+        let logic = root
+            .entry("logic")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("logic table");
+        logic
+            .entry("cycle_ms")
+            .or_insert(toml::Value::Integer(cycle_ms));
+    }
+
+    if let Some(watchdog) = root.get_mut("watchdog").and_then(toml::Value::as_table_mut) {
+        watchdog.remove("mirror_cycle_ms");
+    }
 }
 
 pub fn to_toml_string(cfg: &ProjectConfig) -> Result<String> {
@@ -2526,9 +2608,18 @@ mod tests {
     #[test]
     fn invalid_cycle_rejected() {
         let mut cfg = ProjectConfig::new("demo");
-        cfg.runtime.cycle_ms = 10;
+        cfg.logic.cycle_ms = 0;
         let err = cfg.validate().expect_err("expected cycle validation error");
         assert!(err.to_string().contains("cycle_ms"));
+    }
+
+    #[test]
+    fn io_cycle_must_align_with_communication_cycle() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.communication.cycle_ms = 300;
+        cfg.io.cycle_ms = 1_000;
+        let err = cfg.validate().expect_err("expected cycle alignment error");
+        assert!(err.to_string().contains("multiple"));
     }
 
     #[test]
@@ -2685,9 +2776,14 @@ description = "SmartAPC controller runtime"
 
         let decoded = from_toml_str(input).expect("legacy noop model should parse");
         assert!(decoded.model.is_none());
+        assert_eq!(decoded.communication.cycle_ms, 1_000);
+        assert_eq!(decoded.io.cycle_ms, 1_000);
+        assert_eq!(decoded.logic.cycle_ms, 1_000);
 
         let encoded = to_toml_string(&decoded).expect("toml encode");
         assert!(!encoded.contains("[model]"));
+        assert!(!encoded.contains("io_cycle_ms"));
+        assert!(!encoded.contains("mirror_cycle_ms"));
     }
 
     #[test]
