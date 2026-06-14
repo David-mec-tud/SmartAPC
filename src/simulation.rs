@@ -11,6 +11,9 @@ use serde_json::json;
 
 use crate::{
     logic::{ControlLogic, LogicUserLog},
+    online_optimization::{
+        OnlineOptimizationSession, OnlineOptimizationStatus, OnlineOptimizationTick,
+    },
     project_config::{
         LimitsConfig, LinearStateSpaceModelConfig, LogicParamValue, ProjectConfig,
         SimulationConfig, SimulationSpeedMode,
@@ -55,6 +58,7 @@ pub(crate) struct SimulationCore {
     last_jitter_us: i64,
     last_cycle_start: Option<Instant>,
     simulation_time_s: f64,
+    pub(crate) online_optimization: Option<OnlineOptimizationSession>,
 }
 
 impl SimulationCore {
@@ -96,6 +100,7 @@ impl SimulationCore {
             last_jitter_us: 0,
             last_cycle_start: None,
             simulation_time_s: 0.0,
+            online_optimization: None,
             rng: SmallRng::seeded(),
             state: RuntimeState::Running,
             simulation: config.simulation.clone(),
@@ -134,6 +139,11 @@ impl SimulationCore {
     }
 
     pub(crate) fn set_params(&mut self, updates: HashMap<String, LogicParamValue>) -> Result<()> {
+        if self.online_optimization.as_ref().is_some_and(|session| {
+            session.status().phase != crate::online_optimization::OnlineOptimizationPhase::Finished
+        }) {
+            bail!("manual parameter updates are locked during online optimization");
+        }
         let current = self.logic.current_params();
         for (key, value) in &updates {
             let existing = current
@@ -157,6 +167,53 @@ impl SimulationCore {
             "params": self.logic.current_params(),
             "simulation_time_s": self.simulation_time_s,
         }))?;
+        Ok(())
+    }
+
+    pub(crate) fn start_online_optimization(
+        &mut self,
+        config: crate::project_config::OnlineOptimizationConfig,
+    ) -> Result<()> {
+        if self.online_optimization.is_some() {
+            bail!("online optimization is already active");
+        }
+        let (session, events) = OnlineOptimizationSession::new(
+            config,
+            &self.logic.current_params(),
+            self.config.logic.cycle_ms,
+        )?;
+        self.online_optimization = Some(session);
+        self.append_online_optimization_events(events)
+    }
+
+    pub(crate) fn online_optimization_status(&self) -> Option<OnlineOptimizationStatus> {
+        self.online_optimization
+            .as_ref()
+            .map(OnlineOptimizationSession::status)
+    }
+
+    pub(crate) fn apply_online_optimization_tick(
+        &mut self,
+        tick: OnlineOptimizationTick,
+    ) -> Result<()> {
+        if let Some(updates) = tick.updates {
+            self.logic.set_params(updates);
+        }
+        self.append_online_optimization_events(tick.events)
+    }
+
+    fn append_online_optimization_events(&mut self, events: Vec<serde_json::Value>) -> Result<()> {
+        for mut event in events {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("timestamp_ms".to_string(), json!(now_ms()));
+                object.insert("state".to_string(), json!(self.state));
+                object.insert(
+                    "simulation_time_s".to_string(),
+                    json!(self.simulation_time_s),
+                );
+            }
+            self.append_log_record(event)?;
+        }
         Ok(())
     }
 
@@ -215,6 +272,11 @@ impl SimulationCore {
         self.store_online_param_samples(sample_timestamp_ms)?;
         self.store_user_log_samples(sample_timestamp_ms, &user_logs)?;
         self.append_cycle_log(&inputs, &outputs, &user_logs)?;
+        if let Some(mut session) = self.online_optimization.take() {
+            let tick = session.observe(self.state, &inputs);
+            self.apply_online_optimization_tick(tick)?;
+            self.online_optimization = Some(session);
+        }
 
         let (a_scaled, b_scaled) = self.scaled_model_matrices();
         let u = self.current_u_vector(&applied_mv, &self.current_dv);

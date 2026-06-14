@@ -26,6 +26,8 @@ pub struct ProjectConfig {
     pub simulation: SimulationConfig,
     #[serde(default)]
     pub optimization: ParameterOptimizationConfig,
+    #[serde(default)]
+    pub online_optimization: OnlineOptimizationConfig,
     pub runtime: RuntimeConfig,
     pub alarms: AlarmConfig,
     pub deployment: DeploymentConfig,
@@ -49,6 +51,7 @@ impl ProjectConfig {
             model: None,
             simulation: SimulationConfig::default(),
             optimization: ParameterOptimizationConfig::default(),
+            online_optimization: OnlineOptimizationConfig::default(),
             runtime: RuntimeConfig::default(),
             alarms: AlarmConfig::default(),
             plots: PlotConfig::default(),
@@ -81,6 +84,8 @@ impl ProjectConfig {
             &self.variables,
             &self.active_controller_f64_param_defaults(),
         )?;
+        self.online_optimization
+            .validate(&self.variables, &self.active_f64_online_param_defaults())?;
         self.plots.validate()?;
 
         if self.logic.cycle_ms == 0 {
@@ -162,6 +167,15 @@ impl ProjectConfig {
             self.model.as_ref(),
             &self.simulation,
             &self.active_controller_f64_param_defaults(),
+        );
+    }
+
+    pub fn normalize_online_optimization_config(&mut self) {
+        let config = std::mem::take(&mut self.online_optimization);
+        self.online_optimization = config.normalized_for(
+            &self.variables,
+            &self.active_f64_online_param_defaults(),
+            &self.simulation,
         );
     }
 
@@ -486,6 +500,24 @@ impl ProjectConfig {
             .collect()
     }
 
+    pub fn active_f64_online_param_defaults(&self) -> HashMap<String, f64> {
+        self.active_online_param_defaults()
+            .into_iter()
+            .filter_map(|(key, default_value)| {
+                let value = self
+                    .logic
+                    .params
+                    .get(&key)
+                    .filter(|existing| existing.matches_type(default_value.param_type()))
+                    .unwrap_or(&default_value);
+                match value {
+                    LogicParamValue::F64(value) => Some((key, *value)),
+                    LogicParamValue::Bool(_) => None,
+                }
+            })
+            .collect()
+    }
+
     pub fn linear_mpc_is_configured_for(&self, io: &IoConfig) -> bool {
         self.linear_mpc_config_error(io).is_none()
     }
@@ -600,6 +632,11 @@ impl ProjectConfig {
                 self.kalman_tuning_available(),
             ),
             SidebarTask::new("optimization", "Parameter Optimization", logic_configured),
+            SidebarTask::new(
+                "online_optimization",
+                "Online Parameter Optimization",
+                logic_configured,
+            ),
             SidebarTask::new("timing", "Control Function Tests", logic_configured),
             SidebarTask::new("simulation", "Simulate Controller (optional)", true),
             SidebarTask::new(
@@ -1875,6 +1912,169 @@ pub struct ParameterOptimizationParamConfig {
     pub max: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineOptimizationConfig {
+    #[serde(default)]
+    pub parameters: Vec<OnlineOptimizationParamConfig>,
+    #[serde(default)]
+    pub cvs: Vec<OnlineOptimizationCvConfig>,
+    #[serde(default = "default_online_optimization_duration_s")]
+    pub duration_s: u64,
+    #[serde(default = "default_optimization_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_optimization_initial_samples")]
+    pub initial_samples: usize,
+    #[serde(default = "default_optimization_convergence_patience")]
+    pub convergence_patience: usize,
+}
+
+impl Default for OnlineOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            parameters: Vec::new(),
+            cvs: Vec::new(),
+            duration_s: default_online_optimization_duration_s(),
+            max_iterations: default_optimization_max_iterations(),
+            initial_samples: default_optimization_initial_samples(),
+            convergence_patience: default_optimization_convergence_patience(),
+        }
+    }
+}
+
+impl OnlineOptimizationConfig {
+    fn normalized_for(
+        self,
+        vars: &VariableCatalogConfig,
+        active_params: &HashMap<String, f64>,
+        simulation: &SimulationConfig,
+    ) -> Self {
+        let parameters = self
+            .parameters
+            .into_iter()
+            .filter(|row| active_params.contains_key(&row.key))
+            .map(|mut row| {
+                if row.min > row.max {
+                    std::mem::swap(&mut row.min, &mut row.max);
+                }
+                row
+            })
+            .collect();
+        let mut existing_cvs: HashMap<_, _> = self
+            .cvs
+            .into_iter()
+            .map(|row| (row.name.clone(), row))
+            .collect();
+        let cvs = vars
+            .cvs
+            .iter()
+            .map(|name| {
+                existing_cvs.remove(name).unwrap_or_else(|| {
+                    let center = simulation
+                        .cv_setpoints
+                        .get(name)
+                        .copied()
+                        .or_else(|| simulation.cv_initials.get(name).copied())
+                        .unwrap_or(0.0);
+                    let width = center.abs().max(1.0) * 10.0;
+                    OnlineOptimizationCvConfig {
+                        name: name.clone(),
+                        weight: 1.0,
+                        low: center - width,
+                        high: center + width,
+                    }
+                })
+            })
+            .collect();
+        Self {
+            parameters,
+            cvs,
+            duration_s: self.duration_s.clamp(1, 31_536_000),
+            max_iterations: self.max_iterations.clamp(1, 10_000),
+            initial_samples: self.initial_samples.clamp(1, 1_000),
+            convergence_patience: self.convergence_patience.clamp(1, 1_000),
+        }
+    }
+
+    fn validate(
+        &self,
+        vars: &VariableCatalogConfig,
+        active_params: &HashMap<String, f64>,
+    ) -> Result<()> {
+        if self.duration_s == 0
+            || self.max_iterations == 0
+            || self.initial_samples == 0
+            || self.convergence_patience == 0
+        {
+            bail!("online optimization duration and iteration settings must be > 0");
+        }
+        if self.parameters.is_empty() {
+            return Ok(());
+        }
+        let mut seen = HashSet::new();
+        for row in &self.parameters {
+            if !active_params.contains_key(&row.key) {
+                bail!("online optimization parameter '{}' is not active", row.key);
+            }
+            if !seen.insert(row.key.as_str()) {
+                bail!("duplicate online optimization parameter '{}'", row.key);
+            }
+            if !row.min.is_finite() || !row.max.is_finite() || row.min >= row.max {
+                bail!(
+                    "online optimization parameter '{}' requires finite min < max",
+                    row.key
+                );
+            }
+        }
+        let expected: HashSet<_> = vars.cvs.iter().map(String::as_str).collect();
+        let mut cv_seen = HashSet::new();
+        let mut positive_weight = false;
+        for row in &self.cvs {
+            if !expected.contains(row.name.as_str()) || !cv_seen.insert(row.name.as_str()) {
+                bail!("invalid or duplicate online optimization CV '{}'", row.name);
+            }
+            if !row.weight.is_finite() || row.weight < 0.0 {
+                bail!(
+                    "online optimization CV '{}' weight must be finite and >= 0",
+                    row.name
+                );
+            }
+            positive_weight |= row.weight > 0.0;
+            if !row.low.is_finite() || !row.high.is_finite() || row.low >= row.high {
+                bail!(
+                    "online optimization CV '{}' requires finite low < high",
+                    row.name
+                );
+            }
+        }
+        if cv_seen.len() != expected.len() {
+            bail!("online optimization requires safety limits for every CV");
+        }
+        if !vars.cvs.is_empty() && !positive_weight {
+            bail!("online optimization requires at least one positive CV weight");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineOptimizationParamConfig {
+    pub key: String,
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineOptimizationCvConfig {
+    pub name: String,
+    pub weight: f64,
+    pub low: f64,
+    pub high: f64,
+}
+
+const fn default_online_optimization_duration_s() -> u64 {
+    60
+}
+
 impl ParameterOptimizationParamConfig {
     fn from_default(key: String, default: f64) -> Self {
         let width = default.abs().max(1.0);
@@ -2469,6 +2669,7 @@ pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
     cfg.normalize_model_config();
     cfg.normalize_simulation_config();
     cfg.normalize_optimization_config();
+    cfg.normalize_online_optimization_config();
     cfg.validate()?;
     Ok(cfg)
 }
@@ -2698,6 +2899,86 @@ mod tests {
             .position(|task| task.id == "optimization")
             .expect("optimization task");
         assert_eq!(optimization_index, tuning_index + 1);
+    }
+
+    #[test]
+    fn online_optimization_normalizes_cvs_and_selected_numeric_parameters() {
+        let mut cfg = valid_config_with_variables();
+        cfg.sync_active_online_params();
+        let active_key = cfg
+            .active_controller_f64_param_defaults()
+            .into_keys()
+            .next()
+            .expect("active numeric parameter");
+        cfg.online_optimization.parameters = vec![
+            OnlineOptimizationParamConfig {
+                key: active_key,
+                min: 2.0,
+                max: -2.0,
+            },
+            OnlineOptimizationParamConfig {
+                key: "not.active".to_string(),
+                min: 0.0,
+                max: 1.0,
+            },
+        ];
+        cfg.normalize_online_optimization_config();
+
+        assert_eq!(cfg.online_optimization.parameters.len(), 1);
+        assert_eq!(cfg.online_optimization.parameters[0].min, -2.0);
+        assert_eq!(cfg.online_optimization.cvs.len(), cfg.variables.cvs.len());
+        cfg.validate()
+            .expect("normalized online optimization config");
+    }
+
+    #[test]
+    fn online_optimization_requires_positive_cv_weight_when_configured() {
+        let mut cfg = valid_config_with_variables();
+        cfg.sync_active_online_params();
+        let active_key = cfg
+            .active_controller_f64_param_defaults()
+            .into_keys()
+            .next()
+            .expect("active numeric parameter");
+        cfg.online_optimization.parameters = vec![OnlineOptimizationParamConfig {
+            key: active_key,
+            min: 0.0,
+            max: 2.0,
+        }];
+        cfg.normalize_online_optimization_config();
+        for cv in &mut cfg.online_optimization.cvs {
+            cv.weight = 0.0;
+        }
+
+        let err = cfg.validate().expect_err("zero weights must fail");
+        assert!(err.to_string().contains("positive CV weight"));
+    }
+
+    #[test]
+    fn online_optimization_config_roundtrips() {
+        let mut cfg = valid_config_with_variables();
+        cfg.sync_active_online_params();
+        let active_key = cfg
+            .active_f64_online_param_defaults()
+            .into_keys()
+            .next()
+            .expect("active numeric parameter");
+        cfg.online_optimization.parameters = vec![OnlineOptimizationParamConfig {
+            key: active_key,
+            min: -1.0,
+            max: 3.0,
+        }];
+        cfg.online_optimization.duration_s = 3_723;
+        cfg.normalize_online_optimization_config();
+
+        let encoded = to_toml_string(&cfg).expect("encode");
+        let decoded = from_toml_str(&encoded).expect("decode");
+        assert_eq!(decoded.online_optimization.duration_s, 3_723);
+        assert_eq!(decoded.online_optimization.parameters.len(), 1);
+        assert_eq!(
+            decoded.online_optimization.cvs.len(),
+            cfg.variables.cvs.len()
+        );
     }
 
     #[test]

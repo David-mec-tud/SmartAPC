@@ -20,6 +20,9 @@ use crate::{
     linear_mpc::LinearMpcLogic,
     logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
     model::ModelModule,
+    online_optimization::{
+        OnlineOptimizationSession, OnlineOptimizationStatus, OnlineOptimizationTick,
+    },
     project::ProjectService,
     project_config::{
         IoConfig, LogicKind, LogicParamValue, ModelConfig, ProjectConfig, SimulationConfig,
@@ -80,6 +83,7 @@ struct RuntimeCore {
     last_communication_cycle: Option<Instant>,
     last_io_cycle: Option<Instant>,
     last_controller_cycle: Option<Instant>,
+    online_optimization: Option<OnlineOptimizationSession>,
 }
 
 impl RuntimeCore {
@@ -120,6 +124,7 @@ impl RuntimeCore {
             last_communication_cycle: None,
             last_io_cycle: None,
             last_controller_cycle: None,
+            online_optimization: None,
         })
     }
 
@@ -144,6 +149,11 @@ impl RuntimeCore {
     }
 
     fn set_params(&mut self, updates: HashMap<String, LogicParamValue>) -> Result<()> {
+        if self.online_optimization.as_ref().is_some_and(|session| {
+            session.status().phase != crate::online_optimization::OnlineOptimizationPhase::Finished
+        }) {
+            bail!("manual parameter updates are locked during online optimization");
+        }
         let current = self.logic.current_params();
         for (key, value) in &updates {
             let existing = current
@@ -167,6 +177,46 @@ impl RuntimeCore {
             "params": self.logic.current_params(),
         })) {
             tracing::warn!(error = %err, "failed to write parameter update log");
+        }
+        Ok(())
+    }
+
+    fn start_online_optimization(
+        &mut self,
+        config: crate::project_config::OnlineOptimizationConfig,
+    ) -> Result<()> {
+        if self.online_optimization.is_some() {
+            bail!("online optimization is already active");
+        }
+        let (session, events) = OnlineOptimizationSession::new(
+            config,
+            &self.logic.current_params(),
+            self.config.logic.cycle_ms,
+        )?;
+        self.online_optimization = Some(session);
+        self.append_online_optimization_events(events)
+    }
+
+    fn online_optimization_status(&self) -> Option<OnlineOptimizationStatus> {
+        self.online_optimization
+            .as_ref()
+            .map(OnlineOptimizationSession::status)
+    }
+
+    fn apply_online_optimization_tick(&mut self, tick: OnlineOptimizationTick) -> Result<()> {
+        if let Some(updates) = tick.updates {
+            self.logic.set_params(updates);
+        }
+        self.append_online_optimization_events(tick.events)
+    }
+
+    fn append_online_optimization_events(&mut self, events: Vec<serde_json::Value>) -> Result<()> {
+        for mut event in events {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("timestamp_ms".to_string(), json!(now_ms()));
+                object.insert("state".to_string(), json!(self.state));
+            }
+            self.append_log_record(event)?;
         }
         Ok(())
     }
@@ -254,6 +304,11 @@ impl RuntimeCore {
                 Some(&self.last_outputs.clone()),
                 &user_logs,
             )?;
+            if let Some(mut session) = self.online_optimization.take() {
+                let tick = session.observe(self.state, &self.last_inputs);
+                self.apply_online_optimization_tick(tick)?;
+                self.online_optimization = Some(session);
+            }
             let duration = cycle_start.elapsed();
             self.update_metrics(cycle_start, duration)?;
             self.total_cycles += 1;
@@ -618,6 +673,13 @@ impl RuntimeManager {
             None => return Ok(()),
         };
 
+        {
+            let mut core = handle.core.lock().await;
+            if let Some(mut session) = core.online_optimization.take() {
+                let tick = session.stop("execution_stopped");
+                core.apply_online_optimization_tick(tick)?;
+            }
+        }
         let _ = handle.shutdown.send(());
         let _ = handle.join.await;
         Ok(())
@@ -634,6 +696,13 @@ impl RuntimeManager {
             None => return Ok(()),
         };
 
+        {
+            let mut core = handle.core.lock().await;
+            if let Some(mut session) = core.online_optimization.take() {
+                let tick = session.stop("execution_stopped");
+                core.apply_online_optimization_tick(tick)?;
+            }
+        }
         let _ = handle.shutdown.send(());
         let _ = handle.join.await;
         Ok(())
@@ -742,6 +811,114 @@ impl RuntimeManager {
         }
     }
 
+    pub async fn start_online_optimization(
+        &self,
+        service: &ProjectService,
+        project_name: &str,
+    ) -> Result<OnlineOptimizationStatus> {
+        let mut config = service.load_config(project_name)?;
+        config.sync_active_online_params();
+        config.normalize_online_optimization_config();
+        config.validate()?;
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) if handle.project_name == project_name => {
+                let mut core = handle.core.lock().await;
+                if core.online_optimization_status().is_some_and(|status| {
+                    status.phase == crate::online_optimization::OnlineOptimizationPhase::Finished
+                }) {
+                    core.online_optimization = None;
+                }
+                core.start_online_optimization(config.online_optimization)?;
+                Ok(core
+                    .online_optimization_status()
+                    .expect("session just started"))
+            }
+            Some(ActiveHandle::Simulation(handle)) if handle.project_name == project_name => {
+                let mut core = handle.core.lock().await;
+                if core.online_optimization_status().is_some_and(|status| {
+                    status.phase == crate::online_optimization::OnlineOptimizationPhase::Finished
+                }) {
+                    core.online_optimization = None;
+                }
+                core.start_online_optimization(config.online_optimization)?;
+                Ok(core
+                    .online_optimization_status()
+                    .expect("session just started"))
+            }
+            Some(_) => bail!("online optimization project does not match active execution"),
+            None => bail!("runtime or simulation must be running"),
+        }
+    }
+
+    pub async fn online_optimization_status(&self) -> Result<Option<OnlineOptimizationStatus>> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                Ok(handle.core.lock().await.online_optimization_status())
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                Ok(handle.core.lock().await.online_optimization_status())
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn retry_online_optimization(&self) -> Result<OnlineOptimizationStatus> {
+        self.online_optimization_action("retry").await
+    }
+
+    pub async fn continue_online_optimization_with_penalty(
+        &self,
+    ) -> Result<OnlineOptimizationStatus> {
+        self.online_optimization_action("penalty").await
+    }
+
+    pub async fn stop_online_optimization(&self) -> Result<OnlineOptimizationStatus> {
+        self.online_optimization_action("stop").await
+    }
+
+    async fn online_optimization_action(&self, action: &str) -> Result<OnlineOptimizationStatus> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            Some(ActiveHandle::Runtime(handle)) => {
+                let mut core = handle.core.lock().await;
+                let mut session = core
+                    .online_optimization
+                    .take()
+                    .ok_or_else(|| anyhow!("online optimization is not active"))?;
+                let tick = match action {
+                    "retry" => session.retry()?,
+                    "penalty" => session.continue_with_penalty()?,
+                    "stop" => session.stop("stopped_by_user"),
+                    _ => bail!("unknown online optimization action"),
+                };
+                core.apply_online_optimization_tick(tick)?;
+                let status = session.status();
+                core.online_optimization = Some(session);
+                Ok(status)
+            }
+            Some(ActiveHandle::Simulation(handle)) => {
+                let mut core = handle.core.lock().await;
+                let mut session = core
+                    .online_optimization
+                    .take()
+                    .ok_or_else(|| anyhow!("online optimization is not active"))?;
+                let tick = match action {
+                    "retry" => session.retry()?,
+                    "penalty" => session.continue_with_penalty()?,
+                    "stop" => session.stop("stopped_by_user"),
+                    _ => bail!("unknown online optimization action"),
+                };
+                core.apply_online_optimization_tick(tick)?;
+                let status = session.status();
+                core.online_optimization = Some(session);
+                Ok(status)
+            }
+            None => bail!("runtime or simulation not running"),
+        }
+    }
+
     pub async fn read_plots(&self, limit: usize) -> Result<Vec<SignalSample>> {
         let guard = self.handle.lock().await;
         if let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() {
@@ -823,6 +1000,11 @@ impl RuntimeManager {
             bail!("simulation not running");
         };
         let mut core = handle.core.lock().await;
+        if core.online_optimization_status().is_some_and(|status| {
+            status.phase != crate::online_optimization::OnlineOptimizationPhase::Finished
+        }) {
+            bail!("simulation live configuration is locked during online optimization");
+        }
         core.apply_live_config(&config);
         handle.reconfigure.notify_one();
         Ok(())

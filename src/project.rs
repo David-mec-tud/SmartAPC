@@ -83,6 +83,7 @@ impl ProjectService {
         normalized.normalize_model_config();
         normalized.normalize_simulation_config();
         normalized.normalize_optimization_config();
+        normalized.normalize_online_optimization_config();
         normalized.validate()?;
 
         let dir = self.project_dir(project_name);

@@ -38,6 +38,7 @@ use crate::{
     },
     linear_mpc::linear_mpc_default_params,
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
+    online_optimization::{OnlineOptimizationPhase, OnlineOptimizationStatus},
     parameter_optimization::{
         OptimizationCurveFamily, OptimizationEvent, OptimizationProgress, OptimizationReport,
         apply_optimized_parameters, run_parameter_optimization,
@@ -46,6 +47,7 @@ use crate::{
     project_config::{
         CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
         LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
+        OnlineOptimizationConfig, OnlineOptimizationCvConfig, OnlineOptimizationParamConfig,
         PControllerPairConfig, ParameterOptimizationConfig, ParameterOptimizationMetricWeights,
         ParameterOptimizationParamConfig, ProjectConfig, SidebarTask, SimulationConfig,
         SimulationSpeedMode, VariableCatalogConfig, WatchdogConfig,
@@ -1199,6 +1201,100 @@ struct OptimizationJob {
 }
 
 #[derive(Debug, Clone)]
+struct OnlineOptimizationParamRowState {
+    key: String,
+    min: String,
+    max: String,
+}
+
+#[derive(Debug, Clone)]
+struct OnlineOptimizationCvRowState {
+    name: String,
+    weight: String,
+    low: String,
+    high: String,
+}
+
+#[derive(Debug, Clone)]
+struct OnlineOptimizationEditorState {
+    selected_parameter: Option<String>,
+    available_parameters: Vec<String>,
+    parameters: Vec<OnlineOptimizationParamRowState>,
+    cvs: Vec<OnlineOptimizationCvRowState>,
+    duration: String,
+    max_iterations: String,
+    initial_samples: String,
+    convergence_patience: String,
+    status: Option<OnlineOptimizationStatus>,
+}
+
+impl OnlineOptimizationEditorState {
+    fn from_config(config: &ProjectConfig) -> Self {
+        let selected: HashSet<_> = config
+            .online_optimization
+            .parameters
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect();
+        let mut available_parameters: Vec<_> = config
+            .logic
+            .params
+            .iter()
+            .filter_map(|(key, value)| {
+                matches!(value, LogicParamValue::F64(_))
+                    .then_some(key.clone())
+                    .filter(|key| !selected.contains(key.as_str()))
+            })
+            .collect();
+        available_parameters.sort();
+        Self {
+            selected_parameter: available_parameters.first().cloned(),
+            available_parameters,
+            parameters: config
+                .online_optimization
+                .parameters
+                .iter()
+                .map(|row| OnlineOptimizationParamRowState {
+                    key: row.key.clone(),
+                    min: format_numeric(row.min),
+                    max: format_numeric(row.max),
+                })
+                .collect(),
+            cvs: config
+                .online_optimization
+                .cvs
+                .iter()
+                .map(|row| OnlineOptimizationCvRowState {
+                    name: row.name.clone(),
+                    weight: format_numeric(row.weight),
+                    low: format_numeric(row.low),
+                    high: format_numeric(row.high),
+                })
+                .collect(),
+            duration: format_duration_hms(config.online_optimization.duration_s),
+            max_iterations: config.online_optimization.max_iterations.to_string(),
+            initial_samples: config.online_optimization.initial_samples.to_string(),
+            convergence_patience: config.online_optimization.convergence_patience.to_string(),
+            status: None,
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            selected_parameter: None,
+            available_parameters: Vec::new(),
+            parameters: Vec::new(),
+            cvs: Vec::new(),
+            duration: "00:01:00".to_string(),
+            max_iterations: "30".to_string(),
+            initial_samples: "8".to_string(),
+            convergence_patience: "10".to_string(),
+            status: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum WebStatus {
     Disabled,
     Starting(String),
@@ -1216,6 +1312,7 @@ enum SetupPage {
     Logic,
     KalmanTuning,
     Optimization,
+    OnlineOptimization,
     Timing,
     Simulation,
     Deployment,
@@ -1234,6 +1331,7 @@ impl SetupPage {
             "logic" => Some(Self::Logic),
             "kalman_tuning" => Some(Self::KalmanTuning),
             "optimization" => Some(Self::Optimization),
+            "online_optimization" => Some(Self::OnlineOptimization),
             "timing" => Some(Self::Timing),
             "simulation" => Some(Self::Simulation),
             "deployment" => Some(Self::Deployment),
@@ -1251,6 +1349,7 @@ impl SetupPage {
             Self::Logic => "Control Strategy",
             Self::KalmanTuning => "Kalman Filter Tuning",
             Self::Optimization => "Parameter Optimization",
+            Self::OnlineOptimization => "Online Parameter Optimization",
             Self::Timing => "Control Function Tests",
             Self::Simulation => "Simulate Controller",
             Self::Deployment => "Deployment",
@@ -1269,6 +1368,7 @@ struct ProjectPanelData {
     model_editor: ModelEditorState,
     simulation_editor: SimulationEditorState,
     optimization_editor: ParameterOptimizationState,
+    online_optimization_editor: OnlineOptimizationEditorState,
     control_function_tests: ControlFunctionTestState,
     communication: CommunicationEditorState,
     io_cycle_ms: String,
@@ -1287,6 +1387,7 @@ struct RefreshData {
     snapshot: Option<ExecutionSnapshot>,
     params: Option<HashMap<String, LogicParamValue>>,
     samples: Vec<SignalSample>,
+    online_optimization: Option<OnlineOptimizationStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -1438,6 +1539,26 @@ enum Message {
     CancelOptimizationPressed,
     UseOptimizedParametersPressed,
     OptimizedParametersApplied(Result<String, String>),
+    OnlineOptimizationParameterSelected(String),
+    AddOnlineOptimizationParameter,
+    RemoveOnlineOptimizationParameter(usize),
+    OnlineOptimizationParamMinChanged(usize, String),
+    OnlineOptimizationParamMaxChanged(usize, String),
+    OnlineOptimizationCvWeightChanged(usize, String),
+    OnlineOptimizationCvLowChanged(usize, String),
+    OnlineOptimizationCvHighChanged(usize, String),
+    OnlineOptimizationDurationChanged(String),
+    OnlineOptimizationMaxIterationsChanged(String),
+    OnlineOptimizationInitialSamplesChanged(String),
+    OnlineOptimizationPatienceChanged(String),
+    SaveOnlineOptimizationPressed,
+    OnlineOptimizationSaved(Result<String, String>),
+    StartOnlineOptimizationPressed,
+    RetryOnlineOptimizationPressed,
+    ContinueOnlineOptimizationPressed,
+    StopOnlineOptimizationPressed,
+    SaveOnlineOptimizationBestPressed,
+    OnlineOptimizationActionFinished(Result<String, String>),
     LogicKindChanged(LogicKindChoice),
     LogicCycleChanged(String),
     AddPControllerPair,
@@ -1500,6 +1621,7 @@ struct DesktopApp {
     logic_editor: LogicEditorState,
     kalman_tuning_editor: KalmanTuningEditorState,
     optimization_editor: ParameterOptimizationState,
+    online_optimization_editor: OnlineOptimizationEditorState,
     optimization_job: Option<OptimizationJob>,
     control_function_tests: ControlFunctionTestState,
     variables: VariableCatalogConfig,
@@ -1550,6 +1672,7 @@ impl DesktopApp {
             logic_editor: LogicEditorState::blank(),
             kalman_tuning_editor: KalmanTuningEditorState::blank(),
             optimization_editor: ParameterOptimizationState::blank(),
+            online_optimization_editor: OnlineOptimizationEditorState::blank(),
             optimization_job: None,
             control_function_tests: ControlFunctionTestState::blank(),
             variables: VariableCatalogConfig::default(),
@@ -1590,6 +1713,13 @@ impl DesktopApp {
 
     fn simulation_running(&self) -> bool {
         matches!(self.active_snapshot, Some(ExecutionSnapshot::Simulation(_)))
+    }
+
+    fn online_optimization_active(&self) -> bool {
+        self.online_optimization_editor
+            .status
+            .as_ref()
+            .is_some_and(|status| status.phase != OnlineOptimizationPhase::Finished)
     }
 
     fn sync_stopped_simulation_startup_state(&mut self) {
@@ -1869,6 +1999,28 @@ impl DesktopApp {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        if self.online_optimization_active()
+            && matches!(
+                &message,
+                Message::OnlineOptimizationParameterSelected(_)
+                    | Message::AddOnlineOptimizationParameter
+                    | Message::RemoveOnlineOptimizationParameter(_)
+                    | Message::OnlineOptimizationParamMinChanged(_, _)
+                    | Message::OnlineOptimizationParamMaxChanged(_, _)
+                    | Message::OnlineOptimizationCvWeightChanged(_, _)
+                    | Message::OnlineOptimizationCvLowChanged(_, _)
+                    | Message::OnlineOptimizationCvHighChanged(_, _)
+                    | Message::OnlineOptimizationDurationChanged(_)
+                    | Message::OnlineOptimizationMaxIterationsChanged(_)
+                    | Message::OnlineOptimizationInitialSamplesChanged(_)
+                    | Message::OnlineOptimizationPatienceChanged(_)
+                    | Message::SaveOnlineOptimizationPressed
+            )
+        {
+            self.error_message =
+                Some("Online optimization settings are locked while it is active".to_string());
+            return Task::none();
+        }
         match message {
             Message::ProjectsLoaded(result) => match result {
                 Ok(projects) => {
@@ -1912,6 +2064,7 @@ impl DesktopApp {
                     self.kalman_tuning_editor.help_visible = help_visible;
                     self.kalman_tuning_editor.has_results = has_results;
                     self.optimization_editor = panel.optimization_editor;
+                    self.online_optimization_editor = panel.online_optimization_editor;
                     self.control_function_tests = panel.control_function_tests;
                     self.variables = panel.variables;
                     self.mv_name_rows = panel.mv_names;
@@ -2323,6 +2476,7 @@ impl DesktopApp {
                 Ok(data) => {
                     self.active_snapshot = data.snapshot;
                     self.samples = data.samples;
+                    self.online_optimization_editor.status = data.online_optimization;
                     if let Some(params) = data.params {
                         self.logic_params = params;
                         self.refresh_param_inputs_preserving_dirty();
@@ -2341,6 +2495,12 @@ impl DesktopApp {
                 Task::none()
             }
             Message::ApplyParamPressed(key) => {
+                if self.online_optimization_active() {
+                    self.error_message = Some(
+                        "Manual parameter edits are locked during online optimization".to_string(),
+                    );
+                    return Task::none();
+                }
                 let Some(raw_value) = self.param_inputs.get(&key).cloned() else {
                     self.error_message = Some(format!("No input value for parameter '{}'", key));
                     return Task::none();
@@ -3248,6 +3408,173 @@ impl DesktopApp {
                     Task::none()
                 }
             },
+            Message::OnlineOptimizationParameterSelected(key) => {
+                self.online_optimization_editor.selected_parameter = Some(key);
+                Task::none()
+            }
+            Message::AddOnlineOptimizationParameter => {
+                if let Some(key) = self.online_optimization_editor.selected_parameter.take() {
+                    let current = self
+                        .logic_params
+                        .get(&key)
+                        .and_then(|value| match value {
+                            LogicParamValue::F64(value) => Some(*value),
+                            LogicParamValue::Bool(_) => None,
+                        })
+                        .unwrap_or(0.0);
+                    let width = current.abs().max(1.0);
+                    self.online_optimization_editor.parameters.push(
+                        OnlineOptimizationParamRowState {
+                            key: key.clone(),
+                            min: format_numeric(current - width),
+                            max: format_numeric(current + width),
+                        },
+                    );
+                    self.online_optimization_editor
+                        .available_parameters
+                        .retain(|candidate| candidate != &key);
+                    self.online_optimization_editor.selected_parameter = self
+                        .online_optimization_editor
+                        .available_parameters
+                        .first()
+                        .cloned();
+                }
+                Task::none()
+            }
+            Message::RemoveOnlineOptimizationParameter(index) => {
+                if index < self.online_optimization_editor.parameters.len() {
+                    let row = self.online_optimization_editor.parameters.remove(index);
+                    self.online_optimization_editor
+                        .available_parameters
+                        .push(row.key);
+                    self.online_optimization_editor.available_parameters.sort();
+                    self.online_optimization_editor.selected_parameter = self
+                        .online_optimization_editor
+                        .available_parameters
+                        .first()
+                        .cloned();
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationParamMinChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.parameters.get_mut(index) {
+                    row.min = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationParamMaxChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.parameters.get_mut(index) {
+                    row.max = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationCvWeightChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.cvs.get_mut(index) {
+                    row.weight = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationCvLowChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.cvs.get_mut(index) {
+                    row.low = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationCvHighChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.cvs.get_mut(index) {
+                    row.high = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationDurationChanged(value) => {
+                self.online_optimization_editor.duration = value;
+                Task::none()
+            }
+            Message::OnlineOptimizationMaxIterationsChanged(value) => {
+                self.online_optimization_editor.max_iterations = value;
+                Task::none()
+            }
+            Message::OnlineOptimizationInitialSamplesChanged(value) => {
+                self.online_optimization_editor.initial_samples = value;
+                Task::none()
+            }
+            Message::OnlineOptimizationPatienceChanged(value) => {
+                self.online_optimization_editor.convergence_patience = value;
+                Task::none()
+            }
+            Message::SaveOnlineOptimizationPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Select a project first".to_string());
+                    return Task::none();
+                };
+                save_online_optimization_task(
+                    self.project_service.clone(),
+                    project_name,
+                    self.online_optimization_editor.clone(),
+                )
+            }
+            Message::OnlineOptimizationSaved(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    Task::none()
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
+            Message::StartOnlineOptimizationPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Select a project first".to_string());
+                    return Task::none();
+                };
+                start_online_optimization_task(
+                    Arc::clone(&self.runtime),
+                    self.project_service.clone(),
+                    project_name,
+                    self.online_optimization_editor.clone(),
+                )
+            }
+            Message::RetryOnlineOptimizationPressed => online_optimization_action_task(
+                Arc::clone(&self.runtime),
+                OnlineOptimizationUiAction::Retry,
+            ),
+            Message::ContinueOnlineOptimizationPressed => online_optimization_action_task(
+                Arc::clone(&self.runtime),
+                OnlineOptimizationUiAction::Penalty,
+            ),
+            Message::StopOnlineOptimizationPressed => online_optimization_action_task(
+                Arc::clone(&self.runtime),
+                OnlineOptimizationUiAction::Stop,
+            ),
+            Message::SaveOnlineOptimizationBestPressed => {
+                let Some(project_name) = self.selected_project.clone() else {
+                    self.error_message = Some("Select a project first".to_string());
+                    return Task::none();
+                };
+                let Some(status) = self.online_optimization_editor.status.as_ref() else {
+                    self.error_message =
+                        Some("No online optimization result available".to_string());
+                    return Task::none();
+                };
+                save_online_optimization_best_task(
+                    self.project_service.clone(),
+                    project_name,
+                    status.best_params.clone(),
+                )
+            }
+            Message::OnlineOptimizationActionFinished(result) => match result {
+                Ok(status) => {
+                    self.status_message = status;
+                    self.error_message = None;
+                    refresh_task(Arc::clone(&self.runtime))
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                    Task::none()
+                }
+            },
         }
     }
 
@@ -3431,6 +3758,7 @@ impl DesktopApp {
             SetupPage::Logic => self.logic_editor_view(execution_active),
             SetupPage::KalmanTuning => self.kalman_tuning_view(execution_active),
             SetupPage::Optimization => self.parameter_optimization_view(execution_active),
+            SetupPage::OnlineOptimization => self.online_optimization_view(),
             SetupPage::Timing => self.control_function_tests_view(execution_active),
             SetupPage::Simulation => self.simulation_editor_view(),
             SetupPage::Deployment => self.placeholder_page_view(
@@ -3601,7 +3929,7 @@ impl DesktopApp {
         let simulation_running = self.simulation_running();
         let execution_active = self.execution_active();
         let structural_editable = !execution_active;
-        let live_editable = simulation_running;
+        let live_editable = simulation_running && !self.online_optimization_active();
         let can_start = self.selected_project.is_some() && !execution_active;
         let can_stop = simulation_running;
 
@@ -4287,6 +4615,177 @@ impl DesktopApp {
         .padding(12)
         .height(Length::Fill)
         .into()
+    }
+
+    fn online_optimization_view(&self) -> Element<'_, Message> {
+        let active = self.online_optimization_active();
+        let can_edit = !active;
+        let mut content = column![
+            text("Online Parameter Optimization").size(26),
+            text("Bayesian optimization against the active runtime or simulation. Each candidate is evaluated using weighted CV MSE over the configured timeframe.").size(14),
+        ]
+        .spacing(12);
+
+        let selector = pick_list(
+            self.online_optimization_editor.available_parameters.clone(),
+            self.online_optimization_editor.selected_parameter.clone(),
+            Message::OnlineOptimizationParameterSelected,
+        );
+        let add = if can_edit && self.online_optimization_editor.selected_parameter.is_some() {
+            button("Add to Optimization").on_press(Message::AddOnlineOptimizationParameter)
+        } else {
+            button("Add to Optimization")
+        };
+        content = content.push(row![selector, add].spacing(10));
+
+        let mut params = column![text("Parameters").size(18)].spacing(8);
+        for (index, row_data) in self
+            .online_optimization_editor
+            .parameters
+            .iter()
+            .enumerate()
+        {
+            let current = self
+                .logic_params
+                .get(&row_data.key)
+                .map(format_logic_param_value)
+                .unwrap_or_else(|| "-".to_string());
+            let min = if can_edit {
+                text_input("low", &row_data.min)
+                    .on_input(move |value| Message::OnlineOptimizationParamMinChanged(index, value))
+            } else {
+                text_input("low", &row_data.min)
+            };
+            let max = if can_edit {
+                text_input("high", &row_data.max)
+                    .on_input(move |value| Message::OnlineOptimizationParamMaxChanged(index, value))
+            } else {
+                text_input("high", &row_data.max)
+            };
+            let remove = if can_edit {
+                button("Remove").on_press(Message::RemoveOnlineOptimizationParameter(index))
+            } else {
+                button("Remove")
+            };
+            params = params.push(
+                row![
+                    text(row_data.key.clone()).width(Length::FillPortion(4)),
+                    text(format!("Current: {current}")).width(Length::FillPortion(2)),
+                    min.width(Length::FillPortion(2)),
+                    max.width(Length::FillPortion(2)),
+                    remove
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        content = content.push(container(params).padding(10));
+
+        let mut cvs = column![text("CV Objective and Safety Limits").size(18)].spacing(8);
+        for (index, row_data) in self.online_optimization_editor.cvs.iter().enumerate() {
+            let weight = text_input("weight", &row_data.weight)
+                .on_input(move |value| Message::OnlineOptimizationCvWeightChanged(index, value));
+            let low = text_input("low", &row_data.low)
+                .on_input(move |value| Message::OnlineOptimizationCvLowChanged(index, value));
+            let high = text_input("high", &row_data.high)
+                .on_input(move |value| Message::OnlineOptimizationCvHighChanged(index, value));
+            cvs = cvs.push(
+                row![
+                    text(row_data.name.clone()).width(Length::FillPortion(3)),
+                    text("Weight"),
+                    weight.width(Length::FillPortion(2)),
+                    text("Low"),
+                    low.width(Length::FillPortion(2)),
+                    text("High"),
+                    high.width(Length::FillPortion(2)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        content = content.push(container(cvs).padding(10));
+
+        let settings = row![
+            text("Timeframe HH:MM:SS"),
+            text_input("00:01:00", &self.online_optimization_editor.duration)
+                .on_input(Message::OnlineOptimizationDurationChanged),
+            text("Iterations"),
+            text_input("30", &self.online_optimization_editor.max_iterations)
+                .on_input(Message::OnlineOptimizationMaxIterationsChanged),
+            text("Initial"),
+            text_input("8", &self.online_optimization_editor.initial_samples)
+                .on_input(Message::OnlineOptimizationInitialSamplesChanged),
+            text("Patience"),
+            text_input("10", &self.online_optimization_editor.convergence_patience)
+                .on_input(Message::OnlineOptimizationPatienceChanged),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        content = content.push(settings);
+
+        let save = if can_edit {
+            button("Save Settings").on_press(Message::SaveOnlineOptimizationPressed)
+        } else {
+            button("Save Settings")
+        };
+        let start = if !active && self.execution_active() {
+            button("Start Optimization Mode").on_press(Message::StartOnlineOptimizationPressed)
+        } else {
+            button("Start Optimization Mode")
+        };
+        let stop = if active {
+            button("Stop Optimization").on_press(Message::StopOnlineOptimizationPressed)
+        } else {
+            button("Stop Optimization")
+        };
+        let save_best = if self
+            .online_optimization_editor
+            .status
+            .as_ref()
+            .is_some_and(|status| {
+                status.phase == OnlineOptimizationPhase::Finished
+                    && status.best_score.is_some()
+                    && !status.best_params.is_empty()
+            }) {
+            button("Save Best Parameters").on_press(Message::SaveOnlineOptimizationBestPressed)
+        } else {
+            button("Save Best Parameters")
+        };
+        content = content.push(row![save, start, stop, save_best].spacing(10));
+
+        if let Some(status) = &self.online_optimization_editor.status {
+            content = content.push(text(format!(
+                "State: {:?} | Candidate {} / {} | Samples {} / {} | Best MSE: {}",
+                status.phase,
+                status
+                    .iteration
+                    .saturating_add(1)
+                    .min(status.max_iterations),
+                status.max_iterations,
+                status.samples_in_window,
+                status.samples_per_window,
+                status
+                    .best_score
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "-".to_string())
+            )));
+            if status.phase == OnlineOptimizationPhase::SafetyPaused {
+                content = content
+                    .push(text(status.safety_reason.clone().unwrap_or_default()))
+                    .push(
+                        row![
+                            button("Retry Candidate")
+                                .on_press(Message::RetryOnlineOptimizationPressed),
+                            button("Continue with Penalty")
+                                .on_press(Message::ContinueOnlineOptimizationPressed),
+                            button("Stop Completely")
+                                .on_press(Message::StopOnlineOptimizationPressed),
+                        ]
+                        .spacing(10),
+                    );
+            }
+        }
+        container(scrollable(content)).padding(16).into()
     }
 
     fn optimization_parameter_display_value(&self, key: &str, fallback: &str) -> String {
@@ -5992,6 +6491,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             cfg.sync_active_online_params();
             cfg.normalize_simulation_config();
             cfg.normalize_optimization_config();
+            cfg.normalize_online_optimization_config();
             let communication = CommunicationEditorState::from_config(&cfg.communication);
             let model_editor = ModelEditorState::from_config(cfg.model.as_ref(), &cfg.variables);
             let simulation_editor = SimulationEditorState::from_config(
@@ -6002,6 +6502,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
             let logic_editor = LogicEditorState::from_config(&cfg);
             let kalman_tuning_editor = KalmanTuningEditorState::from_config(&cfg);
             let optimization_editor = ParameterOptimizationState::from_config(&cfg);
+            let online_optimization_editor = OnlineOptimizationEditorState::from_config(&cfg);
             let control_function_tests =
                 ControlFunctionTestState::from_dimensions(&default_sweep_dimensions(&cfg));
 
@@ -6062,6 +6563,7 @@ fn load_project_panel_task(project_service: ProjectService, project_name: String
                 logic_editor,
                 kalman_tuning_editor,
                 optimization_editor,
+                online_optimization_editor,
                 model_editor,
                 simulation_editor,
                 control_function_tests,
@@ -6216,6 +6718,7 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
                     snapshot: None,
                     params: None,
                     samples: Vec::new(),
+                    online_optimization: None,
                 });
             }
 
@@ -6227,11 +6730,16 @@ fn refresh_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
                 .active_read_plots(400)
                 .await
                 .map_err(|err| format!("Plot data could not be read: {err}"))?;
+            let online_optimization = runtime
+                .online_optimization_status()
+                .await
+                .map_err(|err| format!("Online optimization status could not be read: {err}"))?;
 
             Ok(RefreshData {
                 snapshot,
                 params: Some(params),
                 samples,
+                online_optimization,
             })
         },
         Message::Refreshed,
@@ -6693,6 +7201,176 @@ fn save_optimization_config_now(
     project_service
         .save_config(project_name, &cfg)
         .map_err(|err| format!("Optimization settings could not be saved: {err}"))
+}
+
+fn build_online_optimization_config_from_editor(
+    editor: &OnlineOptimizationEditorState,
+) -> Result<OnlineOptimizationConfig, String> {
+    let parameters = editor
+        .parameters
+        .iter()
+        .map(|row| {
+            Ok(OnlineOptimizationParamConfig {
+                key: row.key.clone(),
+                min: parse_finite_f64("online optimization parameter low", &row.min)?,
+                max: parse_finite_f64("online optimization parameter high", &row.max)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let cvs = editor
+        .cvs
+        .iter()
+        .map(|row| {
+            Ok(OnlineOptimizationCvConfig {
+                name: row.name.clone(),
+                weight: parse_finite_f64("online optimization CV weight", &row.weight)?,
+                low: parse_finite_f64("online optimization CV low", &row.low)?,
+                high: parse_finite_f64("online optimization CV high", &row.high)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(OnlineOptimizationConfig {
+        parameters,
+        cvs,
+        duration_s: parse_duration_hms(&editor.duration)?,
+        max_iterations: parse_positive_usize(
+            "online optimization iterations",
+            &editor.max_iterations,
+        )?,
+        initial_samples: parse_positive_usize(
+            "online optimization initial samples",
+            &editor.initial_samples,
+        )?,
+        convergence_patience: parse_positive_usize(
+            "online optimization convergence patience",
+            &editor.convergence_patience,
+        )?,
+    })
+}
+
+fn save_online_optimization_task(
+    project_service: ProjectService,
+    project_name: String,
+    editor: OnlineOptimizationEditorState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut config = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
+            config.online_optimization = build_online_optimization_config_from_editor(&editor)?;
+            config.normalize_online_optimization_config();
+            project_service
+                .save_config(&project_name, &config)
+                .map_err(|err| format!("Online optimization settings could not be saved: {err}"))?;
+            Ok("Saved online optimization settings".to_string())
+        },
+        Message::OnlineOptimizationSaved,
+    )
+}
+
+fn start_online_optimization_task(
+    runtime: Arc<RuntimeManager>,
+    project_service: ProjectService,
+    project_name: String,
+    editor: OnlineOptimizationEditorState,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let mut config = project_service
+                .load_config(&project_name)
+                .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
+            config.online_optimization = build_online_optimization_config_from_editor(&editor)?;
+            config.normalize_online_optimization_config();
+            project_service
+                .save_config(&project_name, &config)
+                .map_err(|err| format!("Online optimization settings could not be saved: {err}"))?;
+            runtime
+                .start_online_optimization(&project_service, &project_name)
+                .await
+                .map_err(|err| format!("Online optimization could not start: {err}"))?;
+            Ok("Started online optimization mode".to_string())
+        },
+        Message::OnlineOptimizationActionFinished,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OnlineOptimizationUiAction {
+    Retry,
+    Penalty,
+    Stop,
+}
+
+fn online_optimization_action_task(
+    runtime: Arc<RuntimeManager>,
+    action: OnlineOptimizationUiAction,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            match action {
+                OnlineOptimizationUiAction::Retry => runtime.retry_online_optimization().await,
+                OnlineOptimizationUiAction::Penalty => {
+                    runtime.continue_online_optimization_with_penalty().await
+                }
+                OnlineOptimizationUiAction::Stop => runtime.stop_online_optimization().await,
+            }
+            .map_err(|err| format!("Online optimization action failed: {err}"))?;
+            Ok(format!("Online optimization action: {action:?}"))
+        },
+        Message::OnlineOptimizationActionFinished,
+    )
+}
+
+fn save_online_optimization_best_task(
+    project_service: ProjectService,
+    project_name: String,
+    best_params: HashMap<String, f64>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            apply_optimized_parameters(&project_service, &project_name, &best_params)
+                .map_err(|err| format!("Best parameters could not be saved: {err}"))?;
+            Ok("Saved best online optimization parameters".to_string())
+        },
+        Message::OnlineOptimizationActionFinished,
+    )
+}
+
+fn parse_duration_hms(raw: &str) -> Result<u64, String> {
+    let parts: Vec<_> = raw.trim().split(':').collect();
+    if parts.len() != 3 {
+        return Err("timeframe must use HH:MM:SS".to_string());
+    }
+    let hours = parts[0]
+        .parse::<u64>()
+        .map_err(|_| "timeframe hours must be an integer".to_string())?;
+    let minutes = parts[1]
+        .parse::<u64>()
+        .map_err(|_| "timeframe minutes must be an integer".to_string())?;
+    let seconds = parts[2]
+        .parse::<u64>()
+        .map_err(|_| "timeframe seconds must be an integer".to_string())?;
+    if minutes >= 60 || seconds >= 60 {
+        return Err("timeframe minutes and seconds must be below 60".to_string());
+    }
+    let total = hours
+        .saturating_mul(3_600)
+        .saturating_add(minutes * 60)
+        .saturating_add(seconds);
+    if total == 0 {
+        return Err("timeframe must be greater than zero".to_string());
+    }
+    Ok(total)
+}
+
+fn format_duration_hms(seconds: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60
+    )
 }
 
 fn autosave_optimization_task(
@@ -8939,10 +9617,10 @@ mod tests {
     use super::{
         LogicEditorState, ModelEditorState, ModelKindChoice, ParameterHierarchyItem,
         ParameterHierarchyScope, SimulationEditorState, build_model_config_from_editor,
-        build_simulation_config_from_editor, parameter_heading_label, parameter_heading_size,
-        parameter_hierarchy, parameter_hierarchy_indent_px, parameter_leaf_label,
-        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
-        visible_parameter_hierarchy,
+        build_simulation_config_from_editor, format_duration_hms, parameter_heading_label,
+        parameter_heading_size, parameter_hierarchy, parameter_hierarchy_indent_px,
+        parameter_leaf_label, parse_duration_hms, parse_matrix_import_text, resize_string_matrix,
+        sync_io_initial_value_online_params, visible_parameter_hierarchy,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -9367,5 +10045,13 @@ mod tests {
         assert_eq!(config.a_scale_pct, vec![vec![100.0]]);
         assert_eq!(config.b_scale_pct, vec![vec![100.0]]);
         assert!((config.cv_offsets.get("y1").copied().unwrap_or_default() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn online_optimization_duration_parses_hms() {
+        assert_eq!(parse_duration_hms("01:02:03").unwrap(), 3_723);
+        assert_eq!(format_duration_hms(3_723), "01:02:03");
+        assert!(parse_duration_hms("00:60:00").is_err());
+        assert!(parse_duration_hms("00:00:00").is_err());
     }
 }

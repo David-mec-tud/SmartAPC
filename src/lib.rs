@@ -6,6 +6,7 @@ pub mod kalman_tuning;
 pub mod linear_mpc;
 pub mod logic;
 pub mod model;
+pub mod online_optimization;
 pub mod parameter_optimization;
 pub mod project;
 pub mod project_config;
