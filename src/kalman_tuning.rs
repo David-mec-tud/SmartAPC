@@ -12,9 +12,14 @@ use serde::Serialize;
 use crate::{
     linear_mpc::LinearMpcLogic,
     project_config::{
-        LinearStateSpaceModelConfig, LogicParamValue, ProjectConfig, VariableCatalogConfig,
+        LinearStateSpaceModelConfig, LogicKind, LogicParamValue, ProjectConfig,
+        VariableCatalogConfig,
     },
 };
+
+const INTERNAL_KALMAN_PREFIX: &str = "mpc.kalman";
+const SHORT_KALMAN_PREFIX: &str = "kalman";
+const OBSERVER_PREFIX: &str = "observer";
 
 #[derive(Debug, Clone)]
 pub struct KalmanDataset {
@@ -81,33 +86,30 @@ pub fn tuning_store() -> &'static KalmanTuningStore {
 
 pub fn kalman_parameter_values(cfg: &ProjectConfig) -> Result<HashMap<String, f64>> {
     if !cfg.kalman_tuning_available() {
-        bail!("Kalman tuning requires configured linear MPC and a valid linear state-space model");
+        bail!(
+            "Kalman tuning requires configured linear MPC or custom Rust observer parameters and a valid linear state-space model"
+        );
     }
-    let mut values = HashMap::new();
-    for (key, value) in &cfg.logic.params {
-        if is_kalman_parameter(key) {
-            let LogicParamValue::F64(value) = value else {
-                bail!("Kalman parameter '{key}' must be numeric");
-            };
-            values.insert(key.clone(), *value);
-        }
-    }
-    validate_kalman_parameters(&values)?;
-    Ok(values)
+    let rows = config_kalman_parameter_rows(cfg).ok_or_else(|| {
+        anyhow::anyhow!("project does not expose a complete Kalman observer parameter set")
+    })?;
+    rows.into_iter()
+        .map(|row| Ok((row.key, row.value)))
+        .collect()
 }
 
 pub fn is_kalman_parameter(key: &str) -> bool {
-    key == "mpc.kalman.initial_p"
-        || key.starts_with("mpc.kalman.state.")
-        || key.starts_with("mpc.kalman.cv.")
+    canonical_kalman_key(key).is_some()
 }
 
 pub fn validate_kalman_parameters(values: &HashMap<String, f64>) -> Result<()> {
     for (key, value) in values {
+        let canonical = canonical_kalman_key(key)
+            .ok_or_else(|| anyhow::anyhow!("unknown Kalman observer parameter '{key}'"))?;
         if !value.is_finite() {
             bail!("Kalman parameter '{key}' must be finite");
         }
-        if key == "mpc.kalman.initial_p" || key.ends_with(".r") {
+        if canonical == "mpc.kalman.initial_p" || canonical.ends_with(".r") {
             if *value <= 0.0 {
                 bail!("Kalman parameter '{key}' must be > 0");
             }
@@ -116,6 +118,104 @@ pub fn validate_kalman_parameters(values: &HashMap<String, f64>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct KalmanParameterRow {
+    pub key: String,
+    pub value: f64,
+}
+
+pub fn config_kalman_parameter_rows(cfg: &ProjectConfig) -> Option<Vec<KalmanParameterRow>> {
+    let model = cfg
+        .model
+        .as_ref()
+        .and_then(|model| model.linear_state_space())?;
+    let prefixes = match cfg.logic.kind {
+        LogicKind::LinearMpc => {
+            if !cfg.linear_mpc_is_configured_for(&cfg.io) {
+                return None;
+            }
+            [INTERNAL_KALMAN_PREFIX, SHORT_KALMAN_PREFIX, OBSERVER_PREFIX]
+        }
+        LogicKind::CustomRust => {
+            if !cfg.logic.custom_rust.is_compatible_with(&cfg.io) {
+                return None;
+            }
+            [SHORT_KALMAN_PREFIX, OBSERVER_PREFIX, INTERNAL_KALMAN_PREFIX]
+        }
+        LogicKind::PController => return None,
+    };
+
+    let mut rows = Vec::new();
+    for canonical in expected_internal_kalman_keys(model, &cfg.variables) {
+        let (_, key, value) = prefixes
+            .iter()
+            .filter_map(|prefix| {
+                let candidate = external_key_for_prefix(&canonical, prefix)?;
+                let value = match cfg.logic.params.get(&candidate)? {
+                    LogicParamValue::F64(value) => *value,
+                    LogicParamValue::Bool(_) => return None,
+                };
+                Some((*prefix, candidate, value))
+            })
+            .next()?;
+        rows.push(KalmanParameterRow { key, value });
+    }
+    Some(rows)
+}
+
+pub fn normalize_kalman_parameters(values: &HashMap<String, f64>) -> Result<HashMap<String, f64>> {
+    let mut normalized = HashMap::new();
+    for (key, value) in values {
+        let canonical = canonical_kalman_key(key)
+            .ok_or_else(|| anyhow::anyhow!("unknown Kalman observer parameter '{key}'"))?;
+        if let Some(existing) = normalized.insert(canonical.clone(), *value) {
+            if (existing - *value).abs() > f64::EPSILON {
+                bail!("duplicate aliases for Kalman parameter '{canonical}' disagree");
+            }
+        }
+    }
+    validate_kalman_parameters(&normalized)?;
+    Ok(normalized)
+}
+
+fn expected_internal_kalman_keys(
+    model: &LinearStateSpaceModelConfig,
+    vars: &VariableCatalogConfig,
+) -> Vec<String> {
+    let mut keys = vec![format!("{INTERNAL_KALMAN_PREFIX}.initial_p")];
+    for index in 0..model.state_count {
+        keys.push(format!("{INTERNAL_KALMAN_PREFIX}.state.{}.q", index + 1));
+    }
+    for cv in &vars.cvs {
+        keys.push(format!("{INTERNAL_KALMAN_PREFIX}.cv.{cv}.r"));
+        keys.push(format!("{INTERNAL_KALMAN_PREFIX}.cv.{cv}.bias_q"));
+    }
+    keys
+}
+
+fn canonical_kalman_key(key: &str) -> Option<String> {
+    if key == format!("{INTERNAL_KALMAN_PREFIX}.initial_p") {
+        return Some(key.to_string());
+    }
+    for prefix in [INTERNAL_KALMAN_PREFIX, SHORT_KALMAN_PREFIX, OBSERVER_PREFIX] {
+        if key == format!("{prefix}.initial_p") {
+            return Some(format!("{INTERNAL_KALMAN_PREFIX}.initial_p"));
+        }
+        if let Some(rest) = key.strip_prefix(&format!("{prefix}.")) {
+            if rest.starts_with("state.") || rest.starts_with("cv.") {
+                return Some(format!("{INTERNAL_KALMAN_PREFIX}.{rest}"));
+            }
+        }
+    }
+    None
+}
+
+fn external_key_for_prefix(canonical: &str, prefix: &str) -> Option<String> {
+    canonical
+        .strip_prefix(INTERNAL_KALMAN_PREFIX)
+        .map(|suffix| format!("{prefix}{suffix}"))
 }
 
 pub fn import_csv(path: &Path, vars: &VariableCatalogConfig) -> Result<KalmanDataset> {
@@ -213,8 +313,9 @@ pub fn run_observer(
     cycle_ms: u64,
     parameters: &HashMap<String, f64>,
 ) -> Result<KalmanTuningResult> {
-    validate_kalman_parameters(parameters)?;
-    let logic_params = parameters
+    let display_parameters = parameters.clone();
+    let normalized_parameters = normalize_kalman_parameters(parameters)?;
+    let logic_params = normalized_parameters
         .iter()
         .map(|(key, value)| (key.clone(), LogicParamValue::F64(*value)))
         .collect();
@@ -277,7 +378,7 @@ pub fn run_observer(
             .iter()
             .map(DateTime::to_rfc3339)
             .collect(),
-        parameters: parameters.clone(),
+        parameters: display_parameters,
         cvs: vars
             .cvs
             .iter()
@@ -441,5 +542,18 @@ mod tests {
         assert_eq!(result.mvs[0].values.len(), 3);
         assert_eq!(result.states[0].values.len(), 3);
         assert_eq!(result.biases[0].values.len(), 3);
+    }
+
+    #[test]
+    fn observer_aliases_normalize_to_internal_kalman_keys() {
+        let values = HashMap::from([
+            ("observer.initial_p".to_string(), 1.0),
+            ("observer.state.1.q".to_string(), 1.0e-4),
+            ("observer.cv.y1.r".to_string(), 1.0e-2),
+            ("observer.cv.y1.bias_q".to_string(), 1.0e-3),
+        ]);
+        let normalized = normalize_kalman_parameters(&values).expect("normalized aliases");
+        assert_eq!(normalized.get("mpc.kalman.initial_p"), Some(&1.0));
+        assert_eq!(normalized.get("mpc.kalman.cv.y1.bias_q"), Some(&1.0e-3));
     }
 }

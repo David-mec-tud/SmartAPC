@@ -33,7 +33,7 @@ use crate::{
         SweepSelection, SweepValueKind, default_sweep_dimensions, run_control_function_tests,
     },
     kalman_tuning::{
-        KalmanDataset, import_csv, is_kalman_parameter, run_observer, tuning_store,
+        KalmanDataset, config_kalman_parameter_rows, import_csv, run_observer, tuning_store,
         validate_kalman_parameters,
     },
     linear_mpc::linear_mpc_default_params,
@@ -722,17 +722,12 @@ struct KalmanTuningEditorState {
 
 impl KalmanTuningEditorState {
     fn from_config(cfg: &ProjectConfig) -> Self {
-        let mut params = cfg
-            .logic
-            .params
-            .iter()
-            .filter(|(key, _)| is_kalman_parameter(key))
-            .filter_map(|(key, value)| match value {
-                LogicParamValue::F64(value) => Some(MpcParamEditorRow {
-                    key: key.clone(),
-                    value: value.to_string(),
-                }),
-                LogicParamValue::Bool(_) => None,
+        let mut params = config_kalman_parameter_rows(cfg)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| MpcParamEditorRow {
+                key: row.key,
+                value: row.value.to_string(),
             })
             .collect::<Vec<_>>();
         params.sort_by(|left, right| left.key.cmp(&right.key));
@@ -5938,6 +5933,7 @@ impl DesktopApp {
                         text("The 'time' column must contain RFC 3339 or ISO 8601 timestamps with a time zone, for example 2026-06-13T14:30:00.123+02:00."),
                         text(format!("Required columns: {}", required.join(", "))),
                         text("CV, MV, and DV columns must use the exact configured variable names. Additional columns are ignored."),
+                        text("Custom Rust observer parameters can use kalman.* or observer.* names. Required keys are initial_p, state.<idx>.q, cv.<cv>.r, and cv.<cv>.bias_q."),
                     ]
                     .spacing(5),
                 )
@@ -5947,7 +5943,7 @@ impl DesktopApp {
 
         if !available {
             content = content.push(text(
-                "This feature is available after you save a compatible Linear MPC control strategy with a linear state-space model.",
+                "This feature is available after you save a compatible Linear MPC strategy or custom Rust strategy with a complete kalman./observer. parameter set and a linear state-space model.",
             ));
         }
         if let Some(dataset) = &self.kalman_tuning_editor.dataset {
@@ -7835,7 +7831,7 @@ fn run_observer_task(
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             if !cfg.kalman_tuning_available() {
                 return Err(
-                    "Kalman tuning requires a saved, compatible Linear MPC control strategy"
+                    "Kalman tuning requires saved Linear MPC parameters or compatible custom Rust kalman./observer. parameters"
                         .to_string(),
                 );
             }

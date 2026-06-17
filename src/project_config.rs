@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    kalman_tuning::config_kalman_parameter_rows,
     linear_mpc::linear_mpc_default_params,
     types::{SignalType, SignalValue},
 };
@@ -648,13 +649,7 @@ impl ProjectConfig {
     }
 
     pub fn kalman_tuning_available(&self) -> bool {
-        self.logic.kind == LogicKind::LinearMpc
-            && self.linear_mpc_is_configured_for(&self.io)
-            && self
-                .model
-                .as_ref()
-                .and_then(ModelConfig::linear_state_space)
-                .is_some()
+        config_kalman_parameter_rows(self).is_some()
     }
 }
 
@@ -3320,6 +3315,90 @@ description = "SmartAPC controller runtime"
         assert_eq!(tuning, logic + 1);
         assert_eq!(optimization, tuning + 1);
         assert!(!tasks[tuning].configured);
+    }
+
+    #[test]
+    fn kalman_tuning_available_for_custom_rust_observer_aliases() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition.mvs.push(MvIoDefinition {
+            name: "u1".to_string(),
+            mv_write: "ns=2;s=U1_WRITE".to_string(),
+            mv_read: "ns=2;s=U1_READ".to_string(),
+            hl_opc: None,
+            ll_opc: None,
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            enable: None,
+        });
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            setpoint: "ns=2;s=Y1_SP".to_string(),
+            process_value: "ns=2;s=Y1_PV".to_string(),
+            deadband_opc: None,
+            deadband_value: Some(0.0),
+            enable: None,
+        });
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("runtime io");
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.logic.kind = LogicKind::CustomRust;
+        cfg.logic.custom_rust.compatible = true;
+        cfg.logic.custom_rust.source_path = "logic/custom_strategy/src/lib.rs".to_string();
+        cfg.logic.custom_rust.artifact_path =
+            "logic/custom_strategy/target/release/demo.dll".to_string();
+        cfg.logic.custom_rust.required_inputs = cfg
+            .io
+            .inputs
+            .iter()
+            .map(|signal| signal.name.clone())
+            .collect();
+        cfg.logic.custom_rust.required_outputs = cfg
+            .io
+            .outputs
+            .iter()
+            .map(|signal| signal.name.clone())
+            .collect();
+        cfg.logic.custom_rust.parameter_schema = vec![
+            CustomParameterSchemaEntry {
+                name: "observer.initial_p".to_string(),
+                param_type: LogicParamType::F64,
+                default: Some(LogicParamValue::F64(1.0)),
+                description: String::new(),
+            },
+            CustomParameterSchemaEntry {
+                name: "observer.state.1.q".to_string(),
+                param_type: LogicParamType::F64,
+                default: Some(LogicParamValue::F64(1.0e-4)),
+                description: String::new(),
+            },
+            CustomParameterSchemaEntry {
+                name: "observer.cv.y1.r".to_string(),
+                param_type: LogicParamType::F64,
+                default: Some(LogicParamValue::F64(1.0e-2)),
+                description: String::new(),
+            },
+            CustomParameterSchemaEntry {
+                name: "observer.cv.y1.bias_q".to_string(),
+                param_type: LogicParamType::F64,
+                default: Some(LogicParamValue::F64(1.0e-3)),
+                description: String::new(),
+            },
+        ];
+        cfg.sync_active_online_params();
+
+        assert!(cfg.kalman_tuning_available());
     }
 
     #[test]

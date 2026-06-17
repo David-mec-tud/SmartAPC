@@ -149,7 +149,8 @@ MPC diagnostics such as `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*
 
 ### Kalman Filter Tuning
 
-After saving a compatible Linear MPC strategy:
+After saving either a compatible Linear MPC strategy or a compatible Custom Rust strategy with a
+complete observer parameter set:
 
 1. Import historical measurements from a UTF-8, comma-separated CSV file.
 2. Adjust Kalman parameters and optionally persist them to `project.toml`.
@@ -167,6 +168,17 @@ time,y1,u1,d1
 
 Additional columns are ignored. Imported data and observer results remain in the current desktop
 session. Interactive plots require the local web API.
+
+Linear MPC uses the saved `mpc.kalman.*` parameters. Custom Rust strategies can enable the same
+tuning task by exposing numeric online parameters with either `kalman.*` or `observer.*` names:
+
+- `kalman.initial_p` or `observer.initial_p`
+- `kalman.state.<idx>.q` or `observer.state.<idx>.q`
+- `kalman.cv.<cv>.r` or `observer.cv.<cv>.r`
+- `kalman.cv.<cv>.bias_q` or `observer.cv.<cv>.bias_q`
+
+All configured states and CVs must be covered. The replay maps these aliases to the internal
+Kalman observer while saving edits back to the original exposed custom parameter names.
 
 ## Custom Rust Control Strategy
 
