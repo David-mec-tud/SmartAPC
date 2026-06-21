@@ -1993,6 +1993,8 @@ mod tests {
         let projects = ProjectService::new(dir.path());
         projects.create_project("demo").expect("create");
         configure_simulation_project(&projects, "demo");
+        std::fs::remove_dir(projects.project_dir("demo").join("data"))
+            .expect("remove project data directory");
 
         let app = build_router(AppState {
             project_service: projects.clone(),

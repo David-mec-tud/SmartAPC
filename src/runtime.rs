@@ -518,9 +518,10 @@ impl RuntimeManager {
         let logic = build_logic(&config, &config.io, &project_dir)?;
         let model = build_model(config.model.as_ref());
 
-        let db_path = project_dir.join("data").join("runtime.sqlite");
+        let data_dir = ensure_project_data_dir(&project_dir)?;
+        let db_path = data_dir.join("runtime.sqlite");
         let storage = SqliteStorage::new(db_path)?;
-        let log_path = project_dir.join("data").join("runtime.log");
+        let log_path = data_dir.join("runtime.log");
         let log_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -590,10 +591,11 @@ impl RuntimeManager {
         let project_dir = service.project_dir(project_name);
         let logic = build_logic(&config, &sim_io, &project_dir)?;
 
-        let db_path = project_dir.join("data").join("simulation.sqlite");
+        let data_dir = ensure_project_data_dir(&project_dir)?;
+        let db_path = data_dir.join("simulation.sqlite");
         reset_simulation_artifacts(&db_path)?;
         let storage = SqliteStorage::new(db_path)?;
-        let log_path = project_dir.join("data").join("simulation.log");
+        let log_path = data_dir.join("simulation.log");
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -1146,6 +1148,17 @@ fn seed_protocol_nodes(adapter: &OpcUaClientAdapter, config: &ProjectConfig) -> 
     }
 
     Ok(())
+}
+
+fn ensure_project_data_dir(project_dir: &Path) -> Result<PathBuf> {
+    let data_dir = project_dir.join("data");
+    fs::create_dir_all(&data_dir).with_context(|| {
+        format!(
+            "failed to create project data directory '{}'",
+            data_dir.display()
+        )
+    })?;
+    Ok(data_dir)
 }
 
 fn reset_simulation_artifacts(db_path: &Path) -> Result<()> {
