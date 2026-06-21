@@ -47,10 +47,10 @@ use crate::{
     project_config::{
         CommunicationConfig, CvIoDefinition, DvIoDefinition, LinearStateSpaceModelConfig,
         LogicKind, LogicParamType, LogicParamValue, ModelConfig, MvIoDefinition,
-        OnlineOptimizationConfig, OnlineOptimizationCvConfig, OnlineOptimizationParamConfig,
-        PControllerPairConfig, ParameterOptimizationConfig, ParameterOptimizationMetricWeights,
-        ParameterOptimizationParamConfig, ProjectConfig, SidebarTask, SimulationConfig,
-        SimulationSpeedMode, VariableCatalogConfig, WatchdogConfig,
+        OnlineOptimizationConfig, OnlineOptimizationCvConfig, OnlineOptimizationDeltaMvConfig,
+        OnlineOptimizationParamConfig, PControllerPairConfig, ParameterOptimizationConfig,
+        ParameterOptimizationMetricWeights, ParameterOptimizationParamConfig, ProjectConfig,
+        SidebarTask, SimulationConfig, SimulationSpeedMode, VariableCatalogConfig, WatchdogConfig,
     },
     runtime::{ExecutionSnapshot, RuntimeManager},
     simulation::derive_initial_cv_offsets,
@@ -188,6 +188,8 @@ struct CvIoEditorRow {
     name: String,
     setpoint: String,
     process_value: String,
+    hl: String,
+    ll: String,
     deadband_value: String,
     deadband_opc: String,
     enable: String,
@@ -204,6 +206,8 @@ impl CvIoEditorRow {
             name: String::new(),
             setpoint: String::new(),
             process_value: String::new(),
+            hl: String::new(),
+            ll: String::new(),
             deadband_value: String::new(),
             deadband_opc: String::new(),
             enable: String::new(),
@@ -220,6 +224,8 @@ impl CvIoEditorRow {
             name: def.name.clone(),
             setpoint: def.setpoint.clone(),
             process_value: def.process_value.clone(),
+            hl: def.hl.map(format_numeric).unwrap_or_default(),
+            ll: def.ll.map(format_numeric).unwrap_or_default(),
             deadband_value: def
                 .deadband_value
                 .map(|v| format!("{v}"))
@@ -1208,6 +1214,14 @@ struct OnlineOptimizationCvRowState {
     weight: String,
     low: String,
     high: String,
+    predefined_low: String,
+    predefined_high: String,
+}
+
+#[derive(Debug, Clone)]
+struct OnlineOptimizationDeltaMvRowState {
+    name: String,
+    weight: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1215,7 +1229,10 @@ struct OnlineOptimizationEditorState {
     selected_parameter: Option<String>,
     available_parameters: Vec<String>,
     parameters: Vec<OnlineOptimizationParamRowState>,
+    selected_objective: Option<String>,
+    available_objectives: Vec<String>,
     cvs: Vec<OnlineOptimizationCvRowState>,
+    delta_mvs: Vec<OnlineOptimizationDeltaMvRowState>,
     duration: String,
     max_iterations: String,
     initial_samples: String,
@@ -1236,12 +1253,43 @@ impl OnlineOptimizationEditorState {
             .params
             .iter()
             .filter_map(|(key, value)| {
-                matches!(value, LogicParamValue::F64(_))
-                    .then_some(key.clone())
-                    .filter(|key| !selected.contains(key.as_str()))
+                (matches!(value, LogicParamValue::F64(_))
+                    && !(key.starts_with("io.cv.")
+                        && (key.ends_with(".ll") || key.ends_with(".hl"))))
+                .then_some(key.clone())
+                .filter(|key| !selected.contains(key.as_str()))
             })
             .collect();
         available_parameters.sort();
+        let selected_cvs: HashSet<_> = config
+            .online_optimization
+            .cvs
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect();
+        let selected_mvs: HashSet<_> = config
+            .online_optimization
+            .delta_mvs
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect();
+        let mut available_objectives = Vec::new();
+        available_objectives.extend(
+            config
+                .variables
+                .cvs
+                .iter()
+                .filter(|name| !selected_cvs.contains(name.as_str()))
+                .map(|name| format!("CV: {name}")),
+        );
+        available_objectives.extend(
+            config
+                .variables
+                .mvs
+                .iter()
+                .filter(|name| !selected_mvs.contains(name.as_str()))
+                .map(|name| format!("Delta MV: {name}")),
+        );
         Self {
             selected_parameter: available_parameters.first().cloned(),
             available_parameters,
@@ -1255,15 +1303,36 @@ impl OnlineOptimizationEditorState {
                     max: format_numeric(row.max),
                 })
                 .collect(),
+            selected_objective: available_objectives.first().cloned(),
+            available_objectives,
             cvs: config
                 .online_optimization
                 .cvs
                 .iter()
                 .map(|row| OnlineOptimizationCvRowState {
+                    predefined_low: config
+                        .predefined_cv_limits()
+                        .get(&row.name)
+                        .map(|limit| format_numeric(limit.min))
+                        .unwrap_or_else(|| "-".to_string()),
+                    predefined_high: config
+                        .predefined_cv_limits()
+                        .get(&row.name)
+                        .map(|limit| format_numeric(limit.max))
+                        .unwrap_or_else(|| "-".to_string()),
                     name: row.name.clone(),
                     weight: format_numeric(row.weight),
                     low: format_numeric(row.low),
                     high: format_numeric(row.high),
+                })
+                .collect(),
+            delta_mvs: config
+                .online_optimization
+                .delta_mvs
+                .iter()
+                .map(|row| OnlineOptimizationDeltaMvRowState {
+                    name: row.name.clone(),
+                    weight: format_numeric(row.weight),
                 })
                 .collect(),
             duration: format_duration_hms(config.online_optimization.duration_s),
@@ -1279,7 +1348,10 @@ impl OnlineOptimizationEditorState {
             selected_parameter: None,
             available_parameters: Vec::new(),
             parameters: Vec::new(),
+            selected_objective: None,
+            available_objectives: Vec::new(),
             cvs: Vec::new(),
+            delta_mvs: Vec::new(),
             duration: "00:01:00".to_string(),
             max_iterations: "30".to_string(),
             initial_samples: "8".to_string(),
@@ -1473,6 +1545,8 @@ enum Message {
     MvTestWriteChanged(usize, String),
     CvSetpointChanged(usize, String),
     CvIstChanged(usize, String),
+    CvHlChanged(usize, String),
+    CvLlChanged(usize, String),
     CvDeadbandValueChanged(usize, String),
     CvDeadbandOpcChanged(usize, String),
     CvEnableChanged(usize, String),
@@ -1539,9 +1613,14 @@ enum Message {
     RemoveOnlineOptimizationParameter(usize),
     OnlineOptimizationParamMinChanged(usize, String),
     OnlineOptimizationParamMaxChanged(usize, String),
+    OnlineOptimizationObjectiveSelected(String),
+    AddOnlineOptimizationObjective,
+    RemoveOnlineOptimizationCv(usize),
+    RemoveOnlineOptimizationDeltaMv(usize),
     OnlineOptimizationCvWeightChanged(usize, String),
     OnlineOptimizationCvLowChanged(usize, String),
     OnlineOptimizationCvHighChanged(usize, String),
+    OnlineOptimizationDeltaMvWeightChanged(usize, String),
     OnlineOptimizationDurationChanged(String),
     OnlineOptimizationMaxIterationsChanged(String),
     OnlineOptimizationInitialSamplesChanged(String),
@@ -1549,8 +1628,6 @@ enum Message {
     SaveOnlineOptimizationPressed,
     OnlineOptimizationSaved(Result<String, String>),
     StartOnlineOptimizationPressed,
-    RetryOnlineOptimizationPressed,
-    ContinueOnlineOptimizationPressed,
     StopOnlineOptimizationPressed,
     SaveOnlineOptimizationBestPressed,
     OnlineOptimizationActionFinished(Result<String, String>),
@@ -2002,9 +2079,14 @@ impl DesktopApp {
                     | Message::RemoveOnlineOptimizationParameter(_)
                     | Message::OnlineOptimizationParamMinChanged(_, _)
                     | Message::OnlineOptimizationParamMaxChanged(_, _)
+                    | Message::OnlineOptimizationObjectiveSelected(_)
+                    | Message::AddOnlineOptimizationObjective
+                    | Message::RemoveOnlineOptimizationCv(_)
+                    | Message::RemoveOnlineOptimizationDeltaMv(_)
                     | Message::OnlineOptimizationCvWeightChanged(_, _)
                     | Message::OnlineOptimizationCvLowChanged(_, _)
                     | Message::OnlineOptimizationCvHighChanged(_, _)
+                    | Message::OnlineOptimizationDeltaMvWeightChanged(_, _)
                     | Message::OnlineOptimizationDurationChanged(_)
                     | Message::OnlineOptimizationMaxIterationsChanged(_)
                     | Message::OnlineOptimizationInitialSamplesChanged(_)
@@ -2841,6 +2923,18 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::CvHlChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.hl = value;
+                }
+                Task::none()
+            }
+            Message::CvLlChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.ll = value;
+                }
+                Task::none()
+            }
             Message::CvDeadbandValueChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
                     row.deadband_value = value;
@@ -3463,6 +3557,118 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::OnlineOptimizationObjectiveSelected(value) => {
+                self.online_optimization_editor.selected_objective = Some(value);
+                Task::none()
+            }
+            Message::AddOnlineOptimizationObjective => {
+                let Some(selection) = self.online_optimization_editor.selected_objective.clone()
+                else {
+                    return Task::none();
+                };
+                if let Some(name) = selection.strip_prefix("CV: ") {
+                    let Some(io_row) = self.cv_io_rows.iter().find(|row| row.name == name) else {
+                        self.error_message =
+                            Some(format!("CV '{name}' is missing from the I/O definition"));
+                        return Task::none();
+                    };
+                    let live_low =
+                        self.logic_params
+                            .get(&format!("io.cv.{name}.ll"))
+                            .and_then(|value| match value {
+                                LogicParamValue::F64(value) => Some(*value),
+                                LogicParamValue::Bool(_) => None,
+                            });
+                    let live_high =
+                        self.logic_params
+                            .get(&format!("io.cv.{name}.hl"))
+                            .and_then(|value| match value {
+                                LogicParamValue::F64(value) => Some(*value),
+                                LogicParamValue::Bool(_) => None,
+                            });
+                    let low_value = live_low
+                        .map(|value| Ok(Some(value)))
+                        .unwrap_or_else(|| parse_optional_f64("predefined CV LL", &io_row.ll));
+                    let low = match low_value {
+                        Ok(Some(value)) => value,
+                        _ => {
+                            self.error_message = Some(format!(
+                                "Define valid LL and HL values for CV '{name}' before adding it"
+                            ));
+                            return Task::none();
+                        }
+                    };
+                    let high_value = live_high
+                        .map(|value| Ok(Some(value)))
+                        .unwrap_or_else(|| parse_optional_f64("predefined CV HL", &io_row.hl));
+                    let high = match high_value {
+                        Ok(Some(value)) if value > low => value,
+                        _ => {
+                            self.error_message = Some(format!(
+                                "Define valid LL and HL values for CV '{name}' before adding it"
+                            ));
+                            return Task::none();
+                        }
+                    };
+                    self.online_optimization_editor
+                        .cvs
+                        .push(OnlineOptimizationCvRowState {
+                            name: name.to_string(),
+                            weight: "1".to_string(),
+                            low: format_numeric(low),
+                            high: format_numeric(high),
+                            predefined_low: format_numeric(low),
+                            predefined_high: format_numeric(high),
+                        });
+                } else if let Some(name) = selection.strip_prefix("Delta MV: ") {
+                    self.online_optimization_editor.delta_mvs.push(
+                        OnlineOptimizationDeltaMvRowState {
+                            name: name.to_string(),
+                            weight: "1".to_string(),
+                        },
+                    );
+                }
+                self.online_optimization_editor
+                    .available_objectives
+                    .retain(|item| item != &selection);
+                self.online_optimization_editor.selected_objective = self
+                    .online_optimization_editor
+                    .available_objectives
+                    .first()
+                    .cloned();
+                self.error_message = None;
+                Task::none()
+            }
+            Message::RemoveOnlineOptimizationCv(index) => {
+                if index < self.online_optimization_editor.cvs.len() {
+                    let row = self.online_optimization_editor.cvs.remove(index);
+                    self.online_optimization_editor
+                        .available_objectives
+                        .push(format!("CV: {}", row.name));
+                    self.online_optimization_editor.available_objectives.sort();
+                    self.online_optimization_editor.selected_objective = self
+                        .online_optimization_editor
+                        .available_objectives
+                        .first()
+                        .cloned();
+                }
+                Task::none()
+            }
+            Message::RemoveOnlineOptimizationDeltaMv(index) => {
+                if index < self.online_optimization_editor.delta_mvs.len() {
+                    let row = self.online_optimization_editor.delta_mvs.remove(index);
+                    self.online_optimization_editor
+                        .available_objectives
+                        .push(format!("Delta MV: {}", row.name));
+                    self.online_optimization_editor.available_objectives.sort();
+                    self.online_optimization_editor.selected_objective = self
+                        .online_optimization_editor
+                        .available_objectives
+                        .first()
+                        .cloned();
+                }
+                Task::none()
+            }
             Message::OnlineOptimizationCvWeightChanged(index, value) => {
                 if let Some(row) = self.online_optimization_editor.cvs.get_mut(index) {
                     row.weight = value;
@@ -3478,6 +3684,12 @@ impl DesktopApp {
             Message::OnlineOptimizationCvHighChanged(index, value) => {
                 if let Some(row) = self.online_optimization_editor.cvs.get_mut(index) {
                     row.high = value;
+                }
+                Task::none()
+            }
+            Message::OnlineOptimizationDeltaMvWeightChanged(index, value) => {
+                if let Some(row) = self.online_optimization_editor.delta_mvs.get_mut(index) {
+                    row.weight = value;
                 }
                 Task::none()
             }
@@ -3531,18 +3743,9 @@ impl DesktopApp {
                     self.online_optimization_editor.clone(),
                 )
             }
-            Message::RetryOnlineOptimizationPressed => online_optimization_action_task(
-                Arc::clone(&self.runtime),
-                OnlineOptimizationUiAction::Retry,
-            ),
-            Message::ContinueOnlineOptimizationPressed => online_optimization_action_task(
-                Arc::clone(&self.runtime),
-                OnlineOptimizationUiAction::Penalty,
-            ),
-            Message::StopOnlineOptimizationPressed => online_optimization_action_task(
-                Arc::clone(&self.runtime),
-                OnlineOptimizationUiAction::Stop,
-            ),
+            Message::StopOnlineOptimizationPressed => {
+                stop_online_optimization_task(Arc::clone(&self.runtime))
+            }
             Message::SaveOnlineOptimizationBestPressed => {
                 let Some(project_name) = self.selected_project.clone() else {
                     self.error_message = Some("Select a project first".to_string());
@@ -4617,7 +4820,7 @@ impl DesktopApp {
         let can_edit = !active;
         let mut content = column![
             text("Online Parameter Optimization").size(26),
-            text("Bayesian optimization against the active runtime or simulation. Each candidate is evaluated using weighted CV MSE over the configured timeframe.").size(14),
+            text("Bayesian optimization against the active runtime or simulation. Add CV tracking and delta-MV movement terms to build the objective.").size(14),
         ]
         .spacing(12);
 
@@ -4676,7 +4879,22 @@ impl DesktopApp {
         }
         content = content.push(container(params).padding(10));
 
-        let mut cvs = column![text("CV Objective and Safety Limits").size(18)].spacing(8);
+        let objective_selector = pick_list(
+            self.online_optimization_editor.available_objectives.clone(),
+            self.online_optimization_editor.selected_objective.clone(),
+            Message::OnlineOptimizationObjectiveSelected,
+        );
+        let add_objective =
+            if can_edit && self.online_optimization_editor.selected_objective.is_some() {
+                button("Add Objective").on_press(Message::AddOnlineOptimizationObjective)
+            } else {
+                button("Add Objective")
+            };
+        content = content
+            .push(text("Optimization Objective").size(18))
+            .push(row![objective_selector, add_objective].spacing(10));
+
+        let mut cvs = column![text("Selected CV Terms").size(16)].spacing(8);
         for (index, row_data) in self.online_optimization_editor.cvs.iter().enumerate() {
             let weight = text_input("weight", &row_data.weight)
                 .on_input(move |value| Message::OnlineOptimizationCvWeightChanged(index, value));
@@ -4687,18 +4905,43 @@ impl DesktopApp {
             cvs = cvs.push(
                 row![
                     text(row_data.name.clone()).width(Length::FillPortion(3)),
+                    text(format!(
+                        "Allowed [{}; {}]",
+                        row_data.predefined_low, row_data.predefined_high
+                    ))
+                    .width(Length::FillPortion(3)),
                     text("Weight"),
                     weight.width(Length::FillPortion(2)),
                     text("Low"),
                     low.width(Length::FillPortion(2)),
                     text("High"),
                     high.width(Length::FillPortion(2)),
+                    button("Remove").on_press(Message::RemoveOnlineOptimizationCv(index)),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
         }
         content = content.push(container(cvs).padding(10));
+
+        let mut delta_mvs = column![text("Selected Delta-MV Terms").size(16)].spacing(8);
+        for (index, row_data) in self.online_optimization_editor.delta_mvs.iter().enumerate() {
+            delta_mvs = delta_mvs.push(
+                row![
+                    text(format!("Delta {}", row_data.name)).width(Length::FillPortion(3)),
+                    text("Weight"),
+                    text_input("weight", &row_data.weight)
+                        .on_input(move |value| {
+                            Message::OnlineOptimizationDeltaMvWeightChanged(index, value)
+                        })
+                        .width(Length::FillPortion(2)),
+                    button("Remove").on_press(Message::RemoveOnlineOptimizationDeltaMv(index)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        content = content.push(container(delta_mvs).padding(10));
 
         let settings = row![
             text("Timeframe HH:MM:SS"),
@@ -4750,7 +4993,7 @@ impl DesktopApp {
 
         if let Some(status) = &self.online_optimization_editor.status {
             content = content.push(text(format!(
-                "State: {:?} | Candidate {} / {} | Samples {} / {} | Best MSE: {}",
+                "State: {:?} | Candidate {} / {} | Samples {} / {} | Best score: {}",
                 status.phase,
                 status
                     .iteration
@@ -4764,20 +5007,8 @@ impl DesktopApp {
                     .map(|value| format!("{value:.6}"))
                     .unwrap_or_else(|| "-".to_string())
             )));
-            if status.phase == OnlineOptimizationPhase::SafetyPaused {
-                content = content
-                    .push(text(status.safety_reason.clone().unwrap_or_default()))
-                    .push(
-                        row![
-                            button("Retry Candidate")
-                                .on_press(Message::RetryOnlineOptimizationPressed),
-                            button("Continue with Penalty")
-                                .on_press(Message::ContinueOnlineOptimizationPressed),
-                            button("Stop Completely")
-                                .on_press(Message::StopOnlineOptimizationPressed),
-                        ]
-                        .spacing(10),
-                    );
+            if let Some(reason) = &status.finish_reason {
+                content = content.push(text(format!("Finished: {reason}")));
             }
         }
         container(scrollable(content)).padding(16).into()
@@ -5502,7 +5733,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("CV: configure SETPOINT, PROCESS VALUE, DEADBAND, and Enable with optional OPC UA Node IDs. Deadband can also use a static initial value.")
+                text("CV: configure SETPOINT, PROCESS VALUE, predefined safety LL/HL, DEADBAND, and Enable. Online optimization CV limits must stay inside the predefined LL/HL.")
                     .size(13),
             );
             for (index, row_data) in self.cv_io_rows.iter().enumerate() {
@@ -5520,6 +5751,28 @@ impl DesktopApp {
                             text_input("write", &row_data.test_write)
                                 .on_input(move |value| Message::CvTestWriteChanged(index, value))
                                 .width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("CV LL").width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(3)),
+                            text_input("required for optimization", &row_data.ll)
+                                .on_input(move |value| Message::CvLlChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("CV HL").width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(3)),
+                            text_input("required for optimization", &row_data.hl)
+                                .on_input(move |value| Message::CvHlChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -7225,9 +7478,20 @@ fn build_online_optimization_config_from_editor(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let delta_mvs = editor
+        .delta_mvs
+        .iter()
+        .map(|row| {
+            Ok(OnlineOptimizationDeltaMvConfig {
+                name: row.name.clone(),
+                weight: parse_finite_f64("online optimization delta MV weight", &row.weight)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(OnlineOptimizationConfig {
         parameters,
         cvs,
+        delta_mvs,
         duration_s: parse_duration_hms(&editor.duration)?,
         max_iterations: parse_positive_usize(
             "online optimization iterations",
@@ -7255,6 +7519,9 @@ fn save_online_optimization_task(
                 .load_config(&project_name)
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             config.online_optimization = build_online_optimization_config_from_editor(&editor)?;
+            config
+                .validate()
+                .map_err(|err| format!("Invalid online optimization settings: {err}"))?;
             config.normalize_online_optimization_config();
             project_service
                 .save_config(&project_name, &config)
@@ -7277,6 +7544,9 @@ fn start_online_optimization_task(
                 .load_config(&project_name)
                 .map_err(|err| format!("Project configuration could not be loaded: {err}"))?;
             config.online_optimization = build_online_optimization_config_from_editor(&editor)?;
+            config
+                .validate()
+                .map_err(|err| format!("Invalid online optimization settings: {err}"))?;
             config.normalize_online_optimization_config();
             project_service
                 .save_config(&project_name, &config)
@@ -7291,28 +7561,14 @@ fn start_online_optimization_task(
     )
 }
 
-#[derive(Debug, Clone, Copy)]
-enum OnlineOptimizationUiAction {
-    Retry,
-    Penalty,
-    Stop,
-}
-
-fn online_optimization_action_task(
-    runtime: Arc<RuntimeManager>,
-    action: OnlineOptimizationUiAction,
-) -> Task<Message> {
+fn stop_online_optimization_task(runtime: Arc<RuntimeManager>) -> Task<Message> {
     Task::perform(
         async move {
-            match action {
-                OnlineOptimizationUiAction::Retry => runtime.retry_online_optimization().await,
-                OnlineOptimizationUiAction::Penalty => {
-                    runtime.continue_online_optimization_with_penalty().await
-                }
-                OnlineOptimizationUiAction::Stop => runtime.stop_online_optimization().await,
-            }
-            .map_err(|err| format!("Online optimization action failed: {err}"))?;
-            Ok(format!("Online optimization action: {action:?}"))
+            runtime
+                .stop_online_optimization()
+                .await
+                .map_err(|err| format!("Online optimization could not be stopped: {err}"))?;
+            Ok("Online optimization stop requested; original parameters restore on the next controller cycle".to_string())
         },
         Message::OnlineOptimizationActionFinished,
     )
@@ -7637,6 +7893,14 @@ fn parse_finite_f64(label: &str, raw: &str) -> Result<f64, String> {
         return Err(format!("{label} must be finite"));
     }
     Ok(value)
+}
+
+fn parse_optional_f64(label: &str, raw: &str) -> Result<Option<f64>, String> {
+    if raw.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_finite_f64(label, raw).map(Some)
+    }
 }
 
 fn parse_positive_f64(label: &str, raw: &str) -> Result<f64, String> {
@@ -8658,6 +8922,14 @@ fn build_io_definition(
 
         let setpoint = row.setpoint.trim().to_string();
         let process_value = row.process_value.trim().to_string();
+        let hl = parse_optional_f64(&format!("CV '{}' HL", name), &row.hl)?;
+        let ll = parse_optional_f64(&format!("CV '{}' LL", name), &row.ll)?;
+        if matches!((ll, hl), (Some(_), None) | (None, Some(_))) {
+            return Err(format!("CV '{}' requires both LL and HL", name));
+        }
+        if matches!((ll, hl), (Some(ll), Some(hl)) if ll >= hl) {
+            return Err(format!("CV '{}' requires LL smaller than HL", name));
+        }
 
         let deadband_value = if row.deadband_value.trim().is_empty() {
             None
@@ -8675,6 +8947,8 @@ fn build_io_definition(
             name: name.clone(),
             setpoint,
             process_value,
+            hl,
+            ll,
             deadband_opc,
             deadband_value,
             enable: optional_trimmed(&row.enable),
@@ -9611,12 +9885,13 @@ mod tests {
     };
 
     use super::{
-        LogicEditorState, ModelEditorState, ModelKindChoice, ParameterHierarchyItem,
-        ParameterHierarchyScope, SimulationEditorState, build_model_config_from_editor,
-        build_simulation_config_from_editor, format_duration_hms, parameter_heading_label,
-        parameter_heading_size, parameter_hierarchy, parameter_hierarchy_indent_px,
-        parameter_leaf_label, parse_duration_hms, parse_matrix_import_text, resize_string_matrix,
-        sync_io_initial_value_online_params, visible_parameter_hierarchy,
+        LogicEditorState, ModelEditorState, ModelKindChoice, OnlineOptimizationEditorState,
+        ParameterHierarchyItem, ParameterHierarchyScope, SimulationEditorState,
+        build_model_config_from_editor, build_simulation_config_from_editor, format_duration_hms,
+        parameter_heading_label, parameter_heading_size, parameter_hierarchy,
+        parameter_hierarchy_indent_px, parameter_leaf_label, parse_duration_hms,
+        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
+        visible_parameter_hierarchy,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -9851,6 +10126,8 @@ mod tests {
             name: "y1".to_string(),
             setpoint: "ns=2;s=y1_target".to_string(),
             process_value: "ns=2;s=y1_value".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.5),
             enable: None,
@@ -9869,6 +10146,14 @@ mod tests {
         assert_eq!(
             cfg.logic.params.get("io.cv.y1.deadband"),
             Some(&LogicParamValue::F64(0.5))
+        );
+        assert_eq!(
+            cfg.logic.params.get("io.cv.y1.hl"),
+            Some(&LogicParamValue::F64(100.0))
+        );
+        assert_eq!(
+            cfg.logic.params.get("io.cv.y1.ll"),
+            Some(&LogicParamValue::F64(-100.0))
         );
     }
 
@@ -9895,6 +10180,8 @@ mod tests {
             name: "y1".to_string(),
             setpoint: "cv.y1.setpoint".to_string(),
             process_value: "cv.y1.process_value".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.25),
             enable: None,
@@ -10049,5 +10336,27 @@ mod tests {
         assert_eq!(format_duration_hms(3_723), "01:02:03");
         assert!(parse_duration_hms("00:60:00").is_err());
         assert!(parse_duration_hms("00:00:00").is_err());
+    }
+
+    #[test]
+    fn online_optimization_editor_lists_unselected_cv_and_delta_mv_objectives() {
+        let mut cfg = ProjectConfig::new("demo");
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string(), "y2".to_string()];
+        cfg.online_optimization.cvs = vec![crate::project_config::OnlineOptimizationCvConfig {
+            name: "y1".to_string(),
+            weight: 1.0,
+            low: -5.0,
+            high: 5.0,
+        }];
+
+        let editor = OnlineOptimizationEditorState::from_config(&cfg);
+        assert!(!editor.available_objectives.contains(&"CV: y1".to_string()));
+        assert!(editor.available_objectives.contains(&"CV: y2".to_string()));
+        assert!(
+            editor
+                .available_objectives
+                .contains(&"Delta MV: u1".to_string())
+        );
     }
 }

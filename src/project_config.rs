@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -85,8 +85,11 @@ impl ProjectConfig {
             &self.variables,
             &self.active_controller_f64_param_defaults(),
         )?;
-        self.online_optimization
-            .validate(&self.variables, &self.active_f64_online_param_defaults())?;
+        self.online_optimization.validate(
+            &self.variables,
+            &self.online_optimization_param_defaults(),
+            &self.predefined_cv_limits(),
+        )?;
         self.plots.validate()?;
 
         if self.logic.cycle_ms == 0 {
@@ -175,8 +178,8 @@ impl ProjectConfig {
         let config = std::mem::take(&mut self.online_optimization);
         self.online_optimization = config.normalized_for(
             &self.variables,
-            &self.active_f64_online_param_defaults(),
-            &self.simulation,
+            &self.online_optimization_param_defaults(),
+            &self.predefined_cv_limits(),
         );
     }
 
@@ -467,6 +470,12 @@ impl ProjectConfig {
         }
 
         for cv in &self.io_definition.cvs {
+            if let Some(value) = cv.hl {
+                defaults.insert(format!("io.cv.{}.hl", cv.name), LogicParamValue::F64(value));
+            }
+            if let Some(value) = cv.ll {
+                defaults.insert(format!("io.cv.{}.ll", cv.name), LogicParamValue::F64(value));
+            }
             if cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
                 if let Some(value) = cv.deadband_value {
                     defaults.insert(
@@ -478,6 +487,43 @@ impl ProjectConfig {
         }
 
         defaults
+    }
+
+    pub fn predefined_cv_limits(&self) -> HashMap<String, NumericLimit> {
+        self.io_definition
+            .cvs
+            .iter()
+            .filter_map(|cv| {
+                let low = self
+                    .logic
+                    .params
+                    .get(&format!("io.cv.{}.ll", cv.name))
+                    .and_then(|value| match value {
+                        LogicParamValue::F64(value) => Some(*value),
+                        LogicParamValue::Bool(_) => None,
+                    })
+                    .or(cv.ll)?;
+                let high = self
+                    .logic
+                    .params
+                    .get(&format!("io.cv.{}.hl", cv.name))
+                    .and_then(|value| match value {
+                        LogicParamValue::F64(value) => Some(*value),
+                        LogicParamValue::Bool(_) => None,
+                    })
+                    .or(cv.hl)?;
+                (low < high).then(|| {
+                    (
+                        cv.name.clone(),
+                        NumericLimit {
+                            min: low,
+                            max: high,
+                            opc_tag: None,
+                        },
+                    )
+                })
+            })
+            .collect()
     }
 
     pub fn active_controller_f64_param_defaults(&self) -> HashMap<String, f64> {
@@ -515,6 +561,15 @@ impl ProjectConfig {
                     LogicParamValue::F64(value) => Some((key, *value)),
                     LogicParamValue::Bool(_) => None,
                 }
+            })
+            .collect()
+    }
+
+    pub fn online_optimization_param_defaults(&self) -> HashMap<String, f64> {
+        self.active_f64_online_param_defaults()
+            .into_iter()
+            .filter(|(key, _)| {
+                !(key.starts_with("io.cv.") && (key.ends_with(".ll") || key.ends_with(".hl")))
             })
             .collect()
     }
@@ -903,6 +958,20 @@ impl IoDefinitionConfig {
                 }
             }
         }
+        for row in &self.cvs {
+            match (row.ll, row.hl) {
+                (Some(ll), Some(hl)) if ll >= hl => {
+                    bail!(
+                        "CV '{}' requires a lower limit smaller than its upper limit",
+                        row.name
+                    );
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    bail!("CV '{}' requires both lower and upper limits", row.name);
+                }
+                _ => {}
+            }
+        }
 
         Ok(())
     }
@@ -920,7 +989,12 @@ impl IoDefinitionConfig {
         }
 
         for name in &vars.cvs {
-            if self.cvs.iter().find(|row| row.name == *name).is_none() {
+            let Some(row) = self.cvs.iter().find(|row| row.name == *name) else {
+                return false;
+            };
+            if matches!((row.ll, row.hl), (Some(ll), Some(hl)) if ll >= hl)
+                || matches!((row.ll, row.hl), (Some(_), None) | (None, Some(_)))
+            {
                 return false;
             }
         }
@@ -1032,6 +1106,16 @@ impl IoDefinitionConfig {
                     address: addr,
                     opc_tag: None,
                 });
+            }
+            if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
+                limits.insert(
+                    format!("cv.{}.process_value", name),
+                    NumericLimit {
+                        min: ll,
+                        max: hl,
+                        opc_tag: None,
+                    },
+                );
             }
 
             if let Some(deadband_opc) = optional_trimmed(row.deadband_opc.as_deref().unwrap_or(""))
@@ -1173,6 +1257,10 @@ pub struct CvIoDefinition {
     pub setpoint: String,
     #[serde(default)]
     pub process_value: String,
+    #[serde(default)]
+    pub hl: Option<f64>,
+    #[serde(default)]
+    pub ll: Option<f64>,
     #[serde(default)]
     pub deadband_opc: Option<String>,
     #[serde(default)]
@@ -1913,6 +2001,8 @@ pub struct OnlineOptimizationConfig {
     pub parameters: Vec<OnlineOptimizationParamConfig>,
     #[serde(default)]
     pub cvs: Vec<OnlineOptimizationCvConfig>,
+    #[serde(default)]
+    pub delta_mvs: Vec<OnlineOptimizationDeltaMvConfig>,
     #[serde(default = "default_online_optimization_duration_s")]
     pub duration_s: u64,
     #[serde(default = "default_optimization_max_iterations")]
@@ -1928,6 +2018,7 @@ impl Default for OnlineOptimizationConfig {
         Self {
             parameters: Vec::new(),
             cvs: Vec::new(),
+            delta_mvs: Vec::new(),
             duration_s: default_online_optimization_duration_s(),
             max_iterations: default_optimization_max_iterations(),
             initial_samples: default_optimization_initial_samples(),
@@ -1941,7 +2032,7 @@ impl OnlineOptimizationConfig {
         self,
         vars: &VariableCatalogConfig,
         active_params: &HashMap<String, f64>,
-        simulation: &SimulationConfig,
+        predefined_cv_limits: &HashMap<String, NumericLimit>,
     ) -> Self {
         let parameters = self
             .parameters
@@ -1954,35 +2045,27 @@ impl OnlineOptimizationConfig {
                 row
             })
             .collect();
-        let mut existing_cvs: HashMap<_, _> = self
+        let cvs = self
             .cvs
             .into_iter()
-            .map(|row| (row.name.clone(), row))
-            .collect();
-        let cvs = vars
-            .cvs
-            .iter()
-            .map(|name| {
-                existing_cvs.remove(name).unwrap_or_else(|| {
-                    let center = simulation
-                        .cv_setpoints
-                        .get(name)
-                        .copied()
-                        .or_else(|| simulation.cv_initials.get(name).copied())
-                        .unwrap_or(0.0);
-                    let width = center.abs().max(1.0) * 10.0;
-                    OnlineOptimizationCvConfig {
-                        name: name.clone(),
-                        weight: 1.0,
-                        low: center - width,
-                        high: center + width,
-                    }
-                })
+            .filter(|row| vars.cvs.contains(&row.name))
+            .map(|mut row| {
+                if let Some(limit) = predefined_cv_limits.get(&row.name) {
+                    row.low = row.low.max(limit.min);
+                    row.high = row.high.min(limit.max);
+                }
+                row
             })
+            .collect();
+        let delta_mvs = self
+            .delta_mvs
+            .into_iter()
+            .filter(|row| vars.mvs.contains(&row.name))
             .collect();
         Self {
             parameters,
             cvs,
+            delta_mvs,
             duration_s: self.duration_s.clamp(1, 31_536_000),
             max_iterations: self.max_iterations.clamp(1, 10_000),
             initial_samples: self.initial_samples.clamp(1, 1_000),
@@ -1994,6 +2077,7 @@ impl OnlineOptimizationConfig {
         &self,
         vars: &VariableCatalogConfig,
         active_params: &HashMap<String, f64>,
+        predefined_cv_limits: &HashMap<String, NumericLimit>,
     ) -> Result<()> {
         if self.duration_s == 0
             || self.max_iterations == 0
@@ -2002,7 +2086,7 @@ impl OnlineOptimizationConfig {
         {
             bail!("online optimization duration and iteration settings must be > 0");
         }
-        if self.parameters.is_empty() {
+        if self.parameters.is_empty() && self.cvs.is_empty() && self.delta_mvs.is_empty() {
             return Ok(());
         }
         let mut seen = HashSet::new();
@@ -2020,11 +2104,10 @@ impl OnlineOptimizationConfig {
                 );
             }
         }
-        let expected: HashSet<_> = vars.cvs.iter().map(String::as_str).collect();
         let mut cv_seen = HashSet::new();
         let mut positive_weight = false;
         for row in &self.cvs {
-            if !expected.contains(row.name.as_str()) || !cv_seen.insert(row.name.as_str()) {
+            if !vars.cvs.contains(&row.name) || !cv_seen.insert(row.name.as_str()) {
                 bail!("invalid or duplicate online optimization CV '{}'", row.name);
             }
             if !row.weight.is_finite() || row.weight < 0.0 {
@@ -2040,12 +2123,44 @@ impl OnlineOptimizationConfig {
                     row.name
                 );
             }
+            let predefined = predefined_cv_limits.get(&row.name).ok_or_else(|| {
+                anyhow!(
+                    "online optimization CV '{}' requires predefined I/O lower and upper limits",
+                    row.name
+                )
+            })?;
+            if row.low < predefined.min || row.high > predefined.max {
+                bail!(
+                    "online optimization CV '{}' limits [{}, {}] must stay inside predefined [{}, {}]",
+                    row.name,
+                    row.low,
+                    row.high,
+                    predefined.min,
+                    predefined.max
+                );
+            }
         }
-        if cv_seen.len() != expected.len() {
-            bail!("online optimization requires safety limits for every CV");
+        let mut mv_seen = HashSet::new();
+        for row in &self.delta_mvs {
+            if !vars.mvs.contains(&row.name) || !mv_seen.insert(row.name.as_str()) {
+                bail!(
+                    "invalid or duplicate online optimization delta MV '{}'",
+                    row.name
+                );
+            }
+            if !row.weight.is_finite() || row.weight < 0.0 {
+                bail!(
+                    "online optimization delta MV '{}' weight must be finite and >= 0",
+                    row.name
+                );
+            }
+            positive_weight |= row.weight > 0.0;
         }
-        if !vars.cvs.is_empty() && !positive_weight {
-            bail!("online optimization requires at least one positive CV weight");
+        if !self.parameters.is_empty() && self.cvs.is_empty() && self.delta_mvs.is_empty() {
+            bail!("online optimization requires at least one objective");
+        }
+        if (!self.cvs.is_empty() || !self.delta_mvs.is_empty()) && !positive_weight {
+            bail!("online optimization requires at least one positive objective weight");
         }
         Ok(())
     }
@@ -2064,6 +2179,12 @@ pub struct OnlineOptimizationCvConfig {
     pub weight: f64,
     pub low: f64,
     pub high: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineOptimizationDeltaMvConfig {
+    pub name: String,
+    pub weight: f64,
 }
 
 const fn default_online_optimization_duration_s() -> u64 {
@@ -2795,6 +2916,19 @@ mod tests {
         }
     }
 
+    fn add_predefined_y1_limits(cfg: &mut ProjectConfig) {
+        cfg.io_definition.cvs.push(CvIoDefinition {
+            name: "y1".to_string(),
+            setpoint: String::new(),
+            process_value: String::new(),
+            hl: Some(10.0),
+            ll: Some(-10.0),
+            deadband_opc: None,
+            deadband_value: None,
+            enable: None,
+        });
+    }
+
     #[test]
     fn default_config_is_valid() {
         let cfg = valid_config_with_variables();
@@ -2899,6 +3033,7 @@ mod tests {
     #[test]
     fn online_optimization_normalizes_cvs_and_selected_numeric_parameters() {
         let mut cfg = valid_config_with_variables();
+        add_predefined_y1_limits(&mut cfg);
         cfg.sync_active_online_params();
         let active_key = cfg
             .active_controller_f64_param_defaults()
@@ -2917,11 +3052,18 @@ mod tests {
                 max: 1.0,
             },
         ];
+        cfg.online_optimization.cvs = vec![OnlineOptimizationCvConfig {
+            name: "y1".to_string(),
+            weight: 1.0,
+            low: -20.0,
+            high: 20.0,
+        }];
         cfg.normalize_online_optimization_config();
 
         assert_eq!(cfg.online_optimization.parameters.len(), 1);
         assert_eq!(cfg.online_optimization.parameters[0].min, -2.0);
-        assert_eq!(cfg.online_optimization.cvs.len(), cfg.variables.cvs.len());
+        assert_eq!(cfg.online_optimization.cvs.len(), 1);
+        assert_eq!(cfg.online_optimization.cvs[0].low, -10.0);
         cfg.validate()
             .expect("normalized online optimization config");
     }
@@ -2929,6 +3071,7 @@ mod tests {
     #[test]
     fn online_optimization_requires_positive_cv_weight_when_configured() {
         let mut cfg = valid_config_with_variables();
+        add_predefined_y1_limits(&mut cfg);
         cfg.sync_active_online_params();
         let active_key = cfg
             .active_controller_f64_param_defaults()
@@ -2940,21 +3083,28 @@ mod tests {
             min: 0.0,
             max: 2.0,
         }];
+        cfg.online_optimization.cvs = vec![OnlineOptimizationCvConfig {
+            name: "y1".to_string(),
+            weight: 0.0,
+            low: -10.0,
+            high: 10.0,
+        }];
         cfg.normalize_online_optimization_config();
         for cv in &mut cfg.online_optimization.cvs {
             cv.weight = 0.0;
         }
 
         let err = cfg.validate().expect_err("zero weights must fail");
-        assert!(err.to_string().contains("positive CV weight"));
+        assert!(err.to_string().contains("positive objective weight"));
     }
 
     #[test]
     fn online_optimization_config_roundtrips() {
         let mut cfg = valid_config_with_variables();
+        add_predefined_y1_limits(&mut cfg);
         cfg.sync_active_online_params();
         let active_key = cfg
-            .active_f64_online_param_defaults()
+            .online_optimization_param_defaults()
             .into_keys()
             .next()
             .expect("active numeric parameter");
@@ -2963,6 +3113,12 @@ mod tests {
             min: -1.0,
             max: 3.0,
         }];
+        cfg.online_optimization.cvs = vec![OnlineOptimizationCvConfig {
+            name: "y1".to_string(),
+            weight: 1.0,
+            low: -9.0,
+            high: 9.0,
+        }];
         cfg.online_optimization.duration_s = 3_723;
         cfg.normalize_online_optimization_config();
 
@@ -2970,10 +3126,55 @@ mod tests {
         let decoded = from_toml_str(&encoded).expect("decode");
         assert_eq!(decoded.online_optimization.duration_s, 3_723);
         assert_eq!(decoded.online_optimization.parameters.len(), 1);
-        assert_eq!(
-            decoded.online_optimization.cvs.len(),
-            cfg.variables.cvs.len()
-        );
+        assert_eq!(decoded.online_optimization.cvs.len(), 1);
+    }
+
+    #[test]
+    fn online_optimization_rejects_cv_limits_wider_than_predefined_limits() {
+        let mut cfg = valid_config_with_variables();
+        add_predefined_y1_limits(&mut cfg);
+        cfg.sync_active_online_params();
+        let active_key = cfg
+            .online_optimization_param_defaults()
+            .into_keys()
+            .next()
+            .expect("active numeric parameter");
+        cfg.online_optimization.parameters = vec![OnlineOptimizationParamConfig {
+            key: active_key,
+            min: 0.0,
+            max: 2.0,
+        }];
+        cfg.online_optimization.cvs = vec![OnlineOptimizationCvConfig {
+            name: "y1".to_string(),
+            weight: 1.0,
+            low: -11.0,
+            high: 10.0,
+        }];
+
+        let err = cfg.validate().expect_err("wider CV limits must fail");
+        assert!(err.to_string().contains("must stay inside predefined"));
+    }
+
+    #[test]
+    fn online_optimization_accepts_delta_mv_only_objective() {
+        let mut cfg = valid_config_with_variables();
+        cfg.sync_active_online_params();
+        let active_key = cfg
+            .online_optimization_param_defaults()
+            .into_keys()
+            .next()
+            .expect("active numeric parameter");
+        cfg.online_optimization.parameters = vec![OnlineOptimizationParamConfig {
+            key: active_key,
+            min: 0.0,
+            max: 2.0,
+        }];
+        cfg.online_optimization.delta_mvs = vec![OnlineOptimizationDeltaMvConfig {
+            name: "u1".to_string(),
+            weight: 2.0,
+        }];
+
+        cfg.validate().expect("delta MV objective should be valid");
     }
 
     #[test]
@@ -3167,6 +3368,8 @@ description = "SmartAPC controller runtime"
             name: "y1".to_string(),
             setpoint: String::new(),
             process_value: String::new(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3228,6 +3431,8 @@ description = "SmartAPC controller runtime"
             name: "y1".to_string(),
             setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
             process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3336,6 +3541,8 @@ description = "SmartAPC controller runtime"
             name: "y1".to_string(),
             setpoint: "ns=2;s=Y1_SP".to_string(),
             process_value: "ns=2;s=Y1_PV".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3527,6 +3734,8 @@ description = "SmartAPC controller runtime"
             name: "y1".to_string(),
             setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
             process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(2.0),
             enable: None,

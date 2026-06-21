@@ -1,4 +1,10 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::{Result, anyhow, bail};
 use nalgebra::{DMatrix, DVector};
@@ -10,13 +16,10 @@ use crate::{
     types::{RuntimeState, SignalValue},
 };
 
-pub const ONLINE_OPTIMIZATION_PENALTY: f64 = 1.0e18;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnlineOptimizationPhase {
     Running,
-    SafetyPaused,
     Finished,
 }
 
@@ -51,11 +54,15 @@ pub struct OnlineOptimizationSession {
     samples_per_window: u64,
     samples_in_window: u64,
     score_sum: f64,
+    delta_mv_integral: f64,
+    previous_mvs: HashMap<String, f64>,
+    dt_s: f64,
     no_improvement: usize,
     phase: OnlineOptimizationPhase,
     safety_reason: Option<String>,
     finish_reason: Option<String>,
     rng: DeterministicRng,
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl OnlineOptimizationSession {
@@ -63,6 +70,7 @@ impl OnlineOptimizationSession {
         config: OnlineOptimizationConfig,
         current: &HashMap<String, LogicParamValue>,
         logic_cycle_ms: u64,
+        stop_requested: Arc<AtomicBool>,
     ) -> Result<(Self, Vec<Value>)> {
         if config.parameters.is_empty() {
             bail!("select at least one parameter for online optimization");
@@ -95,11 +103,15 @@ impl OnlineOptimizationSession {
             samples_per_window,
             samples_in_window: 0,
             score_sum: 0.0,
+            delta_mv_integral: 0.0,
+            previous_mvs: HashMap::new(),
+            dt_s: logic_cycle_ms as f64 / 1_000.0,
             no_improvement: 0,
             phase: OnlineOptimizationPhase::Running,
             safety_reason: None,
             finish_reason: None,
             rng: DeterministicRng::new(0x0A11_1E0F_71A1_2026),
+            stop_requested,
             config,
         };
         let events = vec![
@@ -124,7 +136,7 @@ impl OnlineOptimizationSession {
         }
     }
 
-    pub fn observe(
+    pub fn pre_cycle(
         &mut self,
         state: RuntimeState,
         inputs: &HashMap<String, SignalValue>,
@@ -132,12 +144,50 @@ impl OnlineOptimizationSession {
         if self.phase != OnlineOptimizationPhase::Running {
             return empty_tick();
         }
+        if self.stop_requested.swap(false, Ordering::AcqRel) {
+            return self.finish_with_original("stopped_by_user".to_string());
+        }
         if state != RuntimeState::Running {
-            return self.finish(format!("execution entered state {state:?}"));
+            return self.finish_with_original(format!("execution entered state {state:?}"));
         }
 
-        let mut weighted_error = 0.0;
-        let mut weight_sum = 0.0;
+        for cv in &self.config.cvs {
+            let process_value = inputs
+                .get(&format!("cv.{}.process_value", cv.name))
+                .and_then(SignalValue::as_f64);
+            let Some(process_value) = process_value else {
+                return self
+                    .finish_with_original(format!("missing numeric CV data for '{}'", cv.name));
+            };
+            if !process_value.is_finite() {
+                return self.finish_with_original(format!("non-finite CV data for '{}'", cv.name));
+            }
+            if process_value <= cv.low || process_value >= cv.high {
+                let reason = format!(
+                    "CV '{}' touched optimization safety limit [{}, {}] at {}",
+                    cv.name, cv.low, cv.high, process_value
+                );
+                self.safety_reason = Some(reason.clone());
+                let mut tick = self.finish_with_original(reason.clone());
+                tick.events.insert(
+                    0,
+                    json!({"event":"online_optimization_safety_stop","reason":reason,"candidate":self.current_params}),
+                );
+                return tick;
+            }
+        }
+        empty_tick()
+    }
+
+    pub fn observe(
+        &mut self,
+        inputs: &HashMap<String, SignalValue>,
+        outputs: &HashMap<String, SignalValue>,
+    ) -> OnlineOptimizationTick {
+        if self.phase != OnlineOptimizationPhase::Running {
+            return empty_tick();
+        }
+        let mut sample_score = 0.0;
         for cv in &self.config.cvs {
             let setpoint = inputs
                 .get(&format!("cv.{}.setpoint", cv.name))
@@ -146,71 +196,44 @@ impl OnlineOptimizationSession {
                 .get(&format!("cv.{}.process_value", cv.name))
                 .and_then(SignalValue::as_f64);
             let (Some(setpoint), Some(process_value)) = (setpoint, process_value) else {
-                return self.finish(format!("missing numeric CV data for '{}'", cv.name));
+                return self
+                    .finish_with_original(format!("missing numeric CV data for '{}'", cv.name));
             };
             if !setpoint.is_finite() || !process_value.is_finite() {
-                return self.finish(format!("non-finite CV data for '{}'", cv.name));
+                return self.finish_with_original(format!("non-finite CV data for '{}'", cv.name));
             }
-            if process_value <= cv.low || process_value >= cv.high {
-                let reason = format!(
-                    "CV '{}' touched optimization safety limit [{}, {}] at {}",
-                    cv.name, cv.low, cv.high, process_value
-                );
-                self.phase = OnlineOptimizationPhase::SafetyPaused;
-                self.safety_reason = Some(reason.clone());
-                return OnlineOptimizationTick {
-                    updates: Some(to_logic_params(&self.restore_params())),
-                    events: vec![
-                        json!({"event":"online_optimization_safety_interruption","reason":reason,"candidate":self.current_params}),
-                        self.restore_event("safety_interruption"),
-                    ],
-                };
+            sample_score += cv.weight * (setpoint - process_value).powi(2);
+        }
+        for mv in &self.config.delta_mvs {
+            let value = outputs
+                .get(&format!("mv.{}.write", mv.name))
+                .and_then(SignalValue::as_f64);
+            let Some(value) = value else {
+                return self.finish_with_original(format!(
+                    "missing numeric MV output data for '{}'",
+                    mv.name
+                ));
+            };
+            if !value.is_finite() {
+                return self
+                    .finish_with_original(format!("non-finite MV output data for '{}'", mv.name));
             }
-            weighted_error += cv.weight * (setpoint - process_value).powi(2);
-            weight_sum += cv.weight;
+            if let Some(previous) = self.previous_mvs.insert(mv.name.clone(), value) {
+                self.delta_mv_integral += mv.weight * (value - previous).powi(2) * self.dt_s;
+            }
         }
-        if weight_sum <= 0.0 {
-            return self.finish("online optimization has no positive CV weight".to_string());
-        }
-        self.score_sum += weighted_error / weight_sum;
+        self.score_sum += sample_score;
         self.samples_in_window += 1;
         if self.samples_in_window < self.samples_per_window {
             return empty_tick();
         }
-        self.complete_candidate(self.score_sum / self.samples_in_window as f64)
-    }
-
-    pub fn retry(&mut self) -> Result<OnlineOptimizationTick> {
-        if self.phase != OnlineOptimizationPhase::SafetyPaused {
-            bail!("online optimization is not paused by a safety limit");
-        }
-        self.phase = OnlineOptimizationPhase::Running;
-        self.safety_reason = None;
-        self.samples_in_window = 0;
-        self.score_sum = 0.0;
-        Ok(OnlineOptimizationTick {
-            updates: Some(to_logic_params(&self.current_params)),
-            events: vec![
-                json!({"event":"online_optimization_user_decision","decision":"retry_candidate"}),
-                self.candidate_start_event(),
-            ],
-        })
-    }
-
-    pub fn continue_with_penalty(&mut self) -> Result<OnlineOptimizationTick> {
-        if self.phase != OnlineOptimizationPhase::SafetyPaused {
-            bail!("online optimization is not paused by a safety limit");
-        }
-        let mut tick = self.complete_candidate(ONLINE_OPTIMIZATION_PENALTY);
-        tick.events.insert(
-            0,
-            json!({"event":"online_optimization_user_decision","decision":"continue_with_penalty"}),
-        );
-        Ok(tick)
+        self.complete_candidate(
+            self.score_sum / self.samples_in_window as f64 + self.delta_mv_integral,
+        )
     }
 
     pub fn stop(&mut self, reason: &str) -> OnlineOptimizationTick {
-        self.finish(reason.to_string())
+        self.finish_with_original(reason.to_string())
     }
 
     fn complete_candidate(&mut self, score: f64) -> OnlineOptimizationTick {
@@ -231,13 +254,19 @@ impl OnlineOptimizationSession {
         }
         let converged = self.observed_y.len() >= self.config.initial_samples
             && self.no_improvement >= self.config.convergence_patience;
+        if self.stop_requested.swap(false, Ordering::AcqRel) {
+            let mut tick = self.finish_with_original("stopped_by_user".to_string());
+            events.append(&mut tick.events);
+            tick.events = events;
+            return tick;
+        }
         if self.observed_y.len() >= self.config.max_iterations || converged {
             let reason = if converged {
                 "converged"
             } else {
                 "max_iterations"
             };
-            let mut tick = self.finish(reason.to_string());
+            let mut tick = self.finish_with_best(reason.to_string());
             events.append(&mut tick.events);
             tick.events = events;
             return tick;
@@ -255,13 +284,22 @@ impl OnlineOptimizationSession {
                 &self.observed_y,
                 self.config.parameters.len(),
                 &mut self.rng,
+                &self.stop_requested,
             )
         };
+        if self.stop_requested.swap(false, Ordering::AcqRel) {
+            let mut tick = self.finish_with_original("stopped_by_user".to_string());
+            events.append(&mut tick.events);
+            tick.events = events;
+            return tick;
+        }
         self.current_params = candidate_from_unit(&self.config, &self.current_unit);
         self.phase = OnlineOptimizationPhase::Running;
         self.safety_reason = None;
         self.samples_in_window = 0;
         self.score_sum = 0.0;
+        self.delta_mv_integral = 0.0;
+        self.previous_mvs.clear();
         events.push(self.candidate_start_event());
         OnlineOptimizationTick {
             updates: Some(to_logic_params(&self.current_params)),
@@ -269,20 +307,35 @@ impl OnlineOptimizationSession {
         }
     }
 
-    fn finish(&mut self, reason: String) -> OnlineOptimizationTick {
+    fn finish_with_best(&mut self, reason: String) -> OnlineOptimizationTick {
         self.phase = OnlineOptimizationPhase::Finished;
         self.finish_reason = Some(reason.clone());
-        let restore = self.restore_params();
+        let restore = self.best_or_original_params();
+        self.current_params = restore.clone();
         OnlineOptimizationTick {
             updates: Some(to_logic_params(&restore)),
             events: vec![
-                self.restore_event(&reason),
+                self.restore_event(&reason, &restore),
                 json!({"event":"online_optimization_finish","reason":reason,"best_score":self.best_score.is_finite().then_some(self.best_score),"best_params":restore}),
             ],
         }
     }
 
-    fn restore_params(&self) -> HashMap<String, f64> {
+    fn finish_with_original(&mut self, reason: String) -> OnlineOptimizationTick {
+        self.phase = OnlineOptimizationPhase::Finished;
+        self.finish_reason = Some(reason.clone());
+        let restore = self.original_params.clone();
+        self.current_params = restore.clone();
+        OnlineOptimizationTick {
+            updates: Some(to_logic_params(&restore)),
+            events: vec![
+                self.restore_event(&reason, &restore),
+                json!({"event":"online_optimization_finish","reason":reason,"best_score":self.best_score.is_finite().then_some(self.best_score),"best_params":self.best_params,"restored_params":restore}),
+            ],
+        }
+    }
+
+    fn best_or_original_params(&self) -> HashMap<String, f64> {
         if self.best_score.is_finite() {
             self.best_params.clone()
         } else {
@@ -294,8 +347,8 @@ impl OnlineOptimizationSession {
         json!({"event":"online_optimization_candidate_start","iteration":self.observed_y.len() + 1,"candidate":self.current_params})
     }
 
-    fn restore_event(&self, reason: &str) -> Value {
-        json!({"event":"online_optimization_best_restored","reason":reason,"params":self.restore_params()})
+    fn restore_event(&self, reason: &str, params: &HashMap<String, f64>) -> Value {
+        json!({"event":"online_optimization_parameters_restored","reason":reason,"params":params})
     }
 }
 
@@ -380,6 +433,7 @@ fn propose_expected_improvement(
     ys: &[f64],
     dim: usize,
     rng: &mut DeterministicRng,
+    stop_requested: &AtomicBool,
 ) -> Vec<f64> {
     if xs.len() < 2 || dim == 0 {
         return (0..dim).map(|_| rng.next_unit()).collect();
@@ -405,6 +459,9 @@ fn propose_expected_improvement(
     let mut best_x = (0..dim).map(|_| rng.next_unit()).collect::<Vec<_>>();
     let mut best_ei = f64::NEG_INFINITY;
     for _ in 0..(256usize).max(dim * 64) {
+        if stop_requested.load(Ordering::Acquire) {
+            break;
+        }
         let x = (0..dim).map(|_| rng.next_unit()).collect::<Vec<_>>();
         let k_star = DVector::from_iterator(xs.len(), xs.iter().map(|seen| rbf_kernel(&x, seen)));
         let mu = k_star.dot(&alpha) * y_scale + y_mean;
@@ -453,7 +510,9 @@ fn erf_approx(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_config::{OnlineOptimizationCvConfig, OnlineOptimizationParamConfig};
+    use crate::project_config::{
+        OnlineOptimizationCvConfig, OnlineOptimizationDeltaMvConfig, OnlineOptimizationParamConfig,
+    };
 
     fn config() -> OnlineOptimizationConfig {
         OnlineOptimizationConfig {
@@ -468,6 +527,7 @@ mod tests {
                 low: -10.0,
                 high: 10.0,
             }],
+            delta_mvs: Vec::new(),
             duration_s: 1,
             max_iterations: 2,
             initial_samples: 1,
@@ -478,52 +538,80 @@ mod tests {
     #[test]
     fn first_candidate_uses_current_value_and_scores_mse() {
         let current = HashMap::from([("kp".into(), LogicParamValue::F64(3.0))]);
-        let (mut session, _) = OnlineOptimizationSession::new(config(), &current, 1_000).unwrap();
+        let (mut session, _) = OnlineOptimizationSession::new(
+            config(),
+            &current,
+            1_000,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         assert_eq!(session.status().current_params["kp"], 3.0);
         let inputs = HashMap::from([
             ("cv.y.setpoint".into(), SignalValue::F64(2.0)),
             ("cv.y.process_value".into(), SignalValue::F64(1.0)),
         ]);
-        session.observe(RuntimeState::Running, &inputs);
+        session.pre_cycle(RuntimeState::Running, &inputs);
+        session.observe(&inputs, &HashMap::new());
         assert_eq!(session.status().best_score, Some(1.0));
     }
 
     #[test]
-    fn safety_touch_pauses_and_restores_original() {
+    fn safety_touch_stops_and_restores_original() {
         let current = HashMap::from([("kp".into(), LogicParamValue::F64(3.0))]);
-        let (mut session, _) = OnlineOptimizationSession::new(config(), &current, 1_000).unwrap();
+        let (mut session, _) = OnlineOptimizationSession::new(
+            config(),
+            &current,
+            1_000,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         let inputs = HashMap::from([
             ("cv.y.setpoint".into(), SignalValue::F64(2.0)),
             ("cv.y.process_value".into(), SignalValue::F64(10.0)),
         ]);
-        let tick = session.observe(RuntimeState::Running, &inputs);
-        assert_eq!(
-            session.status().phase,
-            OnlineOptimizationPhase::SafetyPaused
-        );
+        let tick = session.pre_cycle(RuntimeState::Running, &inputs);
+        assert_eq!(session.status().phase, OnlineOptimizationPhase::Finished);
         assert_eq!(tick.updates.unwrap()["kp"], LogicParamValue::F64(3.0));
         assert!(
             tick.events
                 .iter()
-                .any(|event| { event["event"] == "online_optimization_safety_interruption" })
+                .any(|event| { event["event"] == "online_optimization_safety_stop" })
         );
+    }
 
-        let retry = session.retry().unwrap();
-        assert_eq!(session.status().phase, OnlineOptimizationPhase::Running);
-        assert_eq!(retry.updates.unwrap()["kp"], LogicParamValue::F64(3.0));
-
-        session.observe(RuntimeState::Running, &inputs);
-        let penalty = session.continue_with_penalty().unwrap();
-        assert_eq!(session.status().iteration, 1);
-        assert!(
-            penalty
-                .events
-                .iter()
-                .any(|event| { event["decision"] == "continue_with_penalty" })
-        );
-
-        let stopped = session.stop("test_stop");
+    #[test]
+    fn stop_request_restores_original_before_observation() {
+        let current = HashMap::from([("kp".into(), LogicParamValue::F64(3.0))]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut session, _) =
+            OnlineOptimizationSession::new(config(), &current, 1_000, Arc::clone(&stop)).unwrap();
+        stop.store(true, Ordering::Release);
+        let stopped = session.pre_cycle(RuntimeState::Running, &HashMap::new());
         assert_eq!(session.status().phase, OnlineOptimizationPhase::Finished);
         assert_eq!(stopped.updates.unwrap()["kp"], LogicParamValue::F64(3.0));
+    }
+
+    #[test]
+    fn delta_mv_term_integrates_squared_moves() {
+        let mut config = config();
+        config.cvs.clear();
+        config.delta_mvs = vec![OnlineOptimizationDeltaMvConfig {
+            name: "u".into(),
+            weight: 2.0,
+        }];
+        config.duration_s = 2;
+        let current = HashMap::from([("kp".into(), LogicParamValue::F64(3.0))]);
+        let (mut session, _) = OnlineOptimizationSession::new(
+            config,
+            &current,
+            1_000,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        let first = HashMap::from([("mv.u.write".into(), SignalValue::F64(1.0))]);
+        let second = HashMap::from([("mv.u.write".into(), SignalValue::F64(4.0))]);
+        session.observe(&HashMap::new(), &first);
+        session.observe(&HashMap::new(), &second);
+        assert_eq!(session.status().best_score, Some(18.0));
     }
 }

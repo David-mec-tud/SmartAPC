@@ -2,6 +2,10 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -59,6 +63,7 @@ pub(crate) struct SimulationCore {
     last_cycle_start: Option<Instant>,
     simulation_time_s: f64,
     pub(crate) online_optimization: Option<OnlineOptimizationSession>,
+    pub(crate) online_optimization_stop: Arc<AtomicBool>,
 }
 
 impl SimulationCore {
@@ -101,6 +106,7 @@ impl SimulationCore {
             last_cycle_start: None,
             simulation_time_s: 0.0,
             online_optimization: None,
+            online_optimization_stop: Arc::new(AtomicBool::new(false)),
             rng: SmallRng::seeded(),
             state: RuntimeState::Running,
             simulation: config.simulation.clone(),
@@ -177,10 +183,13 @@ impl SimulationCore {
         if self.online_optimization.is_some() {
             bail!("online optimization is already active");
         }
+        self.online_optimization_stop
+            .store(false, Ordering::Release);
         let (session, events) = OnlineOptimizationSession::new(
             config,
             &self.logic.current_params(),
             self.config.logic.cycle_ms,
+            Arc::clone(&self.online_optimization_stop),
         )?;
         self.online_optimization = Some(session);
         self.append_online_optimization_events(events)
@@ -254,6 +263,11 @@ impl SimulationCore {
             .store_signal_map_at(sample_timestamp_ms, "input", &inputs)?;
         self.last_inputs = inputs.clone();
 
+        if let Some(mut session) = self.online_optimization.take() {
+            let tick = session.pre_cycle(self.state, &inputs);
+            self.apply_online_optimization_tick(tick)?;
+            self.online_optimization = Some(session);
+        }
         let mut outputs = self.logic.step(&inputs, RuntimeState::Running)?;
         let user_logs = self.logic.drain_user_logs();
         apply_output_limits(&self.limits, &mut outputs);
@@ -273,7 +287,7 @@ impl SimulationCore {
         self.store_user_log_samples(sample_timestamp_ms, &user_logs)?;
         self.append_cycle_log(&inputs, &outputs, &user_logs)?;
         if let Some(mut session) = self.online_optimization.take() {
-            let tick = session.observe(self.state, &inputs);
+            let tick = session.observe(&inputs, &outputs);
             self.apply_online_optimization_tick(tick)?;
             self.online_optimization = Some(session);
         }
@@ -939,6 +953,8 @@ mod tests {
                 name: "y1".to_string(),
                 setpoint: String::new(),
                 process_value: String::new(),
+                hl: Some(100.0),
+                ll: Some(-100.0),
                 deadband_opc: None,
                 deadband_value: Some(0.05),
                 enable: None,
@@ -1013,6 +1029,8 @@ mod tests {
                 name: "y1".to_string(),
                 setpoint: String::new(),
                 process_value: String::new(),
+                hl: Some(100.0),
+                ll: Some(-100.0),
                 deadband_opc: None,
                 deadband_value: Some(0.05),
                 enable: None,

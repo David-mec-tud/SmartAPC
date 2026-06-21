@@ -868,6 +868,8 @@ mod tests {
                 name: "y1".to_string(),
                 setpoint: "ns=2;s=y1_setpoint".to_string(),
                 process_value: "ns=2;s=y1_ist".to_string(),
+                hl: Some(100.0),
+                ll: Some(-100.0),
                 deadband_opc: None,
                 deadband_value: Some(2.0),
                 enable: Some("ns=2;s=y1_enable".to_string()),

@@ -29,9 +29,11 @@ SmartAPC V1 is modular control software written in Rust for OT and industrial en
 - Interactive Plotly web view at `GET /plots`
 - Automatically follows the runtime or simulation
 - Online parameter optimization is available from the desktop setup sidebar while a runtime or
-  simulation is active. It applies Bayesian candidate updates live, evaluates weighted CV MSE over
-  a configured `HH:MM:SS` window, and restores the best-known parameters on completion or safety
-  interruption. Best values are persisted only through the explicit save action.
+  simulation is active. Its selectable objective combines weighted CV MSE terms with weighted
+  integral squared delta-MV terms over a configured `HH:MM:SS` window. CV objective limits are
+  initialized from predefined I/O LL/HL limits and may only be tightened. Normal completion applies
+  the best-known parameters; manual stop, execution stop, invalid data, or a CV safety-limit touch
+  restores the original parameters before the next controller calculation.
   - Uses locally bundled Plotly.js
   - Supports sliding windows, sortable MV/CV/DV panels, custom multi-trace plots, and MPC future predictions
 - Virtual hardware:

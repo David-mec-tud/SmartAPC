@@ -3,7 +3,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -84,6 +87,7 @@ struct RuntimeCore {
     last_io_cycle: Option<Instant>,
     last_controller_cycle: Option<Instant>,
     online_optimization: Option<OnlineOptimizationSession>,
+    online_optimization_stop: Arc<AtomicBool>,
 }
 
 impl RuntimeCore {
@@ -125,6 +129,7 @@ impl RuntimeCore {
             last_io_cycle: None,
             last_controller_cycle: None,
             online_optimization: None,
+            online_optimization_stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -188,10 +193,13 @@ impl RuntimeCore {
         if self.online_optimization.is_some() {
             bail!("online optimization is already active");
         }
+        self.online_optimization_stop
+            .store(false, Ordering::Release);
         let (session, events) = OnlineOptimizationSession::new(
             config,
             &self.logic.current_params(),
             self.config.logic.cycle_ms,
+            Arc::clone(&self.online_optimization_stop),
         )?;
         self.online_optimization = Some(session);
         self.append_online_optimization_events(events)
@@ -291,6 +299,11 @@ impl RuntimeCore {
 
         let mut user_logs: Vec<LogicUserLog> = Vec::new();
         if controller_due {
+            if let Some(mut session) = self.online_optimization.take() {
+                let tick = session.pre_cycle(self.state, &self.last_inputs);
+                self.apply_online_optimization_tick(tick)?;
+                self.online_optimization = Some(session);
+            }
             if self.state == RuntimeState::Running {
                 let mut outputs = self.logic.step(&self.last_inputs, self.state)?;
                 user_logs = self.logic.drain_user_logs();
@@ -305,7 +318,7 @@ impl RuntimeCore {
                 &user_logs,
             )?;
             if let Some(mut session) = self.online_optimization.take() {
-                let tick = session.observe(self.state, &self.last_inputs);
+                let tick = session.observe(&self.last_inputs, &self.last_outputs);
                 self.apply_online_optimization_tick(tick)?;
                 self.online_optimization = Some(session);
             }
@@ -490,12 +503,14 @@ enum ActiveHandle {
 #[derive(Default)]
 pub struct RuntimeManager {
     handle: Mutex<Option<ActiveHandle>>,
+    online_optimization_stop: Arc<AtomicBool>,
 }
 
 impl RuntimeManager {
     pub fn new() -> Self {
         Self {
             handle: Mutex::new(None),
+            online_optimization_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -528,18 +543,18 @@ impl RuntimeManager {
             .open(&log_path)
             .with_context(|| format!("failed to open runtime log '{}'", log_path.display()))?;
 
-        let core = Arc::new(Mutex::new(
-            RuntimeCore::new(
-                config.clone(),
-                adapter,
-                watchdog,
-                logic,
-                model,
-                storage,
-                log_file,
-            )
-            .await?,
-        ));
+        let mut core_value = RuntimeCore::new(
+            config.clone(),
+            adapter,
+            watchdog,
+            logic,
+            model,
+            storage,
+            log_file,
+        )
+        .await?;
+        core_value.online_optimization_stop = Arc::clone(&self.online_optimization_stop);
+        let core = Arc::new(Mutex::new(core_value));
 
         let (tx, mut rx) = oneshot::channel();
         let core_clone = Arc::clone(&core);
@@ -603,14 +618,10 @@ impl RuntimeManager {
             .open(&log_path)
             .with_context(|| format!("failed to open simulation log '{}'", log_path.display()))?;
 
-        let core = Arc::new(Mutex::new(SimulationCore::new(
-            config.clone(),
-            sim_io,
-            limits,
-            logic,
-            storage,
-            log_file,
-        )?));
+        let mut core_value =
+            SimulationCore::new(config.clone(), sim_io, limits, logic, storage, log_file)?;
+        core_value.online_optimization_stop = Arc::clone(&self.online_optimization_stop);
+        let core = Arc::new(Mutex::new(core_value));
 
         let (tx, mut rx) = oneshot::channel();
         let core_clone = Arc::clone(&core);
@@ -866,59 +877,9 @@ impl RuntimeManager {
         }
     }
 
-    pub async fn retry_online_optimization(&self) -> Result<OnlineOptimizationStatus> {
-        self.online_optimization_action("retry").await
-    }
-
-    pub async fn continue_online_optimization_with_penalty(
-        &self,
-    ) -> Result<OnlineOptimizationStatus> {
-        self.online_optimization_action("penalty").await
-    }
-
-    pub async fn stop_online_optimization(&self) -> Result<OnlineOptimizationStatus> {
-        self.online_optimization_action("stop").await
-    }
-
-    async fn online_optimization_action(&self, action: &str) -> Result<OnlineOptimizationStatus> {
-        let guard = self.handle.lock().await;
-        match guard.as_ref() {
-            Some(ActiveHandle::Runtime(handle)) => {
-                let mut core = handle.core.lock().await;
-                let mut session = core
-                    .online_optimization
-                    .take()
-                    .ok_or_else(|| anyhow!("online optimization is not active"))?;
-                let tick = match action {
-                    "retry" => session.retry()?,
-                    "penalty" => session.continue_with_penalty()?,
-                    "stop" => session.stop("stopped_by_user"),
-                    _ => bail!("unknown online optimization action"),
-                };
-                core.apply_online_optimization_tick(tick)?;
-                let status = session.status();
-                core.online_optimization = Some(session);
-                Ok(status)
-            }
-            Some(ActiveHandle::Simulation(handle)) => {
-                let mut core = handle.core.lock().await;
-                let mut session = core
-                    .online_optimization
-                    .take()
-                    .ok_or_else(|| anyhow!("online optimization is not active"))?;
-                let tick = match action {
-                    "retry" => session.retry()?,
-                    "penalty" => session.continue_with_penalty()?,
-                    "stop" => session.stop("stopped_by_user"),
-                    _ => bail!("unknown online optimization action"),
-                };
-                core.apply_online_optimization_tick(tick)?;
-                let status = session.status();
-                core.online_optimization = Some(session);
-                Ok(status)
-            }
-            None => bail!("runtime or simulation not running"),
-        }
+    pub async fn stop_online_optimization(&self) -> Result<()> {
+        self.online_optimization_stop.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub async fn read_plots(&self, limit: usize) -> Result<Vec<SignalSample>> {

@@ -1582,6 +1582,8 @@ mod tests {
             name: "y1".to_string(),
             setpoint: "ns=2;s=Y1_SETPOINT".to_string(),
             process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
+            hl: Some(100.0),
+            ll: Some(-100.0),
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
