@@ -96,3 +96,15 @@
   - strategy contract/compatibility logic
   - code-generation style
   - runtime logging behavior
+
+## 13. Web App Migration Skills
+- Reusable project skill sources:
+  - `skills/smartapc-web-ui/SKILL.md` -> React UI, navigation, and Plotly integration.
+  - `skills/smartapc-web-migration/SKILL.md` -> Rust service/API extraction and feature parity.
+- The full migration goal is in `docs/prompts/smartapc-web-app-goal.md`.
+- For that migration, use both skills and their relevant references. The target is a
+  locally served React web app with Rust/Axum as the only backend and Plotly retained.
+- Reorganizing setup, engineering, operation, and deployment does not change runtime
+  contracts or turn optional tuning/simulation into universal deployment prerequisites.
+- Update actual run/build instructions and quality gates alongside implementation;
+  the skill and goal files describe the target, not completed application behavior.

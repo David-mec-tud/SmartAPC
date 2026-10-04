@@ -1,0 +1,4 @@
+interface:
+  display_name: "SmartAPC Web UI"
+  short_description: "Design the SmartAPC React UI with Plotly"
+  default_prompt: "Use $smartapc-web-ui to build a polished SmartAPC browser interface while preserving Plotly and controller behavior."

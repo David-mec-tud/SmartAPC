@@ -1,0 +1,4 @@
+interface:
+  display_name: "SmartAPC Web Migration"
+  short_description: "Migrate SmartAPC to a Rust-backed web app"
+  default_prompt: "Use $smartapc-web-migration to migrate SmartAPC desktop workflows to Axum APIs and the React web app, preserving runtime contracts."
