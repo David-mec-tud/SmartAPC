@@ -141,8 +141,22 @@ The **Control Strategy** tab offers only strategies compatible with the current 
 - Online parameters:
   - Horizons: `mpc.prediction_horizon`, `mpc.control_horizon`
   - CV tuning: `mpc.cv.<cv>.q`, `mpc.cv.<cv>.band_low`, `mpc.cv.<cv>.band_high`
-  - MV tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`
+  - MV tuning: `mpc.mv.<mv>.r`, `mpc.mv.<mv>.max_delta_u`, `mpc.mv.<mv>.use_l1` (boolean, default `false`)
   - Kalman filter: `mpc.kalman.initial_p`, `mpc.kalman.state.<idx>.q`, `mpc.kalman.cv.<cv>.r`, `mpc.kalman.cv.<cv>.bias_q`
+
+Each MV has a **Movement cost** selector in Control Strategy and Online Parameters. The default
+**L2 — squared movement** applies `r * delta_u^2`, strongly penalizing large moves and favoring
+gradual adjustments. **L1 — absolute movement** applies `r * abs(delta_u)` and encourages zero
+moves. L1 charges by move size; it does not charge a fixed fee per switching event. Both retain
+quadratic CV tracking and use the same convex QP solver. The same `r` weight scales either mode,
+so changing modes may require retuning it; weights are not automatically rescaled.
+
+`mpc.mv.<mv>.use_l1 = true` selects L1 for that MV; `false` or a missing setting selects L2.
+Online changes use **Apply**, persist to the project, and take effect on the next controller
+calculation without resetting the Kalman observer. Manual parameter updates remain locked during
+online optimization. Numeric parameter optimization leaves the boolean norm choice fixed;
+offline actuator scoring and online delta-MV scoring continue to use squared movement regardless
+of the controller's selected norm.
 
 CV bands are relative to the live setpoint. Error inside the band is not penalized; error outside
 the band is optimized toward the nearest boundary. Runtime and simulation logs expose plot-ready

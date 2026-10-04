@@ -3785,6 +3785,34 @@ description = "SmartAPC controller runtime"
             .find(|row| row.key == "mpc.cv.y1.q")
             .expect("optimization q parameter");
         assert_eq!(q_row.start, 3.0);
+
+        assert_eq!(
+            cfg.logic.params["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(false)
+        );
+        cfg.logic
+            .params
+            .insert("mpc.mv.u1.use_l1".to_string(), LogicParamValue::Bool(true));
+        cfg.sync_active_online_params();
+        cfg.normalize_optimization_config();
+        assert_eq!(
+            cfg.logic.params["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        assert!(
+            !cfg.active_controller_f64_param_defaults()
+                .contains_key("mpc.mv.u1.use_l1")
+        );
+        assert!(
+            !cfg.online_optimization_param_defaults()
+                .contains_key("mpc.mv.u1.use_l1")
+        );
+        assert!(
+            !cfg.optimization
+                .parameters
+                .iter()
+                .any(|row| row.key == "mpc.mv.u1.use_l1")
+        );
     }
 
     #[test]

@@ -1069,5 +1069,58 @@ mod tests {
         let u = core.applied_mv.get("u1").copied().unwrap_or(0.0);
         assert!(y > 0.0);
         assert!(u > 0.0);
+
+        let before = core.current_params();
+        assert_eq!(before["mpc.mv.u1.use_l1"], LogicParamValue::Bool(false));
+        core.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::Bool(true),
+        )]))
+        .expect("live L1 selection");
+        assert_eq!(
+            core.current_params()["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        assert_eq!(core.current_params()["mpc.mv.u1.r"], before["mpc.mv.u1.r"]);
+        core.tick_once(None).expect("next cycle uses L1");
+        assert!(
+            core.last_outputs["mv.u1.write"]
+                .as_f64()
+                .unwrap()
+                .is_finite()
+        );
+        assert!(
+            core.set_params(HashMap::from([(
+                "mpc.mv.u1.use_l1".to_string(),
+                LogicParamValue::F64(1.0),
+            )]))
+            .is_err()
+        );
+        core.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::Bool(false),
+        )]))
+        .expect("live L2 selection");
+        core.tick_once(None).expect("next cycle uses L2");
+        core.log_file.flush().expect("flush logs");
+        let records: Vec<serde_json::Value> =
+            std::fs::read_to_string(temp.path().join("simulation.log"))
+                .expect("log")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("structured log"))
+                .collect();
+        let updates: Vec<_> = records
+            .iter()
+            .filter(|record| record["event"] == "simulation_online_params_update")
+            .collect();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(
+            updates[0]["updates"]["mpc.mv.u1.use_l1"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            updates[1]["updates"]["mpc.mv.u1.use_l1"],
+            serde_json::json!(false)
+        );
     }
 }

@@ -54,6 +54,9 @@
 - Keep online parameters limited to:
   - active logic parameters
   - active static I/O parameters (values without an OPC UA Node ID that are runtime-editable)
+- Linear MPC defaults to squared (L2) MV movement cost. Per-MV `mpc.mv.<name>.use_l1`
+  is a boolean manual/online selection for absolute (L1) movement cost and must stay out of
+  numeric parameter optimization. Offline/online tuning scores retain squared MV movement.
 - Ensure logging additions are structured and testable (runtime log entries must be machine-parseable).
 - Online optimization events must remain structured. Manual/safety/execution stops restore the
   original parameters before the next controller calculation; only normal convergence/completion

@@ -6,9 +6,7 @@ use osqp::{CscMatrix, Problem, Settings, Status};
 
 use crate::{
     logic::{ControlLogic, LogicMetadata, LogicUserLog, ParameterSchemaEntry},
-    project_config::{
-        LinearStateSpaceModelConfig, LogicParamType, LogicParamValue, VariableCatalogConfig,
-    },
+    project_config::{LinearStateSpaceModelConfig, LogicParamValue, VariableCatalogConfig},
     types::{RuntimeState, SignalValue},
 };
 
@@ -141,6 +139,14 @@ impl LinearMpcLogic {
     fn mv_weight(&self, mv: &str) -> f64 {
         self.f64_param(&format!("mpc.mv.{mv}.r"), DEFAULT_MV_R)
             .max(MIN_WEIGHT)
+    }
+
+    fn mv_uses_l1(&self, mv: &str) -> bool {
+        let key = format!("mpc.mv.{mv}.use_l1");
+        matches!(
+            self.params.get(&key).or_else(|| self.defaults.get(&key)),
+            Some(LogicParamValue::Bool(true))
+        )
     }
 
     fn max_delta_u(&self, mv: &str) -> f64 {
@@ -529,23 +535,63 @@ impl LinearMpcLogic {
             weighted_phi.row_mut(row).scale_mut(q_diag[row]);
         }
         let mut hessian = data.phi.transpose() * weighted_phi;
+        let mut l1_moves = Vec::new();
         for step in 0..control_horizon {
             for (mv_index, mv) in self.vars.mvs.iter().enumerate() {
                 let variable = step * mv_count + mv_index;
-                hessian[(variable, variable)] += self.mv_weight(mv);
+                if self.mv_uses_l1(mv) {
+                    l1_moves.push((variable, self.mv_weight(mv)));
+                } else {
+                    hessian[(variable, variable)] += self.mv_weight(mv);
+                }
             }
         }
-        let gradient = 2.0
+        let mut gradient = 2.0
             * data.phi.transpose()
             * DVector::from_iterator(
                 data.base_prediction.len(),
                 (0..data.base_prediction.len())
                     .map(|row| q_diag[row] * (data.base_prediction[row] - data.target[row])),
             );
-        let p = hessian * 2.0;
+        let mut p = hessian * 2.0;
 
-        let (constraint_matrix, lower, upper) =
+        let (mut constraint_matrix, mut lower, mut upper) =
             self.constraint_matrix(current_mv, limits, control_horizon);
+        if !l1_moves.is_empty() {
+            // Each L1 move gets an epigraph variable t >= |delta_u|. Its linear R*t
+            // cost preserves convexity without adding a squared move cost for that MV.
+            // Keep the original matrix construction unchanged for all-L2 projects.
+            let augmented_count = variable_count + l1_moves.len();
+            let original_rows = constraint_matrix.nrows();
+            let mut augmented_p = DMatrix::zeros(augmented_count, augmented_count);
+            augmented_p
+                .view_mut((0, 0), (variable_count, variable_count))
+                .copy_from(&p);
+            let mut augmented_gradient = DVector::zeros(augmented_count);
+            augmented_gradient
+                .rows_mut(0, variable_count)
+                .copy_from(&gradient);
+            let mut augmented_constraints =
+                DMatrix::zeros(original_rows + 2 * l1_moves.len(), augmented_count);
+            augmented_constraints
+                .view_mut((0, 0), (original_rows, variable_count))
+                .copy_from(&constraint_matrix);
+
+            for (index, &(variable, weight)) in l1_moves.iter().enumerate() {
+                let auxiliary = variable_count + index;
+                augmented_gradient[auxiliary] = weight;
+                for (offset, sign) in [(0, 1.0), (1, -1.0)] {
+                    let row = original_rows + 2 * index + offset;
+                    augmented_constraints[(row, variable)] = sign;
+                    augmented_constraints[(row, auxiliary)] = -1.0;
+                    lower.push(f64::NEG_INFINITY);
+                    upper.push(0.0);
+                }
+            }
+            p = augmented_p;
+            gradient = augmented_gradient;
+            constraint_matrix = augmented_constraints;
+        }
         let p_rows = p.nrows();
         let p_cols = p.ncols();
         let a_rows = constraint_matrix.nrows();
@@ -580,7 +626,8 @@ impl LinearMpcLogic {
             ),
             other => bail!("OSQP failed with status {other:?}"),
         };
-        let delta_u = solution;
+        // Auxiliary absolute-value variables are solver internals, not actuator moves.
+        let delta_u = solution[..variable_count].to_vec();
         let controlled_prediction =
             &data.base_prediction + &data.phi * DVector::from_vec(delta_u.clone());
 
@@ -844,7 +891,7 @@ impl ControlLogic for LinearMpcLogic {
                 Some(ParameterSchemaEntry {
                     description: linear_mpc_param_description(&name),
                     name,
-                    param_type: LogicParamType::F64,
+                    param_type: default.param_type(),
                     default,
                 })
             })
@@ -857,7 +904,11 @@ impl ControlLogic for LinearMpcLogic {
                 self.params.insert(key, value);
                 continue;
             }
-            if self.defaults.contains_key(&key) && value.matches_type(LogicParamType::F64) {
+            if self
+                .defaults
+                .get(&key)
+                .is_some_and(|default| value.matches_type(default.param_type()))
+            {
                 self.params.insert(key, value);
             }
         }
@@ -914,6 +965,7 @@ pub fn linear_mpc_default_params(
 
     for mv in &vars.mvs {
         defaults.insert(format!("mpc.mv.{mv}.r"), LogicParamValue::F64(DEFAULT_MV_R));
+        defaults.insert(format!("mpc.mv.{mv}.use_l1"), LogicParamValue::Bool(false));
         defaults.insert(
             format!("mpc.mv.{mv}.max_delta_u"),
             LogicParamValue::F64(DEFAULT_MAX_DELTA_U),
@@ -1015,7 +1067,10 @@ fn linear_mpc_param_description(name: &str) -> String {
     } else if name.contains(".cv.") && name.ends_with(".q") {
         "CV tracking weight outside the soft band".to_string()
     } else if name.contains(".mv.") && name.ends_with(".r") {
-        "MV move weight".to_string()
+        "MV move weight: scales the selected squared (L2) or absolute (L1) movement cost"
+            .to_string()
+    } else if name.contains(".mv.") && name.ends_with(".use_l1") {
+        "MV movement cost: false uses squared movement (L2); true uses absolute movement (L1). Changing modes may require retuning the move weight.".to_string()
     } else {
         format!("Linear MPC parameter '{name}'")
     }
@@ -1023,6 +1078,8 @@ fn linear_mpc_param_description(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::project_config::LogicParamType;
+
     use super::*;
 
     fn one_by_one_logic() -> LinearMpcLogic {
@@ -1041,6 +1098,202 @@ mod tests {
             dvs: Vec::new(),
         };
         LinearMpcLogic::new(model, vars, 1000, HashMap::new(), HashMap::new())
+    }
+
+    // Identity predictions isolate the move objective from discretization/observer behavior.
+    fn independent_move_problem(targets: &[f64]) -> MpcProblemData {
+        MpcProblemData {
+            base_prediction: DVector::zeros(targets.len()),
+            target: DVector::from_column_slice(targets),
+            phi: DMatrix::identity(targets.len(), targets.len()),
+            free_prediction: DVector::zeros(targets.len()),
+        }
+    }
+
+    #[test]
+    fn missing_and_explicit_l2_match_the_existing_squared_objective() {
+        let mut logic = one_by_one_logic();
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.r".to_string(),
+            LogicParamValue::F64(1.0),
+        )]));
+        let data = independent_move_problem(&[0.25]);
+        let missing = logic
+            .solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1)
+            .expect("L2");
+        // min (du - 0.25)^2 + du^2 has the analytical minimizer du = 0.125.
+        assert!((missing.delta_u[0] - 0.125).abs() < 1e-3);
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::Bool(false),
+        )]));
+        let explicit = logic
+            .solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1)
+            .expect("L2");
+        assert_eq!(missing.delta_u, explicit.delta_u);
+        assert_eq!(
+            missing.controlled_prediction,
+            explicit.controlled_prediction
+        );
+    }
+
+    #[test]
+    fn l1_matches_analytical_zero_threshold_and_signed_moves() {
+        let mut logic = one_by_one_logic();
+        logic.set_params(HashMap::from([
+            ("mpc.mv.u1.use_l1".to_string(), LogicParamValue::Bool(true)),
+            ("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0)),
+            (
+                "mpc.mv.u1.max_delta_u".to_string(),
+                LogicParamValue::F64(10.0),
+            ),
+        ]));
+        // min (du - target)^2 + |du| gives soft thresholding at |target| = 0.5.
+        for (target, expected) in [(0.25, 0.0), (-0.25, 0.0), (2.0, 1.5), (-2.0, -1.5)] {
+            let data = independent_move_problem(&[target]);
+            let solution = logic
+                .solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1)
+                .expect("L1");
+            assert_eq!(
+                solution.delta_u.len(),
+                1,
+                "exclude the absolute-value variable"
+            );
+            assert!(
+                (solution.delta_u[0] - expected).abs() < 2e-3,
+                "target={target}, solution={solution:?}"
+            );
+            assert!((solution.controlled_prediction[0] - expected).abs() < 2e-3);
+        }
+    }
+
+    #[test]
+    fn mixed_movement_costs_preserve_horizon_predictions_and_limits() {
+        let mut logic = one_by_one_logic();
+        logic.vars.mvs.push("u2".to_string());
+        logic.model.u_order.push("u2".to_string());
+        logic.model.b[0].push(1.0);
+        logic.model.d[0].push(0.0);
+        // Rebuild defaults for the added MV so online updates remain schema checked.
+        logic.defaults = linear_mpc_default_params(&logic.model, &logic.vars, &HashMap::new());
+        logic.set_params(HashMap::from([
+            ("mpc.mv.u1.use_l1".to_string(), LogicParamValue::Bool(true)),
+            ("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0)),
+            ("mpc.mv.u2.r".to_string(), LogicParamValue::F64(1.0)),
+            (
+                "mpc.mv.u1.max_delta_u".to_string(),
+                LogicParamValue::F64(10.0),
+            ),
+            (
+                "mpc.mv.u2.max_delta_u".to_string(),
+                LogicParamValue::F64(10.0),
+            ),
+        ]));
+        let data = independent_move_problem(&[0.25, 0.25, 2.0, 2.0]);
+        let solution = logic
+            .solve_mpc(&data, &[0.0, 0.0], &[(-10.0, 10.0); 2], 2)
+            .expect("mixed norms");
+        assert_eq!(solution.delta_u.len(), 4);
+        assert_eq!(solution.controlled_prediction.len(), 4);
+        for (actual, expected) in solution.delta_u.iter().zip([0.0, 0.125, 1.5, 1.0]) {
+            assert!((actual - expected).abs() < 2e-3, "solution={solution:?}");
+        }
+        assert_eq!(
+            solution.controlled_prediction.as_slice(),
+            solution.delta_u.as_slice()
+        );
+
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.max_delta_u".to_string(),
+            LogicParamValue::F64(0.1),
+        )]));
+        let constrained = logic
+            .solve_mpc(
+                &independent_move_problem(&[2.0; 4]),
+                &[0.0, 0.0],
+                &[(-0.4, 0.4), (-0.3, 0.3)],
+                2,
+            )
+            .expect("constrained mixed norms");
+        for (actual, expected) in constrained.delta_u.iter().zip([0.1, 0.15, 0.1, 0.15]) {
+            assert!((actual - expected).abs() < 2e-3, "solution={constrained:?}");
+        }
+    }
+
+    #[test]
+    fn movement_cost_parameter_uses_a_boolean_schema_and_rejects_wrong_types() {
+        let mut logic = one_by_one_logic();
+        let entry = logic
+            .parameter_schema()
+            .into_iter()
+            .find(|entry| entry.name == "mpc.mv.u1.use_l1")
+            .expect("norm schema");
+        assert_eq!(entry.param_type, LogicParamType::Bool);
+        assert_eq!(entry.default, LogicParamValue::Bool(false));
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::F64(1.0),
+        )]));
+        assert_eq!(
+            logic.current_params()["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(false)
+        );
+        logic.set_params(HashMap::from([
+            ("mpc.mv.u1.use_l1".to_string(), LogicParamValue::Bool(true)),
+            ("mpc.mv.u1.r".to_string(), LogicParamValue::Bool(true)),
+        ]));
+        assert_eq!(
+            logic.current_params()["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        assert_eq!(
+            logic.current_params()["mpc.mv.u1.r"],
+            LogicParamValue::F64(DEFAULT_MV_R)
+        );
+    }
+
+    #[test]
+    fn live_movement_cost_change_applies_without_resetting_the_observer() {
+        let mut logic = one_by_one_logic();
+        // Pure feedthrough makes each commanded move's cost analytically observable.
+        logic.model.c[0][0] = 0.0;
+        logic.model.b[0][0] = 0.0;
+        logic.model.d[0][0] = 1.0;
+        logic.set_params(HashMap::from([
+            (
+                "mpc.prediction_horizon".to_string(),
+                LogicParamValue::F64(1.0),
+            ),
+            ("mpc.control_horizon".to_string(), LogicParamValue::F64(1.0)),
+            ("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0)),
+        ]));
+        let inputs = HashMap::from([
+            ("cv.y1.setpoint".to_string(), SignalValue::F64(0.25)),
+            ("cv.y1.process_value".to_string(), SignalValue::F64(0.0)),
+            ("mv.u1.read".to_string(), SignalValue::F64(0.0)),
+        ]);
+        let l2 = logic.step(&inputs, RuntimeState::Running).expect("L2 step");
+        assert!((l2["mv.u1.write"].as_f64().unwrap() - 0.125).abs() < 1e-3);
+        let before = logic.clone();
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::Bool(true),
+        )]));
+        assert!(logic.initialized);
+        assert_eq!(logic.x_hat, before.x_hat);
+        assert_eq!(logic.y_bias, before.y_bias);
+        assert_eq!(logic.covariance, before.covariance);
+        assert_eq!(logic.last_mv, before.last_mv);
+        let l1 = logic.step(&inputs, RuntimeState::Running).expect("L1 step");
+        assert!(l1["mv.u1.write"].as_f64().unwrap().abs() < 2e-3);
+        logic.set_params(HashMap::from([(
+            "mpc.mv.u1.use_l1".to_string(),
+            LogicParamValue::Bool(false),
+        )]));
+        let l2_again = logic
+            .step(&inputs, RuntimeState::Running)
+            .expect("L2 again");
+        assert!((l2_again["mv.u1.write"].as_f64().unwrap() - 0.125).abs() < 1e-3);
     }
 
     #[test]

@@ -684,6 +684,44 @@ impl From<LogicKindChoice> for LogicKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MovementCostChoice {
+    L2,
+    L1,
+}
+
+impl MovementCostChoice {
+    const ALL: [Self; 2] = [Self::L2, Self::L1];
+
+    fn from_input(raw: &str) -> Self {
+        if parse_bool(raw).unwrap_or(false) {
+            Self::L1
+        } else {
+            Self::L2
+        }
+    }
+
+    // The UI presents named norms; persistence and the online API use a typed boolean.
+    fn parameter_input(self) -> String {
+        (self == Self::L1).to_string()
+    }
+}
+
+impl fmt::Display for MovementCostChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::L2 => write!(f, "L2 — squared movement"),
+            Self::L1 => write!(f, "L1 — absolute movement"),
+        }
+    }
+}
+
+const MOVEMENT_COST_HELP: &str = "Movement cost is selected independently for each MV. L2 strongly penalizes large moves and favors gradual adjustments. L1 encourages zero moves but charges by move size, not by switching events. Changing modes may require retuning the move weight (r).";
+
+fn is_mpc_movement_cost_param(key: &str) -> bool {
+    key.starts_with("mpc.mv.") && key.ends_with(".use_l1")
+}
+
 #[derive(Debug, Clone)]
 struct PPairEditorRow {
     cv: String,
@@ -4584,7 +4622,7 @@ impl DesktopApp {
         content = content
             .push(text("Objective").size(18))
             .push(
-                text("ISE, IAE, ITAE, and overshoot weights choose the tracking-error metric mix. Actuator weight penalizes MV movement. CV channel weights make one controlled variable count more than another in the weighted mean target.")
+                text("ISE, IAE, ITAE, and overshoot weights choose the tracking-error metric mix. Actuator weight penalizes squared MV movement, including when the controller uses L1. CV channel weights make one controlled variable count more than another in the weighted mean target.")
                     .size(13),
             )
             .push(
@@ -4820,7 +4858,7 @@ impl DesktopApp {
         let can_edit = !active;
         let mut content = column![
             text("Online Parameter Optimization").size(26),
-            text("Bayesian optimization against the active runtime or simulation. Add CV tracking and delta-MV movement terms to build the objective.").size(14),
+            text("Bayesian optimization against the active runtime or simulation. Add CV tracking and squared delta-MV movement terms to build the objective. This scoring remains squared when an MV uses L1 in the controller.").size(14),
         ]
         .spacing(12);
 
@@ -5986,6 +6024,7 @@ impl DesktopApp {
             content = content.push(text(
                 "These values become online parameters when saved and remain editable during execution.",
             ).size(14));
+            content = content.push(text(MOVEMENT_COST_HELP).size(13));
 
             if self.logic_editor.mpc_params.is_empty() {
                 content = content.push(text(
@@ -6029,14 +6068,35 @@ impl DesktopApp {
                             ..
                         } => {
                             let row_data = &self.logic_editor.mpc_params[index];
+                            let movement_cost = is_mpc_movement_cost_param(&row_data.key);
+                            let editor: Element<'_, Message> = if movement_cost {
+                                pick_list(
+                                    MovementCostChoice::ALL,
+                                    Some(MovementCostChoice::from_input(&row_data.value)),
+                                    move |choice| {
+                                        Message::MpcParamChanged(index, choice.parameter_input())
+                                    },
+                                )
+                                .width(Length::FillPortion(1))
+                                .into()
+                            } else {
+                                text_input("value", &row_data.value)
+                                    .on_input(move |value| Message::MpcParamChanged(index, value))
+                                    .width(Length::FillPortion(1))
+                                    .into()
+                            };
                             content = content.push(
                                 row![
-                                    parameter_leaf(&label, depth, Length::FillPortion(2)),
-                                    text_input("value", &row_data.value)
-                                        .on_input(move |value| Message::MpcParamChanged(
-                                            index, value
-                                        ))
-                                        .width(Length::FillPortion(1)),
+                                    parameter_leaf(
+                                        if movement_cost {
+                                            "Movement cost"
+                                        } else {
+                                            &label
+                                        },
+                                        depth,
+                                        Length::FillPortion(2)
+                                    ),
+                                    editor,
                                 ]
                                 .spacing(8)
                                 .align_y(iced::Alignment::Center),
@@ -6252,6 +6312,7 @@ impl DesktopApp {
 
     fn params_view(&self) -> Element<'_, Message> {
         let execution_active = self.execution_active();
+        let can_apply = execution_active && !self.online_optimization_active();
         let mut content = column![text("Online Parameters").size(20)].spacing(10);
 
         if self.has_configured_variables() {
@@ -6266,6 +6327,13 @@ impl DesktopApp {
         if self.logic_params.is_empty() {
             content = content.push(text("No parameters available."));
         } else {
+            if self
+                .logic_params
+                .keys()
+                .any(|key| is_mpc_movement_cost_param(key))
+            {
+                content = content.push(text(MOVEMENT_COST_HELP).size(13));
+            }
             let scope = ParameterHierarchyScope::Online;
             let hierarchy = visible_parameter_hierarchy(
                 parameter_hierarchy(
@@ -6302,22 +6370,55 @@ impl DesktopApp {
                             .unwrap_or_else(|| format_logic_param_value(&current));
                         let key_clone = key.clone();
 
-                        let apply_button = if execution_active {
+                        let apply_button = if can_apply {
                             button("Apply").on_press(Message::ApplyParamPressed(key_clone))
                         } else {
                             button("Apply")
                         };
 
+                        let movement_cost = is_mpc_movement_cost_param(&key)
+                            && matches!(current, LogicParamValue::Bool(_));
+                        let current_label = if movement_cost {
+                            MovementCostChoice::from_input(&format_logic_param_value(&current))
+                                .to_string()
+                        } else {
+                            format_logic_param_value(&current)
+                        };
+                        let editor: Element<'_, Message> = if movement_cost {
+                            pick_list(
+                                MovementCostChoice::ALL,
+                                Some(MovementCostChoice::from_input(&input_value)),
+                                move |choice| {
+                                    Message::ParamInputChanged(
+                                        key.clone(),
+                                        choice.parameter_input(),
+                                    )
+                                },
+                            )
+                            .width(Length::FillPortion(2))
+                            .into()
+                        } else {
+                            text_input("New value", &input_value)
+                                .on_input(move |value| {
+                                    Message::ParamInputChanged(key.clone(), value)
+                                })
+                                .width(Length::FillPortion(2))
+                                .into()
+                        };
+
                         content = content.push(
                             row![
-                                parameter_leaf(&label, depth, Length::FillPortion(2)),
-                                text(format_logic_param_value(&current))
-                                    .width(Length::FillPortion(1)),
-                                text_input("New value", &input_value)
-                                    .on_input(move |value| {
-                                        Message::ParamInputChanged(key.clone(), value)
-                                    })
-                                    .width(Length::FillPortion(2)),
+                                parameter_leaf(
+                                    if movement_cost {
+                                        "Movement cost"
+                                    } else {
+                                        &label
+                                    },
+                                    depth,
+                                    Length::FillPortion(2)
+                                ),
+                                text(current_label).width(Length::FillPortion(1)),
+                                editor,
                                 apply_button,
                             ]
                             .spacing(10)
@@ -6648,6 +6749,24 @@ fn parse_logic_param_input(
             .map(LogicParamValue::Bool)
             .ok_or_else(|| "Expected a boolean value: true, false, 1, or 0".to_string()),
     }
+}
+
+fn parse_mpc_initial_params(
+    rows: &[MpcParamEditorRow],
+    defaults: &HashMap<String, LogicParamValue>,
+) -> Result<HashMap<String, LogicParamValue>, String> {
+    rows.iter()
+        .map(|row| {
+            let key = row.key.trim();
+            let default = defaults
+                .get(key)
+                .ok_or_else(|| format!("Unknown Linear MPC initial parameter '{key}'"))?;
+            let value = parse_logic_param_input(default, &row.value).map_err(|error| {
+                format!("Invalid Linear MPC initial value for '{key}': {error}")
+            })?;
+            Ok((key.to_string(), value))
+        })
+        .collect()
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -7999,15 +8118,11 @@ fn save_logic_task(
                             .to_string(),
                     );
                 }
-                for row in editor.mpc_params {
-                    let key = row.key.trim();
-                    let value = row.value.trim().parse::<f64>().map_err(|_| {
-                        format!("Invalid Linear MPC initial value for '{}'", row.key)
-                    })?;
-                    cfg.logic
-                        .params
-                        .insert(key.to_string(), LogicParamValue::F64(value));
-                }
+                // Synchronization supplies the expected type even for newly added parameters.
+                cfg.sync_active_online_params();
+                let initial_params =
+                    parse_mpc_initial_params(&editor.mpc_params, &cfg.logic.params)?;
+                cfg.logic.params.extend(initial_params);
             }
             cfg.sync_active_online_params();
 
@@ -9885,13 +10000,13 @@ mod tests {
     };
 
     use super::{
-        LogicEditorState, ModelEditorState, ModelKindChoice, OnlineOptimizationEditorState,
-        ParameterHierarchyItem, ParameterHierarchyScope, SimulationEditorState,
-        build_model_config_from_editor, build_simulation_config_from_editor, format_duration_hms,
-        parameter_heading_label, parameter_heading_size, parameter_hierarchy,
+        LogicEditorState, ModelEditorState, ModelKindChoice, MovementCostChoice,
+        OnlineOptimizationEditorState, ParameterHierarchyItem, ParameterHierarchyScope,
+        SimulationEditorState, build_model_config_from_editor, build_simulation_config_from_editor,
+        format_duration_hms, parameter_heading_label, parameter_heading_size, parameter_hierarchy,
         parameter_hierarchy_indent_px, parameter_leaf_label, parse_duration_hms,
-        parse_matrix_import_text, resize_string_matrix, sync_io_initial_value_online_params,
-        visible_parameter_hierarchy,
+        parse_matrix_import_text, parse_mpc_initial_params, resize_string_matrix,
+        sync_io_initial_value_online_params, visible_parameter_hierarchy,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -10205,7 +10320,42 @@ mod tests {
         assert_eq!(value_for("mpc.cv.y1.band_low"), "-0.2500");
         assert_eq!(value_for("mpc.cv.y1.band_high"), "0.2500");
         assert_eq!(value_for("mpc.mv.u1.max_delta_u"), "1.0000");
+        assert_eq!(value_for("mpc.mv.u1.use_l1"), "false");
         assert_eq!(value_for("mpc.kalman.state.2.q"), "0.0001");
+
+        let mut typed_cfg = cfg.clone();
+        typed_cfg.sync_active_online_params();
+        let mut edited_rows = editor.mpc_params.clone();
+        let norm_row = edited_rows
+            .iter_mut()
+            .find(|row| row.key == "mpc.mv.u1.use_l1")
+            .expect("norm row");
+        norm_row.value = MovementCostChoice::L1.parameter_input();
+        let parsed = parse_mpc_initial_params(&edited_rows, &typed_cfg.logic.params)
+            .expect("typed initial values");
+        assert_eq!(parsed["mpc.mv.u1.use_l1"], LogicParamValue::Bool(true));
+        assert_eq!(parsed["mpc.cv.y1.q"], LogicParamValue::F64(4.2));
+        typed_cfg.logic.params.extend(parsed);
+        let saved_editor = LogicEditorState::from_config(&typed_cfg);
+        let saved_norm = saved_editor
+            .mpc_params
+            .iter()
+            .find(|row| row.key == "mpc.mv.u1.use_l1")
+            .expect("saved norm");
+        assert_eq!(
+            MovementCostChoice::from_input(&saved_norm.value),
+            MovementCostChoice::L1
+        );
+        assert_eq!(
+            MovementCostChoice::from_input("false"),
+            MovementCostChoice::L2
+        );
+        edited_rows
+            .iter_mut()
+            .find(|row| row.key == "mpc.mv.u1.use_l1")
+            .unwrap()
+            .value = "L1".to_string();
+        assert!(parse_mpc_initial_params(&edited_rows, &typed_cfg.logic.params).is_err());
     }
 
     #[test]

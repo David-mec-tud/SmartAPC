@@ -1614,6 +1614,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linear_mpc_movement_cost_api_is_boolean_live_and_persisted() {
+        let dir = tempdir().expect("tmp");
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("mpc_norm").expect("create");
+        configure_simulation_project(&projects, "mpc_norm");
+        let mut cfg = projects.load_config("mpc_norm").expect("config");
+        cfg.communication.endpoint_url = "mock://web-mpc-norm".to_string();
+        cfg.watchdog = WatchdogConfig::None;
+        cfg.logic.kind = LogicKind::LinearMpc;
+        let Some(ModelConfig::LinearStateSpace { model }) = cfg.model.as_mut() else {
+            panic!("linear model");
+        };
+        // A pure feedthrough model gives a known one-step solution for both norms.
+        model.b[0][0] = 0.0;
+        model.c[0][0] = 0.0;
+        model.d[0][0] = 1.0;
+        cfg.logic.params = HashMap::from([
+            (
+                "mpc.prediction_horizon".to_string(),
+                LogicParamValue::F64(1.0),
+            ),
+            ("mpc.control_horizon".to_string(), LogicParamValue::F64(1.0)),
+            ("mpc.mv.u1.r".to_string(), LogicParamValue::F64(1.0)),
+        ]);
+        projects.save_config("mpc_norm", &cfg).expect("save MPC");
+        let runtime = Arc::new(RuntimeManager::new());
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: runtime.clone(),
+            executable_path: std::env::current_exe().expect("exe"),
+        }))
+        .expect("server");
+        let start = server
+            .post("/api/runtime/start")
+            .json(&serde_json::json!({"project_name": "mpc_norm"}))
+            .await;
+        start.assert_status_ok();
+        let params: HashMap<String, LogicParamValue> =
+            server.get("/api/runtime/params").await.json();
+        assert_eq!(params["mpc.mv.u1.use_l1"], LogicParamValue::Bool(false));
+
+        let inputs = serde_json::json!({"inputs": {
+            "cv.y1.setpoint": {"kind": "f64", "value": 0.25},
+            "cv.y1.process_value": {"kind": "f64", "value": 0.0},
+            "mv.u1.read": {"kind": "f64", "value": 0.0}
+        }});
+        let l2_response = server.post("/api/simulate/step").json(&inputs).await;
+        l2_response.assert_status_ok();
+        let l2: SimulateResponse = l2_response.json();
+        assert!((l2.outputs["mv.u1.write"].as_f64().unwrap() - 0.125).abs() < 1e-3);
+
+        let update = server
+            .put("/api/runtime/params")
+            .json(&serde_json::json!({"params": {"mpc.mv.u1.use_l1": true}}))
+            .await;
+        update.assert_status_ok();
+        let updated: HashMap<String, LogicParamValue> = update.json();
+        assert_eq!(updated["mpc.mv.u1.use_l1"], LogicParamValue::Bool(true));
+        let saved = projects.load_config("mpc_norm").expect("reload");
+        assert_eq!(
+            saved.logic.params["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        let l1_response = server.post("/api/simulate/step").json(&inputs).await;
+        l1_response.assert_status_ok();
+        let l1: SimulateResponse = l1_response.json();
+        assert!(l1.outputs["mv.u1.write"].as_f64().unwrap().abs() < 2e-3);
+
+        let wrong_type = server
+            .put("/api/runtime/params")
+            .json(&serde_json::json!({"params": {"mpc.mv.u1.use_l1": 1.0}}))
+            .await;
+        let error: serde_json::Value = wrong_type.json();
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error")
+                .contains("type mismatch")
+        );
+        assert_eq!(
+            runtime.get_params().await.expect("params")["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+
+        runtime.stop().await.expect("stop");
+        runtime.start(&projects, "mpc_norm").await.expect("restart");
+        assert_eq!(
+            runtime.get_params().await.expect("restored params")["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        runtime.stop().await.expect("stop restart");
+    }
+
+    #[tokio::test]
     async fn project_api_roundtrip_and_param_persist() {
         let dir = tempdir().expect("tmp");
         let projects = ProjectService::new(dir.path());

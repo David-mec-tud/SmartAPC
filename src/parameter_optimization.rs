@@ -546,7 +546,8 @@ fn run_step_response(
             if let Some(value) = outputs.get(&key).and_then(SignalValue::as_f64) {
                 let previous = applied_mv.get(mv).copied().unwrap_or(0.0);
                 let delta = value - previous;
-                // Match the Linear MPC R term: penalize actuator movement, not noisy readback.
+                // The tuning metric stays squared even when an MV uses L1 in the controller.
+                // Score applied actuator movement rather than noisy readback.
                 actuator += delta * delta * dt_s;
                 applied_mv.insert(mv.clone(), value);
             }
