@@ -195,5 +195,6 @@ complete only when the main application works fully through the browser, existin
 projects remain usable, domain behavior is preserved and the required checks pass.
 If an external blocker prevents completion or validation, preserve progress and
 report the blocker and remaining work without presenting partial work as complete.
-Ask whether I want to commit the finished changes; do not commit or rewrite history
-automatically.
+Commit task-related changes before finishing, without asking for confirmation.
+Follow repository commit conventions, preserve unrelated changes, and do not rewrite
+history unless explicitly requested.

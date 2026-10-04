@@ -37,7 +37,8 @@
 - Prefer clear names and small composable functions over dense logic.
 - Add high-signal comments for non-obvious behavior, contracts, and data flow.
 - Generated templates/scaffolds must include usage-oriented comments, not just placeholders.
-- Ask whether the user wants to commit after finishing the task.
+- Always commit task-related changes before finishing, without asking for confirmation.
+  Run the required gates first and keep unrelated user changes out of the commit.
 
 ## 6. Commit Conventions
 - Prefer multiple clean commits grouped by subsystem/behavior.

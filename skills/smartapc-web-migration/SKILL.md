@@ -86,5 +86,5 @@ assets and headless virtual hardware. Use temporary test projects for smoke test
 
 Update README, AGENTS, API/run/build documentation, and packaging instructions when
 their workflows change. Report remaining gaps honestly; screenshots or a green
-build alone are not feature parity. Follow the repository's commit convention and
-ask about committing after the authorized work is complete.
+build alone are not feature parity. Follow the current checkout's commit policy
+after the required gates; commit only task-related changes and preserve unrelated work.
