@@ -16,19 +16,19 @@ const DEFAULT_NUMERIC_SAMPLES: usize = 3;
 const MAX_FULL_FACTORIAL_CASES: usize = 4_096;
 const MAX_PREVIEW_CASES: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SweepDimensionKind {
     Input,
     Parameter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SweepValueKind {
     F64,
     Bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DefaultSweepDimension {
     pub kind: SweepDimensionKind,
     pub name: String,
@@ -39,14 +39,14 @@ pub struct DefaultSweepDimension {
     pub default_samples: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NumericSweepConfig {
     pub min: f64,
     pub max: f64,
     pub samples: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SweepSelection {
     pub kind: SweepDimensionKind,
     pub name: String,
@@ -54,13 +54,13 @@ pub struct SweepSelection {
     pub numeric: Option<NumericSweepConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SweepExecutionMode {
     FullFactorial,
     SingleAxisFallback,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SweepExecutionSummary {
     pub mode: SweepExecutionMode,
     pub full_factorial_case_count: usize,
@@ -72,21 +72,21 @@ pub struct SweepExecutionSummary {
     pub total_wall_time_ms: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaseCountSummary {
     pub ok_cases: usize,
     pub warning_cases: usize,
     pub error_cases: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutputValidationSummary {
     pub invalid_output_cases: usize,
     pub out_of_limit_cases: usize,
     pub unexpected_output_cases: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CasePreview {
     pub label: String,
     pub duration_us: u64,
@@ -94,7 +94,7 @@ pub struct CasePreview {
     pub details: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ControlFunctionTestReport {
     pub execution: SweepExecutionSummary,
     pub counts: CaseCountSummary,

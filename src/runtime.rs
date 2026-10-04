@@ -52,6 +52,7 @@ pub struct RuntimeMetrics {
 pub struct RuntimeSnapshot {
     pub project_name: String,
     pub state: RuntimeState,
+    pub connection_health: HealthStatus,
     pub watchdog_status: WatchdogStatus,
     pub metrics: RuntimeMetrics,
     pub last_inputs: HashMap<String, SignalValue>,
@@ -137,6 +138,7 @@ impl RuntimeCore {
         RuntimeSnapshot {
             project_name: self.config.name.clone(),
             state: self.state,
+            connection_health: self.protocol.health(),
             watchdog_status: self.watchdog_status.clone(),
             metrics: RuntimeMetrics {
                 total_cycles: self.total_cycles,

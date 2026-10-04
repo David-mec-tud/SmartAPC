@@ -31,6 +31,11 @@
   - `cargo check`
   - `cargo test`
 - If a gate cannot run, document why and what remains unverified.
+- For browser application changes also run `npm run typecheck`, `npm run build`,
+  and `npm test` in `frontend/`. Use `npm run test:e2e` for meaningful browser
+  workflows against the isolated Rust backend, with Node.js 22 or newer.
+  Track full migration evidence in `docs/web-migration-coverage.md`; keep native
+  helpers until demonstrated parity permits removing their default dependencies.
 
 ## 5. Code Readability & Onboarding (Must)
 - Generated code must be commented and easy to read for fast onboarding.

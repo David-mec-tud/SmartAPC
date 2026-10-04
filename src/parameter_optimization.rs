@@ -27,7 +27,7 @@ use crate::{
 const LARGE_PENALTY: f64 = 1.0e18;
 const BO_SEED: u64 = 0x5A17_0A9C_D15C_A11E;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct OptimizationProgress {
     pub iteration: usize,
     pub max_iterations: usize,
@@ -42,7 +42,7 @@ pub struct OptimizationProgress {
     pub curves: Option<OptimizationCurveFamily>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct OptimizationReport {
     pub best_score: f64,
     pub best_mean_score: f64,
@@ -61,32 +61,32 @@ pub enum OptimizationEvent {
     Finished(Result<OptimizationReport, String>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OptimizationCurveFamily {
     pub cvs: Vec<CvCurveFamily>,
     pub inputs: Vec<InputCurveFamily>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CvCurveFamily {
     pub cv: String,
     pub target: f64,
     pub scenarios: Vec<StepResponseCurve>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct InputCurveFamily {
     pub input: String,
     pub scenarios: Vec<StepResponseCurve>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StepResponseCurve {
     pub scenario_index: usize,
     pub points: Vec<(f64, f64)>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct StepMetrics {
     pub ise: f64,
     pub iae: f64,

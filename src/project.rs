@@ -71,6 +71,7 @@ impl ProjectService {
     }
 
     pub fn load_config(&self, project_name: &str) -> Result<ProjectConfig> {
+        validate_project_name(project_name)?;
         let path = self.config_path(project_name);
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed reading config file '{}'", path.display()))?;
@@ -78,6 +79,10 @@ impl ProjectService {
     }
 
     pub fn save_config(&self, project_name: &str, cfg: &ProjectConfig) -> Result<()> {
+        validate_project_name(project_name)?;
+        if cfg.name != project_name {
+            bail!("configuration name does not match selected project");
+        }
         let mut normalized = cfg.clone();
         normalized.normalize_plot_config();
         normalized.normalize_model_config();
@@ -90,7 +95,10 @@ impl ProjectService {
         fs::create_dir_all(&dir)?;
 
         let encoded = to_toml_string(&normalized)?;
-        fs::write(self.config_path(project_name), encoded)?;
+        // Readers see a complete TOML document even while another browser reloads.
+        let temporary = dir.join(format!(".project-{}.tmp", uuid::Uuid::new_v4()));
+        fs::write(&temporary, encoded)?;
+        fs::rename(&temporary, self.config_path(project_name))?;
         Ok(())
     }
 

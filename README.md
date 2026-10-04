@@ -50,6 +50,29 @@ control cycle. The production runtime does not simulate the plant internally.
 
 ## Build, Test, and Run
 
+### Browser workspace migration (October 2026)
+
+The React/TypeScript workspace now runs through the Rust/Axum backend. Build its
+local assets before using `serve`:
+
+```sh
+cd frontend
+npm ci
+npm run build
+cd ..
+cargo run -- serve --project-root ./projects
+```
+
+Open `http://127.0.0.1:8080`. Use Node.js 22 or newer for frontend development and
+tests. The deployed frontend uses locally packaged assets and requires no Node
+process or CDN. The full migration and feature-parity audit are still in progress;
+native helpers and their build dependencies remain available during the transition.
+See [web development, production assets and API contracts](docs/web-application.md)
+and [migration coverage](docs/web-migration-coverage.md) for current evidence and
+remaining work. The browser deployment page validates saved strategy requirements
+and generates local/Windows commands; it does not claim installed Windows service
+support. The native deployment page remains a placeholder.
+
 ```bash
 cargo test
 cargo run -- desktop

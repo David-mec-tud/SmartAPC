@@ -2,9 +2,9 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -29,8 +29,11 @@ pub struct AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let engineering = crate::engineering::EngineeringService::default();
+    let assets = crate::web_assets::FrontendAssets::locate(&state.executable_path);
     Router::new()
-        .route("/", get(index_page))
+        .route("/", get(crate::web_assets::spa))
+        .route("/legacy", get(index_page))
         .route("/plots", get(plots_page))
         .route("/kalman-tuning", get(kalman_tuning_page))
         .route("/assets/plotly-2.35.2.min.js", get(plotly_asset))
@@ -73,6 +76,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/simulate/step", post(simulate_step))
         .route("/api/deployment/commands", get(get_deployment_commands))
+        .merge(crate::web_api::router())
+        .fallback(crate::web_assets::spa)
+        .layer(Extension(assets))
+        .layer(Extension(engineering))
         .with_state(state)
 }
 
@@ -1279,18 +1286,45 @@ async fn list_projects(State(state): State<AppState>) -> Result<Json<Vec<String>
 async fn get_project_config(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<ProjectConfig>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let cfg = state.project_service.load_config(&name)?;
-    Ok(Json(cfg))
+    let revision = crate::engineering::config_revision(&state.project_service, &name)?;
+    Ok(([(header::ETAG, revision)], Json(cfg)))
 }
 
 async fn update_project_config(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
     Path(name): Path<String>,
-    Json(cfg): Json<ProjectConfig>,
-) -> Result<Json<ProjectConfig>, AppError> {
+    headers: HeaderMap,
+    Json(mut cfg): Json<ProjectConfig>,
+) -> Result<impl IntoResponse, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    engineering.require_editable(&state.runtime, &name).await?;
+    let revision = crate::engineering::config_revision(&state.project_service, &name)?;
+    if headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        != Some(revision.as_str())
+    {
+        return Err(AppError::status(
+            StatusCode::PRECONDITION_FAILED,
+            "saved project changed; reload before saving this draft",
+        ));
+    }
+    let previous = state.project_service.load_config(&name)?;
+    if serde_json::to_value(&previous.io_definition)? != serde_json::to_value(&cfg.io_definition)?
+        || serde_json::to_value(&previous.variables)? != serde_json::to_value(&cfg.variables)?
+    {
+        cfg.rebuild_runtime_io_from_definition()?;
+        cfg.sync_cv_band_initial_values(&previous.io_definition);
+    }
+    cfg.normalize_model_config();
+    cfg.sync_active_online_params();
     state.project_service.save_config(&name, &cfg)?;
-    Ok(Json(cfg))
+    let saved = state.project_service.load_config(&name)?;
+    let revision = crate::engineering::config_revision(&state.project_service, &name)?;
+    Ok(([(header::ETAG, revision)], Json(saved)))
 }
 
 async fn get_project_plots_config(
@@ -1303,9 +1337,17 @@ async fn get_project_plots_config(
 
 async fn update_project_plots_config(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
     Path(name): Path<String>,
     Json(cfg): Json<PlotConfig>,
 ) -> Result<Json<PlotConfig>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    if engineering.project_busy(&name) {
+        return Err(AppError::status(
+            StatusCode::CONFLICT,
+            "plot settings are locked while an engineering job is running",
+        ));
+    }
     let saved = state.project_service.update_plot_config(&name, cfg)?;
     Ok(Json(saved))
 }
@@ -1325,8 +1367,13 @@ struct StartRuntimeRequest {
 
 async fn start_runtime(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
     Json(req): Json<StartRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    engineering
+        .require_editable(&state.runtime, &req.project_name)
+        .await?;
     state
         .runtime
         .start(&state.project_service, &req.project_name)
@@ -1336,15 +1383,24 @@ async fn start_runtime(
     ))
 }
 
-async fn stop_runtime(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+async fn stop_runtime(
+    State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
     state.runtime.stop().await?;
     Ok(Json(serde_json::json!({"status": "stopped"})))
 }
 
 async fn start_simulation(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
     Json(req): Json<StartRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    engineering
+        .require_editable(&state.runtime, &req.project_name)
+        .await?;
     state
         .runtime
         .start_simulation(&state.project_service, &req.project_name)
@@ -1356,7 +1412,9 @@ async fn start_simulation(
 
 async fn stop_simulation(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
     state.runtime.stop_simulation().await?;
     Ok(Json(serde_json::json!({"status": "stopped"})))
 }
@@ -1400,8 +1458,10 @@ struct SetParamsRequest {
 
 async fn set_runtime_params(
     State(state): State<AppState>,
+    Extension(engineering): Extension<crate::engineering::EngineeringService>,
     Json(req): Json<SetParamsRequest>,
 ) -> Result<Json<HashMap<String, LogicParamValue>>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
     let params = state.runtime.set_params(req.params.clone()).await?;
 
     if let Some(project_name) = state.runtime.active_project().await {
@@ -1511,27 +1571,48 @@ async fn get_deployment_commands(
 }
 
 #[derive(Debug)]
-struct AppError(anyhow::Error);
+pub(crate) struct AppError(anyhow::Error, Option<StatusCode>);
+
+impl AppError {
+    pub(crate) fn status(status: StatusCode, message: impl Into<String>) -> Self {
+        Self(anyhow::anyhow!(message.into()), Some(status))
+    }
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
 
 impl<E> From<E> for AppError
 where
     E: Into<anyhow::Error>,
 {
     fn from(value: E) -> Self {
-        Self(value.into())
+        Self(value.into(), None)
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let msg = self.0.to_string();
-        let status = if msg.contains("not running") || msg.contains("not found") {
-            StatusCode::NOT_FOUND
-        } else if msg.contains("already") || msg.contains("invalid") {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
+        let status = self.1.unwrap_or_else(|| {
+            if msg.contains("locked") || msg.contains("does not match") || msg.contains("already") {
+                StatusCode::CONFLICT
+            } else if msg.contains("not running") || msg.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else if msg.contains("invalid")
+                || msg.contains("requires")
+                || msg.contains("must")
+                || msg.contains("unknown")
+                || msg.contains("mismatch")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        });
 
         (
             status,
@@ -1611,6 +1692,182 @@ mod tests {
         cfg.rebuild_runtime_io_from_definition()
             .expect("rebuild runtime io");
         projects.save_config(name, &cfg).expect("save cfg");
+    }
+
+    #[tokio::test]
+    async fn browser_config_revision_and_execution_locks_preserve_saved_project() {
+        let dir = tempdir().expect("temp");
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("browser").unwrap();
+        configure_simulation_project(&projects, "browser");
+        let runtime = Arc::new(RuntimeManager::new());
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: runtime.clone(),
+            executable_path: "smartapc".into(),
+        }))
+        .unwrap();
+        let response = server.get("/api/projects/browser/config").await;
+        let revision = response.header("etag");
+        let mut cfg: ProjectConfig = response.json();
+        cfg.io_definition.cvs[0].band_low_value = Some(-2.0);
+        server
+            .put("/api/projects/browser/config")
+            .add_header("if-match", revision.clone())
+            .json(&cfg)
+            .await
+            .assert_status_ok();
+        let stale = server
+            .put("/api/projects/browser/config")
+            .add_header("if-match", revision)
+            .json(&cfg)
+            .await;
+        stale.assert_status(StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            projects.load_config("browser").unwrap().io_definition.cvs[0].band_low_value,
+            Some(-2.0)
+        );
+        server.post("/api/execution/command").json(&serde_json::json!({"project_name": "browser", "mode": "simulation", "action": "start"})).await.assert_status_ok();
+        let revision = server
+            .get("/api/projects/browser/config")
+            .await
+            .header("etag");
+        server
+            .put("/api/projects/browser/config")
+            .add_header("if-match", revision)
+            .json(&cfg)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        runtime.stop_simulation().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_simulation_parameter_writes_are_typed_project_scoped_and_persisted() {
+        let dir = tempdir().unwrap();
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("browser").unwrap();
+        configure_simulation_project(&projects, "browser");
+        let runtime = Arc::new(RuntimeManager::new());
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: runtime.clone(),
+            executable_path: "smartapc".into(),
+        }))
+        .unwrap();
+        runtime
+            .start_simulation(&projects, "browser")
+            .await
+            .unwrap();
+        let body = serde_json::json!({"project_name": "browser", "mode": "simulation", "params": {"p.y1.u1.kp": 2.5}});
+        server
+            .post("/api/execution/parameters")
+            .json(&body)
+            .await
+            .assert_status_ok();
+        assert_eq!(
+            runtime.active_get_params().await.unwrap()["p.y1.u1.kp"],
+            LogicParamValue::F64(2.5)
+        );
+        assert_eq!(
+            projects.load_config("browser").unwrap().logic.params["p.y1.u1.kp"],
+            LogicParamValue::F64(2.5)
+        );
+        let mut wrong = body.clone();
+        wrong["project_name"] = serde_json::json!("another");
+        server
+            .post("/api/execution/parameters")
+            .json(&wrong)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        let mut wrong = body;
+        wrong["params"]["p.y1.u1.kp"] = serde_json::json!(true);
+        server
+            .post("/api/execution/parameters")
+            .json(&wrong)
+            .await
+            .assert_status_bad_request();
+        assert_eq!(
+            runtime.active_get_params().await.unwrap()["p.y1.u1.kp"],
+            LogicParamValue::F64(2.5)
+        );
+        server.post("/api/execution/command").json(&serde_json::json!({"project_name": "another", "mode": "simulation", "action": "stop"})).await.assert_status(StatusCode::CONFLICT);
+        assert!(runtime.active_state().await.unwrap().is_some());
+        runtime.stop_simulation().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_jobs_survive_navigation_and_persist_terminal_reports() {
+        let dir = tempdir().unwrap();
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("browser").unwrap();
+        configure_simulation_project(&projects, "browser");
+        let state = AppState {
+            project_service: projects.clone(),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: "smartapc".into(),
+        };
+        let server = TestServer::new(build_router(state.clone())).unwrap();
+        let response = server
+            .post("/api/projects/browser/jobs")
+            .json(&serde_json::json!({"kind": "control_tests", "selections": []}))
+            .await;
+        response.assert_status(StatusCode::ACCEPTED);
+        let job: crate::engineering::JobSnapshot = response.json();
+        let persisted = projects
+            .project_dir("browser")
+            .join("data/jobs")
+            .join(format!("{}.json", job.id));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !persisted.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let another_client = TestServer::new(build_router(state)).unwrap();
+        let response = another_client
+            .get(&format!("/api/projects/browser/jobs/{}", job.id))
+            .await;
+        response.assert_status_ok();
+        let report: serde_json::Value = response.json();
+        assert_eq!(report["phase"], "succeeded");
+        assert!(
+            report["result"]["execution"]["executed_case_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(report["project_name"], "browser");
+    }
+
+    #[tokio::test]
+    async fn browser_readiness_leaves_optional_engineering_out_of_runtime_requirements() {
+        let dir = tempdir().unwrap();
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("browser").unwrap();
+        configure_simulation_project(&projects, "browser");
+        let mut cfg = projects.load_config("browser").unwrap();
+        cfg.model = None;
+        projects.save_config("browser", &cfg).unwrap();
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects,
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: "smartapc".into(),
+        }))
+        .unwrap();
+        let readiness: serde_json::Value =
+            server.get("/api/projects/browser/readiness").await.json();
+        assert_eq!(readiness["ready"], true);
+        assert_eq!(readiness["model_requirement"], "optional");
+        assert_eq!(readiness["hardware_verified"], false);
+        server
+            .get("/api/no-such-route")
+            .await
+            .assert_status_not_found();
+        server
+            .get("/assets/no-such-file.js")
+            .await
+            .assert_status_not_found();
     }
 
     #[tokio::test]
@@ -2122,7 +2379,7 @@ mod tests {
             .post("/api/runtime/start")
             .json(&serde_json::json!({"project_name": "demo"}))
             .await;
-        runtime_start_resp.assert_status_bad_request();
+        runtime_start_resp.assert_status(StatusCode::CONFLICT);
 
         let plots_resp = server
             .get("/api/execution/plots/window?window_ms=180000")

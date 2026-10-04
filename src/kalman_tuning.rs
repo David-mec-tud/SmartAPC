@@ -238,6 +238,21 @@ pub fn import_csv(path: &Path, vars: &VariableCatalogConfig) -> Result<KalmanDat
     parse_csv_reader(&mut reader, file_name, vars)
 }
 
+/// Parse a browser upload using the same CSV validation as native file import.
+pub fn import_csv_bytes(
+    file_name: &str,
+    bytes: &[u8],
+    vars: &VariableCatalogConfig,
+) -> Result<KalmanDataset> {
+    if !file_name.to_ascii_lowercase().ends_with(".csv") {
+        bail!("Kalman tuning import requires a .csv file");
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(bytes);
+    parse_csv_reader(&mut reader, file_name.to_string(), vars)
+}
+
 fn parse_csv_reader<R: std::io::Read>(
     reader: &mut csv::Reader<R>,
     file_name: String,
