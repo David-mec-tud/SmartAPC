@@ -5,6 +5,17 @@ export type SignalValue =
   { kind: "f64"; value: number } | { kind: "bool"; value: boolean };
 export type Mode = "runtime" | "simulation";
 export type Matrix = number[][];
+export interface SourceDocument {
+  source: string;
+  revision: string;
+  source_revision: string;
+}
+export interface HistoryWindow {
+  samples: Sample[];
+  original_count: number;
+  downsampled: boolean;
+  sample_limit: number;
+}
 export interface Variables {
   mvs: string[];
   cvs: string[];
@@ -182,6 +193,7 @@ export interface Metrics {
 export interface Execution {
   mode: Mode;
   snapshot: {
+    execution_id: string;
     project_name: string;
     state: string;
     connection_health?: "healthy" | "unhealthy";

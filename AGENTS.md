@@ -11,7 +11,7 @@
   - `projects/` -> per-project configs, runtime DB/logs, custom strategy artifacts.
   - `README.md` -> current product status, run commands, custom strategy guide.
 - Primary run modes:
-  - `cargo run -- desktop`
+  - `cargo run --features legacy-native -- desktop` (optional native compatibility UI)
   - `cargo run -- serve`
   - `cargo run -- virtual-hardware`
 - Additional helper mode:
@@ -35,7 +35,10 @@
   and `npm test` in `frontend/`. Use `npm run test:e2e` for meaningful browser
   workflows against the isolated Rust backend, with Node.js 22 or newer.
   Track full migration evidence in `docs/web-migration-coverage.md`; keep native
-  helpers until demonstrated parity permits removing their default dependencies.
+  helpers behind `legacy-native`; also run `cargo check --features legacy-native`
+  and `cargo test --features legacy-native` when changing shared/native helpers.
+  Package with `python3 scripts/package-web.py` and verify adjacent `ui/` assets
+  from a launch directory outside the repository when changing serving or packaging.
 
 ## 5. Code Readability & Onboarding (Must)
 - Generated code must be commented and easy to read for fast onboarding.
@@ -77,13 +80,21 @@
 4. Verify compatibility result against current I/O definition.
 - Available context includes current `inputs`, input/output/parameter history, and online parameters.
 - Use user-log helpers from the template to emit custom runtime logs.
+- Browser source saves check both configuration and source revisions. Regeneration
+  backs up replaced source/manifest/dispatch and saved TOML under `logic/backups/<id>`.
+- Scoped browser execution mutations require project, mode and execution ID; online
+  parameter writes also require the expected applied values to reject stale clients.
+- Browser history is bounded with extrema-preserving sampling. Full job reports
+  persist by ID; list/status payloads omit replay arrays and optimization curves.
+- Simulation JSONL buffers flush after 64 records or one wall-clock second at the
+  next cycle, keeping live user logs visible without changing controller timing.
 
 ## 10. Optional Manual Smoke Test (Recommended)
 - Start virtual hardware:
   - `cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120`
-- Start desktop app:
-  - `cargo run -- desktop --project-root ./projects`
-- In GUI:
+- Build frontend assets, then start the browser backend:
+  - `cargo run -- serve --project-root ./projects`
+- Open `http://127.0.0.1:8080` (plant feedback is on port 8081). In the workspace:
   - Configure OPC UA endpoint and watchdog.
   - Run I/O read/write test.
   - Start runtime and verify plot/log updates.

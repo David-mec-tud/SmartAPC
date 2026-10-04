@@ -2,58 +2,32 @@
 
 SmartAPC V1 is modular control software written in Rust for OT and industrial environments.
 
-## Current Status (April 2026)
+## Browser workspace (October 2026)
 
-### Implemented
+SmartAPC runs as a local React/TypeScript application served by Rust/Axum. The
+workspace includes project configuration, typed MV/CV/DV I/O, model matrices,
+P/MPC/custom Rust strategies, simulation, control tests, Kalman replay, offline and
+online optimization, live parameters, structured logs, diagnostics and deployment.
+Plotly charts, icons, scripts and styles are packaged locally, with light/dark
+styles and no required external account or CDN.
 
-- Modular runtime with clear interfaces:
-  - `ProtocolAdapter` (V1: OPC UA client adapter)
-  - `WatchdogModule` (`none`, `counter_mirror`)
-  - `ControlLogic`: production-ready `p_controller`, model-based `linear_mpc`, and project-local `custom_rust` `cdylib`
-  - Persisted `linear_state_space` model for offline simulation
-- Runtime state machine: `Running -> Hold -> Alarm -> Off`
-  - Fault behavior: hold last value, enter alarm, then switch off
-  - No outputs are written in the `Off` state
-- Structured JSONL runtime and simulation logging under `projects/<project>/data/`
-  - Per-cycle inputs, outputs, online parameters, simulation time, user logs, and MPC diagnostics
-  - Online optimization candidate, safety-interruption, restoration, and completion events
-  - Online-parameter changes
-- Native `iced` desktop application:
-  - OPC UA communication and watchdog setup
-  - MV/CV/DV catalog and I/O definition with OPC UA read/write tests
-  - Optional continuous-time state-space model with A/B/C/D import and matrix editor
-  - Controller simulation with speed selection, initial values, disturbances, noise, and live A/B scaling
-  - Control strategy selection, control-function tests, online parameters, and SQLite plots
-- Local web API:
-  - Project configuration, runtime and simulation control, execution state, parameters, plots, and Windows service commands
-- Interactive Plotly web view at `GET /plots`
-- Automatically follows the runtime or simulation
-- Online parameter optimization is available from the desktop setup sidebar while a runtime or
-  simulation is active. Its selectable objective combines weighted CV MSE terms with weighted
-  integral squared delta-MV terms over a configured `HH:MM:SS` window. CV objective limits are
-  initialized from predefined I/O LL/HL limits and may only be tightened. Normal completion applies
-  the best-known parameters; manual stop, execution stop, invalid data, or a CV safety-limit touch
-  restores the original parameters before the next controller calculation.
-  - Uses locally bundled Plotly.js
-  - Supports sliding windows, sortable MV/CV/DV panels, custom multi-trace plots, and MPC future predictions
-- Virtual hardware:
-  - Separate local OPC UA PT1 server
-  - Live plot with a three-minute window
+Rust owns the controller, OPC UA, watchdog, independent cycle times and background
+jobs. Closing a browser does not stop execution or engineering jobs. Projects
+remain TOML, with SQLite history and JSONL logs. Fault transitions remain
+`Running -> Hold -> Alarm -> Off`; Off writes no outputs. Online tuning restores
+original values on manual/safety/execution stops and applies best values on normal
+completion. The optional continuous model uses `x_dot = A x + B u`, `y = C x + D u`;
+offline simulation integrates it with RK4. Runtime does not simulate the plant.
 
-### Placeholder
-
-- The deployment setup page is a placeholder; deployment API commands are available.
-
-The optional continuous-time state-space model uses `x_dot = A x + B u` and `y = C x + D u`.
-Offline controller simulation integrates the model with fixed-step RK4 and zero-order hold per
-control cycle. The production runtime does not simulate the plant internally.
+Deployment validates saved strategy requirements, generates Copy/Download commands,
+and offers explicit runtime start and verification. Simulation and tuning remain
+optional. Windows Service Control Manager integration is **not implemented or
+verified**; Windows service commands are reference generation only.
 
 ## Build, Test, and Run
 
-### Browser workspace migration (October 2026)
-
-The React/TypeScript workspace now runs through the Rust/Axum backend. Build its
-local assets before using `serve`:
+Use Rust and Node.js 22 or newer to build. The standard Rust build does not depend
+on iced, eframe/egui or native file dialogs.
 
 ```sh
 cd frontend
@@ -63,33 +37,43 @@ cd ..
 cargo run -- serve --project-root ./projects
 ```
 
-Open `http://127.0.0.1:8080`. Use Node.js 22 or newer for frontend development and
-tests. The deployed frontend uses locally packaged assets and requires no Node
-process or CDN. The full migration and feature-parity audit are still in progress;
-native helpers and their build dependencies remain available during the transition.
-See [web development, production assets and API contracts](docs/web-application.md)
-and [migration coverage](docs/web-migration-coverage.md) for current evidence and
-remaining work. The browser deployment page validates saved strategy requirements
-and generates local/Windows commands; it does not claim installed Windows service
-support. The native deployment page remains a placeholder.
+Open `http://127.0.0.1:8080`. For development, run `npm run dev` in `frontend/`
+and open `http://127.0.0.1:5173`; Vite proxies the API to Axum on port 8080.
 
-```bash
+Build a relocatable release package (Python 3 is used only by the build script):
+
+```sh
+python3 scripts/package-web.py --output ./dist/smartapc-web
+./dist/smartapc-web/smartapc serve --project-root ./projects
+```
+
+Keep the executable and its adjacent `ui/` folder together. Launch from any
+working directory with an absolute `--project-root`; deployed operation needs
+no Node or Python process. Custom Rust strategy compilation still needs Cargo.
+The script builds for the current host and writes a SHA-256 package manifest;
+it does not cross-compile or install services. See [build/run/API details](docs/web-application.md)
+and [migration evidence](docs/web-migration-coverage.md).
+
+```sh
+cargo fmt
+cargo check
 cargo test
-cargo run -- desktop
-cargo run -- serve
-cargo run -- virtual-hardware
+cd frontend
+npm run typecheck
+npm run build
+npm test
+npx playwright install chromium
+npm run test:e2e
 ```
 
-Start the desktop application with a project root:
+The previous native application remains available with an explicit compatibility
+feature. Native builds require their platform GUI dependencies:
 
-```bash
-cargo run -- desktop --project-root ./projects
-```
-
-Disable the embedded web API:
-
-```bash
-cargo run -- desktop --project-root ./projects --no-web
+```sh
+cargo run --features legacy-native -- desktop --project-root ./projects
+cargo run --features legacy-native -- desktop --project-root ./projects --no-web
+cargo check --features legacy-native
+cargo test --features legacy-native
 ```
 
 ## Project Layout
@@ -115,17 +99,21 @@ projects/
 cargo run -- virtual-hardware --host 127.0.0.1 --port 4855 --dt-ms 100 --tau-s 5.0 --gain 1.0 --history 120
 ```
 
-2. Start the desktop application in a second terminal:
+2. Start the browser backend in a second terminal:
 
 ```bash
-cargo run -- desktop --project-root ./projects
+cargo run -- serve --project-root ./projects
 ```
 
-3. In the application:
+3. Open `http://127.0.0.1:8080` and create/select a project. In the application:
    - Set the endpoint to `opc.tcp://127.0.0.1:4855/`.
    - Configure `read_node = ns=2;s=wd_counter_read` and `write_node = ns=2;s=wd_counter_mirror`.
    - Define variables and I/O, for example `cv.y1.*` and `mv.u1.*`.
    - Select a control strategy and start the runtime.
+
+The plant feedback page is `http://127.0.0.1:8081/virtual-hardware`, with local
+Plotly charts and manual node values. Use `--no-web` for OPC UA only, or
+`--features legacy-native -- virtual-hardware --native-plot` for the old plot window.
 
 Virtual hardware OPC UA Node IDs:
 
@@ -140,7 +128,7 @@ Virtual hardware OPC UA Node IDs:
 
 ## Control Strategies
 
-The **Control Strategy** tab offers only strategies compatible with the current I/O definition:
+The **Project configuration → Control strategy** page offers only strategies compatible with the current I/O definition:
 
 - `P Controller` (`p_controller`)
 - `Linear MPC` (`linear_mpc`)
@@ -205,8 +193,9 @@ time,y1,u1,d1
 2026-06-13T14:30:01.000+02:00,1.3,0.4,0.1
 ```
 
-Additional columns are ignored. Imported data and observer results remain in the current desktop
-session. Interactive plots require the local web API.
+Additional columns are ignored. Browser replay reports, including imported measurements and
+observer series, persist under `data/jobs/` and can be reopened or downloaded after restart.
+The optional native helper retains its session-based replay behavior.
 
 Linear MPC uses the saved `mpc.kalman.*` parameters. Custom Rust strategies can enable the same
 tuning task by exposing numeric online parameters with either `kalman.*` or `observer.*` names:
@@ -229,8 +218,10 @@ Prerequisites:
 
 Workflow:
 
-1. Open the **Control Strategy** tab and generate a template.
-2. Edit `projects/<project>/logic/custom_strategy/src/lib.rs`.
+1. Open **Project configuration → Control strategy** and generate a template.
+2. Edit the source in the browser or `projects/<project>/logic/custom_strategy/src/lib.rs`.
+   Save browser source edits before building. Regeneration backs up replaced source, manifest,
+   dispatch and saved project under `logic/backups/<id>/`.
 3. Implement `control(...)` and optionally add `f64` or `bool` arguments after `ctx` and `out`.
 4. Build and check the strategy.
 5. Select and save it after the contract matches the current I/O definition.
@@ -299,7 +290,10 @@ Static I/O values without OPC UA Node IDs are exposed as online parameters:
   - `logic.cycle_ms` drives controller execution, MPC/Kalman discretization, tuning, and simulation.
 - All cycle times must be greater than zero.
 
-## API Quick Reference
+## Legacy API Quick Reference
+
+The browser uses revision- and execution-scoped APIs documented in
+[web application contracts](docs/web-application.md). Existing helper routes remain available.
 
 - `GET /api/runtime/state`
 - `GET /api/runtime/params`

@@ -1,6 +1,6 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import { type Matrix } from "../api";
-import { Button, NumberInput } from "./ui";
+import { Notice, NumberInput } from "./ui";
 /** Preserve row/column identities when resizing and never flatten matrix ordering. */
 export function resizeMatrix(
   matrix: Matrix,
@@ -28,6 +28,7 @@ export function MatrixEditor({
   disabled?: boolean;
 }) {
   const id = useId();
+  const [error, setError] = useState<string>();
   async function importMatrix(file: File) {
     const text = await file.text();
     const values = text
@@ -63,19 +64,22 @@ export function MatrixEditor({
         <input
           id={id}
           type="file"
+          aria-label={`Import ${name} matrix`}
           accept=".csv,.txt"
           hidden
           disabled={disabled}
           onChange={(event) => {
             const file = event.target.files?.[0];
+            setError(undefined);
             if (file)
               void importMatrix(file).catch((error) =>
-                alert((error as Error).message),
+                setError((error as Error).message),
               );
             event.target.value = "";
           }}
         />
       </div>
+      {error && <Notice error>{error}</Notice>}
       <div className="table-scroll">
         <table>
           <thead>

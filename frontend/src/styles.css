@@ -491,6 +491,9 @@ td .input {
   background: var(--surface);
   z-index: 1;
 }
+.io-table tbody th .input {
+  min-width: 128px;
+}
 .io-table {
   padding: 0;
 }
@@ -802,5 +805,34 @@ summary small {
   }
   .toolbar > .inline {
     flex-wrap: wrap;
+  }
+}
+
+.plant-workspace {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+.plant-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--border);
+}
+.plant-workspace main {
+  padding: 28px;
+}
+.badge-warning {
+  color: #94681f;
+  background: #f6edce;
+}
+.dark .badge-warning {
+  color: #ecc778;
+  background: #433925;
+}
+@media (max-width: 780px) {
+  .plant-header,
+  .plant-workspace main {
+    padding: 18px;
   }
 }

@@ -1695,6 +1695,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_source_save_rejects_external_editor_changes_and_invalidates_build() {
+        let dir = tempdir().unwrap();
+        let projects = ProjectService::new(dir.path());
+        projects.create_project("source").unwrap();
+        configure_simulation_project(&projects, "source");
+        crate::strategy_service::generate_template(&projects, "source").unwrap();
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: std::env::current_exe().unwrap(),
+        }))
+        .unwrap();
+        let mut draft: serde_json::Value = server
+            .get("/api/projects/source/strategy/source")
+            .await
+            .json();
+        let source_path = crate::strategy_service::source_path(&projects, "source").unwrap();
+        let external = format!(
+            "{}\n// External editor change\n",
+            draft["source"].as_str().unwrap()
+        );
+        std::fs::write(&source_path, &external).unwrap();
+        draft["source"] = serde_json::json!("// Stale browser must not overwrite external changes");
+        server
+            .put("/api/projects/source/strategy/source")
+            .json(&draft)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        assert_eq!(std::fs::read_to_string(&source_path).unwrap(), external);
+        let mut refreshed: serde_json::Value = server
+            .get("/api/projects/source/strategy/source")
+            .await
+            .json();
+        refreshed["source"] = serde_json::json!(format!("{external}// Browser change\n"));
+        server
+            .put("/api/projects/source/strategy/source")
+            .json(&refreshed)
+            .await
+            .assert_status_ok();
+        let saved = projects.load_config("source").unwrap();
+        assert!(!saved.logic.custom_rust.compatible);
+        assert!(
+            saved
+                .logic
+                .custom_rust
+                .last_build_message
+                .contains("Source changed")
+        );
+    }
+
+    #[tokio::test]
     async fn browser_config_revision_and_execution_locks_preserve_saved_project() {
         let dir = tempdir().expect("temp");
         let projects = ProjectService::new(dir.path());
@@ -1758,7 +1809,8 @@ mod tests {
             .start_simulation(&projects, "browser")
             .await
             .unwrap();
-        let body = serde_json::json!({"project_name": "browser", "mode": "simulation", "params": {"p.y1.u1.kp": 2.5}});
+        let active: serde_json::Value = server.get("/api/execution/state").await.json();
+        let body = serde_json::json!({"project_name": "browser", "mode": "simulation", "execution_id": active["snapshot"]["execution_id"], "params": {"p.y1.u1.kp": 2.5}, "expected_params": {"p.y1.u1.kp": 1.0}});
         server
             .post("/api/execution/parameters")
             .json(&body)
@@ -1772,6 +1824,11 @@ mod tests {
             projects.load_config("browser").unwrap().logic.params["p.y1.u1.kp"],
             LogicParamValue::F64(2.5)
         );
+        server
+            .post("/api/execution/parameters")
+            .json(&body)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
         let mut wrong = body.clone();
         wrong["project_name"] = serde_json::json!("another");
         server
@@ -1779,7 +1836,7 @@ mod tests {
             .json(&wrong)
             .await
             .assert_status(StatusCode::CONFLICT);
-        let mut wrong = body;
+        let mut wrong = body.clone();
         wrong["params"]["p.y1.u1.kp"] = serde_json::json!(true);
         server
             .post("/api/execution/parameters")
@@ -1792,6 +1849,30 @@ mod tests {
         );
         server.post("/api/execution/command").json(&serde_json::json!({"project_name": "another", "mode": "simulation", "action": "stop"})).await.assert_status(StatusCode::CONFLICT);
         assert!(runtime.active_state().await.unwrap().is_some());
+        runtime.stop_simulation().await.unwrap();
+        runtime
+            .start_simulation(&projects, "browser")
+            .await
+            .unwrap();
+        // A second run of the same project is a distinct execution. A late
+        // parameter write or Stop from its previous run must not affect it.
+        server
+            .post("/api/execution/parameters")
+            .json(&body)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        server
+            .post("/api/execution/command")
+            .json(&serde_json::json!({
+                "project_name": "browser", "mode": "simulation", "action": "stop",
+                "execution_id": active["snapshot"]["execution_id"],
+            }))
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        assert_eq!(
+            runtime.active_get_params().await.unwrap()["p.y1.u1.kp"],
+            LogicParamValue::F64(2.5)
+        );
         runtime.stop_simulation().await.unwrap();
     }
 

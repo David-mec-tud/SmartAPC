@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import {
   type Job,
@@ -95,6 +96,7 @@ function Simulation() {
               void act("/api/execution/command", {
                 action: "start",
                 mode: "simulation",
+                execution_id: execution?.snapshot.execution_id,
                 project_name: project,
               }).catch(() => {})
             }
@@ -108,6 +110,7 @@ function Simulation() {
               void act("/api/execution/command", {
                 action: "stop",
                 mode: "simulation",
+                execution_id: execution?.snapshot.execution_id,
                 project_name: project,
               }).catch(() => {})
             }
@@ -129,6 +132,7 @@ function Simulation() {
             void act("/api/execution/simulation-config", {
               project_name: project,
               mode: "simulation",
+              execution_id: execution?.snapshot.execution_id,
               config: simulation,
             })
               .then(() => acceptSavedSection("simulation"))
@@ -349,7 +353,7 @@ function Kalman() {
   useEffect(() => {
     setParameters(catalog.data?.kalman_parameters ?? {});
     setUpload(undefined);
-  }, [project, catalog.data?.kalman_parameters]);
+  }, [project, JSON.stringify(catalog.data?.kalman_parameters)]);
   return (
     <section className="panel">
       <h2>Historical measurements</h2>
@@ -604,8 +608,16 @@ function OfflineOptimization() {
   );
 }
 
-function JobResult({ job }: { job: Job }) {
+function JobResult({ job: summary }: { job: Job }) {
   const { project, act, locked } = useWorkspace();
+  const [open, setOpen] = useState(summary.phase === "running");
+  const detail = useQuery({
+    queryKey: ["job-detail", project, summary.id, summary.phase],
+    queryFn: () => request<Job>(`${projectPath(project)}/jobs/${summary.id}`),
+    enabled: open,
+    refetchInterval: summary.phase === "running" && open ? 1500 : false,
+  });
+  const job = detail.data ?? summary;
   const result = job.result;
   const curves = (result?.curves ?? job.progress.curves) as
     | {
@@ -623,7 +635,11 @@ function JobResult({ job }: { job: Job }) {
   const convergence = (result?.convergence_history ??
     job.progress.convergence_history) as number[][] | undefined;
   return (
-    <details className="job" open={job.phase === "running"}>
+    <details
+      className="job"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
         <div>
           <strong>{job.kind.replaceAll("_", " ")}</strong>
@@ -644,6 +660,8 @@ function JobResult({ job }: { job: Job }) {
         </Badge>
       </summary>
       <div className="job-body">
+        {detail.isLoading && open && <p>Loading full job report…</p>}
+        {detail.error && <Notice error>{detail.error.message}</Notice>}
         {job.phase === "running" && (
           <>
             <p>
@@ -696,7 +714,11 @@ function JobResult({ job }: { job: Job }) {
             </div>
             {job.kind === "strategy_build" ? (
               <>
-                <Notice error={result.success === false}>
+                <Notice
+                  error={
+                    result.success === false || result.compatible === false
+                  }
+                >
                   {String(result.message)}
                 </Notice>
                 <pre>{String(result.output)}</pre>

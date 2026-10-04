@@ -1,8 +1,8 @@
 //! Typed browser workflows layered over existing Rust controller services.
 use crate::{
     engineering::{
-        EngineeringService, JobRequest, JobSnapshot, config_revision, engineering_catalog,
-        project_readiness,
+        EngineeringService, JobRequest, JobSnapshot, config_revision, content_revision,
+        engineering_catalog, project_readiness,
     },
     parameter_optimization::apply_optimized_parameters,
     project_config::{LogicParamValue, SimulationConfig, from_toml_str, to_toml_string},
@@ -57,7 +57,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/projects/{name}/logs", get(logs))
         .route("/api/projects/{name}/history", get(history))
         .route("/api/projects/{name}/history/catalog", get(history_catalog))
-        .route("/api/execution/parameters", post(set_execution_params))
+        .route(
+            "/api/execution/parameters",
+            get(get_execution_params).post(set_execution_params),
+        )
         .route("/api/execution/command", post(execution_command))
         .route("/api/execution/simulation-config", post(simulation_config))
         .route(
@@ -234,16 +237,19 @@ async fn generate_template(
 struct SourceDraft {
     source: String,
     revision: String,
+    source_revision: String,
 }
 async fn get_source(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<SourceDraft>, AppError> {
+    let source = std::fs::read_to_string(strategy_service::source_path(
+        &state.project_service,
+        &name,
+    )?)?;
     Ok(Json(SourceDraft {
-        source: std::fs::read_to_string(strategy_service::source_path(
-            &state.project_service,
-            &name,
-        )?)?,
+        source_revision: content_revision(source.as_bytes()),
+        source,
         revision: config_revision(&state.project_service, &name)?,
     }))
 }
@@ -263,14 +269,23 @@ async fn save_source(
         ));
     }
     let path = strategy_service::source_path(&state.project_service, &name)?;
-    std::fs::write(path, request.source)?;
+    if request.source_revision != content_revision(&std::fs::read(&path)?) {
+        return Err(AppError::status(
+            StatusCode::PRECONDITION_FAILED,
+            "source changed in another editor; reload before saving this draft",
+        ));
+    }
+    // Replace the file atomically so a build or an external reader sees a complete source.
+    let pending = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&pending, &request.source)?;
+    std::fs::rename(&pending, path)?;
     let mut cfg = state.project_service.load_config(&name)?;
     cfg.logic.custom_rust.compatible = false;
     cfg.logic.custom_rust.last_build_message =
         "Source changed. Build and check before running.".into();
     state.project_service.save_config(&name, &cfg)?;
     Ok(Json(
-        json!({"saved": true, "revision": config_revision(&state.project_service, &name)?}),
+        json!({"saved": true, "revision": config_revision(&state.project_service, &name)?, "source_revision": content_revision(request.source.as_bytes())}),
     ))
 }
 
@@ -293,15 +308,18 @@ impl ExecutionMode {
 struct ExecutionIdentity {
     project_name: String,
     mode: ExecutionMode,
+    #[serde(default)]
+    execution_id: Option<String>,
 }
 async fn require_execution(state: &AppState, request: &ExecutionIdentity) -> Result<(), AppError> {
     let snapshot = serde_json::to_value(state.runtime.active_state().await?)?;
     if snapshot["snapshot"]["project_name"] != request.project_name
         || snapshot["mode"] != request.mode.label()
+        || snapshot["snapshot"]["execution_id"].as_str() != request.execution_id.as_deref()
     {
         return Err(AppError::status(
             StatusCode::CONFLICT,
-            "request project or execution mode does not match active execution",
+            "request project, mode or execution ID does not match active execution",
         ));
     }
     Ok(())
@@ -312,6 +330,20 @@ struct ParameterUpdate {
     #[serde(flatten)]
     identity: ExecutionIdentity,
     params: HashMap<String, LogicParamValue>,
+    expected_params: HashMap<String, LogicParamValue>,
+}
+
+async fn get_execution_params(
+    State(state): State<AppState>,
+    Extension(engineering): Extension<EngineeringService>,
+    Query(identity): Query<ExecutionIdentity>,
+) -> Result<Json<Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    require_execution(&state, &identity).await?;
+    Ok(Json(
+        json!({"project_name": identity.project_name, "mode": identity.mode.label(),
+        "execution_id": identity.execution_id, "params": state.runtime.active_get_params().await?}),
+    ))
 }
 async fn set_execution_params(
     State(state): State<AppState>,
@@ -340,6 +372,17 @@ async fn set_execution_params(
         candidate.logic.params.insert(key.clone(), value.clone());
     }
     candidate.validate()?;
+    let current = state.runtime.active_get_params().await?;
+    if request
+        .params
+        .keys()
+        .any(|key| request.expected_params.get(key) != current.get(key))
+    {
+        return Err(AppError::status(
+            StatusCode::PRECONDITION_FAILED,
+            "applied parameter changed; refresh before applying this draft",
+        ));
+    }
     let applied = state.runtime.active_set_params(request.params).await?;
     state
         .project_service
@@ -503,11 +546,15 @@ async fn history(
         .join("data")
         .join(format!("{}.sqlite", query.mode.label()));
     if !path.exists() {
-        return Ok(Json(json!([])));
+        return Ok(Json(json!(crate::storage::HistoryWindow {
+            sample_limit: crate::storage::HISTORY_SAMPLE_LIMIT,
+            ..Default::default()
+        })));
     }
     let rows = tokio::task::spawn_blocking(move || {
-        SqliteStorage::new(path)?
-            .read_latest_samples_window(query.window_ms.unwrap_or(180_000).clamp(10_000, 3_600_000))
+        SqliteStorage::new(path)?.read_browser_history_window(
+            query.window_ms.unwrap_or(180_000).clamp(10_000, 3_600_000),
+        )
     })
     .await??;
     Ok(Json(serde_json::to_value(rows)?))

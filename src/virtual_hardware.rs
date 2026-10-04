@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc,
@@ -19,9 +20,13 @@ use async_opcua::{
     },
     types::{AttributeId, DataEncoding, DataValue, MessageSecurityMode, NodeId, ObjectId},
 };
+use axum::{Json, Router, extract::State, response::Redirect, routing::get};
+#[cfg(feature = "legacy-native")]
 use eframe::egui;
+#[cfg(feature = "legacy-native")]
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 
 const Y_VALUE: &str = "y1_value";
 const Y_TARGET: &str = "y1_target";
@@ -33,9 +38,10 @@ const WD_COUNTER: &str = "wd_counter_read";
 const WD_MIRROR: &str = "wd_counter_mirror";
 
 const PLOT_WINDOW_SECONDS: f64 = 180.0;
+#[cfg(feature = "legacy-native")]
 const PLOT_REFRESH_MS: u64 = 100;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VirtualHardwareConfig {
     pub host: String,
     pub port: u16,
@@ -45,7 +51,7 @@ pub struct VirtualHardwareConfig {
     pub history: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 struct Sample {
     y: f64,
     u: f64,
@@ -54,7 +60,7 @@ struct Sample {
     ll: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 struct TimedSample {
     t_s: f64,
     sample: Sample,
@@ -87,7 +93,91 @@ struct PendingManualWrites {
     ll: Option<f64>,
 }
 
+/// Run the OPC UA test plant without a native window or a browser connection.
 pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
+    run_with_feedback(config, Feedback::Headless).await
+}
+
+/// Serve the same locally packaged React/Plotly assets as the main application.
+pub async fn run_browser(config: VirtualHardwareConfig, bind: SocketAddr) -> Result<()> {
+    run_with_feedback(config, Feedback::Browser(bind)).await
+}
+
+/// Transitional native feedback remains available while browser parity is audited.
+#[cfg(feature = "legacy-native")]
+pub async fn run_native(config: VirtualHardwareConfig) -> Result<()> {
+    run_with_feedback(config, Feedback::Native).await
+}
+
+enum Feedback {
+    Headless,
+    Browser(SocketAddr),
+    #[cfg(feature = "legacy-native")]
+    Native,
+}
+
+#[derive(Clone)]
+struct PlantState {
+    endpoint: String,
+    config: VirtualHardwareConfig,
+    namespace: u16,
+    history: Arc<RwLock<VecDeque<TimedSample>>>,
+    pending: Arc<RwLock<PendingManualWrites>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManualValues {
+    u_write: f64,
+    target: f64,
+    hl: f64,
+    ll: f64,
+}
+
+async fn plant_snapshot(State(state): State<PlantState>) -> Json<serde_json::Value> {
+    let history = state.history.read();
+    let step = history.len().div_ceil(1_200).max(1);
+    let samples = history
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index % step == 0 || *index + 1 == history.len())
+        .map(|(_, row)| *row)
+        .collect::<Vec<_>>();
+    let nodes = [
+        Y_VALUE, Y_TARGET, Y_HL, Y_LL, U_WRITE, U_READ, WD_COUNTER, WD_MIRROR,
+    ]
+    .map(|node| format!("ns={};s={node}", state.namespace));
+    Json(serde_json::json!({
+        "endpoint": state.endpoint, "config": state.config, "namespace": state.namespace,
+        "history": samples, "latest": history.back(),
+        "nodes": nodes,
+    }))
+}
+
+async fn plant_manual(
+    State(state): State<PlantState>,
+    Json(values): Json<ManualValues>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    if ![values.u_write, values.target, values.hl, values.ll]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "manual values must be finite numbers"})),
+        ));
+    }
+    // One atomic queue update; the existing plant loop writes all requested nodes
+    // on its next plant tick, independently of the browser refresh interval.
+    *state.pending.write() = PendingManualWrites {
+        u_write: Some(values.u_write),
+        target: Some(values.target),
+        hl: Some(values.hl),
+        ll: Some(values.ll),
+    };
+    Ok(Json(serde_json::json!({"queued": true})))
+}
+
+async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) -> Result<()> {
     validate_config(&config)?;
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port))
@@ -204,7 +294,13 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
     println!("Additional watchdog test nodes:");
     println!("  ns={ns};s={WD_COUNTER}");
     println!("  ns={ns};s={WD_MIRROR}");
-    println!("Opening live plot window with fixed 3 minute time range...");
+    let plant = PlantState {
+        endpoint: endpoint.clone(),
+        config: config.clone(),
+        namespace: ns,
+        history: Arc::clone(&history),
+        pending: Arc::clone(&pending_manual_writes),
+    };
 
     let server_task = tokio::spawn(async move { server.run_with(listener).await });
 
@@ -325,12 +421,57 @@ pub async fn run(config: VirtualHardwareConfig) -> Result<()> {
         signal_stop.store(true, Ordering::SeqCst);
     });
 
-    let plot_result = run_plot_window(
-        endpoint.clone(),
-        Arc::clone(&history),
-        Arc::clone(&stop),
-        Arc::clone(&pending_manual_writes),
-    );
+    let plot_result = match feedback {
+        Feedback::Headless => {
+            println!("Headless plant running; Ctrl+C stops the OPC UA server.");
+            while !stop.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(())
+        }
+        #[cfg(feature = "legacy-native")]
+        Feedback::Native => run_plot_window(
+            endpoint.clone(),
+            Arc::clone(&history),
+            Arc::clone(&stop),
+            Arc::clone(&pending_manual_writes),
+        ),
+        Feedback::Browser(bind) => {
+            // Keep listener errors inside this result so plant cleanup always runs.
+            async {
+                let assets = crate::web_assets::FrontendAssets::locate(&std::env::current_exe()?);
+                let app = Router::new()
+                    .route(
+                        "/",
+                        get(|| async { Redirect::temporary("/virtual-hardware") }),
+                    )
+                    .route(
+                        "/api/virtual-hardware",
+                        get(plant_snapshot).post(plant_manual),
+                    )
+                    .fallback(crate::web_assets::spa)
+                    .layer(axum::Extension(assets))
+                    .with_state(plant);
+                let listener = tokio::net::TcpListener::bind(bind)
+                    .await
+                    .context("failed to bind virtual hardware browser view")?;
+                println!(
+                    "Browser feedback: http://{}/virtual-hardware",
+                    listener.local_addr()?
+                );
+                let browser_stop = Arc::clone(&stop);
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        while !browser_stop.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    })
+                    .await
+                    .context("virtual hardware browser server failed")
+            }
+            .await
+        }
+    };
     stop.store(true, Ordering::SeqCst);
     signal_task.abort();
 
@@ -429,6 +570,7 @@ fn take_pending_manual_writes(
     current
 }
 
+#[cfg(any(feature = "legacy-native", test))]
 fn parse_manual_input(raw: &str, variable_name: &str) -> Result<f64, String> {
     raw.trim()
         .parse::<f64>()
@@ -436,6 +578,7 @@ fn parse_manual_input(raw: &str, variable_name: &str) -> Result<f64, String> {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "legacy-native")]
 struct PlotWindowApp {
     endpoint: String,
     history: Arc<RwLock<VecDeque<TimedSample>>>,
@@ -448,6 +591,7 @@ struct PlotWindowApp {
     feedback: Option<(bool, String)>,
 }
 
+#[cfg(feature = "legacy-native")]
 impl PlotWindowApp {
     fn new(
         endpoint: String,
@@ -511,6 +655,7 @@ impl PlotWindowApp {
     }
 }
 
+#[cfg(feature = "legacy-native")]
 impl eframe::App for PlotWindowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.stop.load(Ordering::SeqCst) {
@@ -624,6 +769,7 @@ impl eframe::App for PlotWindowApp {
     }
 }
 
+#[cfg(feature = "legacy-native")]
 fn run_plot_window(
     endpoint: String,
     history: Arc<RwLock<VecDeque<TimedSample>>>,

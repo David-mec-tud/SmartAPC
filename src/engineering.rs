@@ -55,6 +55,37 @@ pub struct JobSnapshot {
     pub error: Option<String>,
 }
 
+impl JobSnapshot {
+    /// Lists carry status only. Replay arrays and optimizer curves are fetched
+    /// explicitly by job ID, instead of being retransmitted on every list poll.
+    fn brief(&self) -> Self {
+        let progress = self
+            .progress
+            .as_object()
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "curves" | "convergence_history"))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .unwrap_or_default();
+        Self {
+            id: self.id.clone(),
+            project_name: self.project_name.clone(),
+            config_revision: self.config_revision.clone(),
+            kind: self.kind.clone(),
+            phase: self.phase.clone(),
+            started_at: self.started_at.clone(),
+            finished_at: self.finished_at.clone(),
+            cancellable: self.cancellable,
+            progress: Value::Object(progress),
+            result: None,
+            error: self.error.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobRequest {
@@ -92,6 +123,8 @@ impl JobRequest {
 struct JobRecord {
     snapshot: JobSnapshot,
     cancel: Arc<AtomicBool>,
+    // A persistence failure must not let a later job evict the only full report.
+    persisted: bool,
 }
 
 #[derive(Clone, Default)]
@@ -104,9 +137,14 @@ pub struct EngineeringService {
 
 pub fn config_revision(service: &ProjectService, name: &str) -> Result<String> {
     // Hash persisted bytes, not HashMap iteration order or a client's draft.
+    Ok(content_revision(&fs::read(service.config_path(name))?))
+}
+
+/// An optimistic revision for a saved file, including edits from external editors.
+pub fn content_revision(bytes: &[u8]) -> String {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    fs::read(service.config_path(name))?.hash(&mut hash);
-    Ok(format!("\"{:016x}\"", hash.finish()))
+    bytes.hash(&mut hash);
+    format!("\"{:016x}\"", hash.finish())
 }
 
 impl EngineeringService {
@@ -132,17 +170,42 @@ impl EngineeringService {
             .read()
             .values()
             .filter(|job| job.snapshot.project_name == name)
-            .map(|job| job.snapshot.clone())
+            .map(|job| job.snapshot.brief())
             .collect::<Vec<_>>();
         let dir = service.project_dir(name).join("data/jobs");
         if dir.exists() {
-            for entry in fs::read_dir(dir)? {
-                let path = entry?.path();
-                if path.extension().is_some_and(|ext| ext == "json") {
-                    let snapshot: JobSnapshot = serde_json::from_slice(&fs::read(path)?)?;
-                    if !jobs.iter().any(|job| job.id == snapshot.id) {
-                        jobs.push(snapshot);
+            let mut paths = fs::read_dir(dir)?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().is_some_and(|ext| ext == "json")
+                        && !path.to_string_lossy().ends_with(".summary.json")
+                })
+                .map(|path| {
+                    (
+                        fs::metadata(&path)
+                            .and_then(|metadata| metadata.modified())
+                            .ok(),
+                        path,
+                    )
+                })
+                .collect::<Vec<_>>();
+            paths.sort_by(|a, b| b.0.cmp(&a.0));
+            for (_, path) in paths.into_iter().take(64) {
+                let summary = path.with_extension("summary.json");
+                let cached = summary.is_file();
+                let snapshot: JobSnapshot =
+                    serde_json::from_slice(&fs::read(if cached { &summary } else { &path })?)?;
+                let snapshot = snapshot.brief();
+                if !cached {
+                    // Upgrade older persisted job reports once, without changing
+                    // their full report or discarding any historical results.
+                    if let Err(err) = fs::write(&summary, serde_json::to_vec(&snapshot)?) {
+                        tracing::warn!(error = %err, "job summary persistence failed");
                     }
+                }
+                if !jobs.iter().any(|job| job.id == snapshot.id) {
+                    jobs.push(snapshot);
                 }
             }
         }
@@ -176,6 +239,9 @@ impl EngineeringService {
         if !job.snapshot.cancellable {
             bail!("this job does not support cancellation");
         }
+        if !matches!(job.snapshot.phase, JobPhase::Running) {
+            bail!("this job has already finished");
+        }
         job.cancel.store(true, Ordering::Release);
         Ok(())
     }
@@ -190,6 +256,16 @@ impl EngineeringService {
     ) -> Result<JobSnapshot> {
         if self.project_busy(&name) {
             bail!("an engineering job is already running for this project");
+        }
+        if self
+            .jobs
+            .read()
+            .values()
+            .filter(|job| matches!(job.snapshot.phase, JobPhase::Running))
+            .count()
+            >= 2
+        {
+            bail!("two engineering jobs are already running; wait for one to finish");
         }
         let cfg = service.load_config(&name)?;
         let id = Uuid::new_v4().to_string();
@@ -212,6 +288,7 @@ impl EngineeringService {
             JobRecord {
                 snapshot: snapshot.clone(),
                 cancel: cancel.clone(),
+                persisted: false,
             },
         );
         let owner = self.clone();
@@ -250,7 +327,9 @@ impl EngineeringService {
                 job.snapshot.finished_at = Some(chrono::Utc::now().to_rfc3339());
                 match result {
                     Ok(result) => {
-                        job.snapshot.phase = if result.get("success") == Some(&Value::Bool(false)) {
+                        job.snapshot.phase = if result.get("success") == Some(&Value::Bool(false))
+                            || result.get("compatible") == Some(&Value::Bool(false))
+                        {
                             job.snapshot.error = result
                                 .get("message")
                                 .and_then(Value::as_str)
@@ -277,10 +356,28 @@ impl EngineeringService {
                     dir.join(format!("{id}.json")),
                     serde_json::to_vec_pretty(&terminal)?,
                 )?;
+                fs::write(
+                    dir.join(format!("{id}.summary.json")),
+                    serde_json::to_vec(&terminal.brief())?,
+                )?;
                 Ok(())
             })();
             if let Err(err) = persisted {
                 tracing::error!(job = %id, error = %err, "job result persistence failed");
+            } else {
+                // Retain running jobs and a small terminal cache. Full reports
+                // remain readable by ID from disk after eviction or restart.
+                let mut jobs = owner.jobs.write();
+                jobs.get_mut(&id).expect("registered job").persisted = true;
+                let mut terminal_ids = jobs
+                    .values()
+                    .filter(|job| job.persisted && !matches!(job.snapshot.phase, JobPhase::Running))
+                    .map(|job| (job.snapshot.started_at.clone(), job.snapshot.id.clone()))
+                    .collect::<Vec<_>>();
+                terminal_ids.sort_by(|a, b| b.0.cmp(&a.0));
+                for (_, old_id) in terminal_ids.into_iter().skip(8) {
+                    jobs.remove(&old_id);
+                }
             }
         });
         Ok(snapshot)

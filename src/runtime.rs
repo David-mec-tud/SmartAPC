@@ -50,6 +50,7 @@ pub struct RuntimeMetrics {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSnapshot {
+    pub execution_id: String,
     pub project_name: String,
     pub state: RuntimeState,
     pub connection_health: HealthStatus,
@@ -67,6 +68,7 @@ pub enum ExecutionSnapshot {
 }
 
 struct RuntimeCore {
+    execution_id: String,
     config: ProjectConfig,
     protocol: Arc<dyn ProtocolAdapter>,
     watchdog: Box<dyn WatchdogModule>,
@@ -109,6 +111,7 @@ impl RuntimeCore {
         );
 
         Ok(Self {
+            execution_id: uuid::Uuid::new_v4().to_string(),
             config,
             protocol,
             watchdog,
@@ -136,6 +139,7 @@ impl RuntimeCore {
 
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
+            execution_id: self.execution_id.clone(),
             project_name: self.config.name.clone(),
             state: self.state,
             connection_health: self.protocol.health(),

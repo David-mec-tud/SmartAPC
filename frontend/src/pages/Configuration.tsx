@@ -20,6 +20,7 @@ import {
   Select,
 } from "../components/ui";
 import { MatrixEditor, resizeMatrix } from "../components/MatrixEditor";
+import { renameVariable } from "../configuration-drafts";
 
 export function Configuration() {
   const { section = "communication" } = useParams();
@@ -301,7 +302,17 @@ function Io() {
           <tbody>
             {cfg.io_definition[group].map((row, index) => (
               <tr key={`${group}-${index}`}>
-                <th>{row.name}</th>
+                <th>
+                  <Input
+                    aria-label={`${group} variable ${index + 1} name`}
+                    value={row.name}
+                    onChange={(event) =>
+                      edit((next) =>
+                        renameVariable(next, group, index, event.target.value),
+                      )
+                    }
+                  />
+                </th>
                 {columns[group].map((column) => {
                   const value = (
                     row as unknown as Record<string, string | number | null>
@@ -559,18 +570,13 @@ function Strategy() {
     project,
     locked,
     dirty,
-    refresh,
-    setNotification,
+    source,
+    sourceDirty,
+    loadSource,
+    editSource,
+    saveSource,
   } = useWorkspace();
-  const [source, setSource] = useState<{ source: string; revision: string }>();
   if (!cfg) return null;
-  async function loadSource() {
-    try {
-      setSource(await request(`${projectPath(project)}/strategy/source`));
-    } catch (error) {
-      setNotification((error as Error).message);
-    }
-  }
   return (
     <>
       <section className="panel">
@@ -780,61 +786,72 @@ function Strategy() {
         <p className="mono">
           {cfg.logic.custom_rust.source_path || "No template generated"}
         </p>
+        <div className="form-grid">
+          {(["strategy_name", "source_path", "artifact_path"] as const).map(
+            (key) => (
+              <Field key={key} label={`Custom ${key.replaceAll("_", " ")}`}>
+                <Input
+                  value={cfg.logic.custom_rust[key]}
+                  onChange={(event) =>
+                    edit((next) => {
+                      next.logic.custom_rust[key] = event.target.value;
+                      next.logic.custom_rust.compatible = false;
+                    })
+                  }
+                />
+              </Field>
+            ),
+          )}
+        </div>
         <p>{cfg.logic.custom_rust.last_build_message}</p>
         <div className="inline">
           <Button
             variant="outline"
-            disabled={locked || dirty}
+            disabled={locked || dirty || sourceDirty}
             onClick={() =>
-              void act(`${projectPath(project)}/strategy/template`).catch(
-                () => {},
-              )
+              void act(`${projectPath(project)}/strategy/template`)
+                .then(() => loadSource())
+                .catch(() => {})
             }
           >
-            Generate template
+            {cfg.logic.custom_rust.strategy_name
+              ? "Regenerate template · back up current source"
+              : "Generate template"}
           </Button>
           <Button
             variant="outline"
-            disabled={locked || dirty}
+            disabled={locked || dirty || sourceDirty}
             onClick={() =>
               void startJob({ kind: "strategy_build" }).catch(() => {})
             }
           >
             Build & check contract
           </Button>
-          <Button variant="ghost" onClick={() => void loadSource()}>
-            Load source
+          <Button variant="ghost" onClick={() => void loadSource(true)}>
+            {sourceDirty
+              ? "Reload saved source · discard draft"
+              : "Load source"}
           </Button>
         </div>
         {source && (
           <>
+            {sourceDirty && (
+              <Notice>
+                Unsaved source draft · {project}. Navigation preserves this
+                draft.
+              </Notice>
+            )}
             <textarea
               className="source-editor"
               spellCheck={false}
               aria-label="Custom Rust source"
               value={source.source}
-              onChange={(event) =>
-                setSource({ ...source, source: event.target.value })
-              }
+              onChange={(event) => editSource(event.target.value)}
             />
             <div className="inline">
               <Button
-                disabled={locked}
-                onClick={() =>
-                  void act(
-                    `${projectPath(project)}/strategy/source`,
-                    source,
-                    "PUT",
-                  )
-                    .then(async (result) => {
-                      setSource({
-                        ...source,
-                        revision: (result as { revision: string }).revision,
-                      });
-                      await refresh();
-                    })
-                    .catch(() => {})
-                }
+                disabled={locked || !sourceDirty}
+                onClick={() => void saveSource()}
               >
                 Save source
               </Button>
@@ -858,6 +875,18 @@ function Settings() {
     <>
       <section className="panel">
         <h2>Fault progression</h2>
+        <label className="check-label">
+          <input
+            type="checkbox"
+            checked={Boolean(cfg.runtime.execution_time_test)}
+            onChange={(event) =>
+              edit((next) => {
+                next.runtime.execution_time_test = event.target.checked;
+              })
+            }
+          />
+          Record controller timing metrics
+        </label>
         <div className="form-grid">
           {(["alarm_timeout_ms", "off_timeout_ms"] as const).map((key) => (
             <Field key={key} label={key.replaceAll("_", " ")}>
@@ -909,6 +938,7 @@ function Settings() {
             <input
               hidden
               type="file"
+              aria-label="Import project TOML"
               accept=".toml"
               onChange={(event) => {
                 const file = event.target.files?.[0];

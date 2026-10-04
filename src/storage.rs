@@ -20,6 +20,16 @@ pub struct SignalSample {
     pub value: SignalValue,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistoryWindow {
+    pub samples: Vec<SignalSample>,
+    pub original_count: usize,
+    pub downsampled: bool,
+    pub sample_limit: usize,
+}
+
+pub const HISTORY_SAMPLE_LIMIT: usize = 20_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SampleValueKind {
@@ -52,6 +62,10 @@ impl SqliteStorage {
     pub fn new(db_path: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = Connection::open(&db_path)?;
+        // Chart readers use separate connections. WAL lets them read a consistent
+        // snapshot without holding up controller sample writes for the query duration.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
 
         conn.execute_batch(
             "
@@ -231,6 +245,75 @@ impl SqliteStorage {
         self.read_samples_since(since)
     }
 
+    /// Bound browser history in SQL, before allocation/serialization. Each time
+    /// bucket retains its first/last points and extrema so narrow spikes and
+    /// boolean excursions survive downsampling. The latest point of every series
+    /// is retained under ordinary catalog sizes, including forecast log series.
+    pub fn read_browser_history_window(&self, window_ms: u64) -> Result<HistoryWindow> {
+        let conn = self.conn.lock();
+        let latest: Option<i64> =
+            conn.query_row("SELECT MAX(timestamp_ms) FROM signal_samples", [], |row| {
+                row.get(0)
+            })?;
+        let Some(latest) = latest else {
+            return Ok(HistoryWindow {
+                sample_limit: HISTORY_SAMPLE_LIMIT,
+                ..Default::default()
+            });
+        };
+        let since = latest.saturating_sub(window_ms as i64);
+        let (original_count, series_count): (usize, usize) = conn.query_row(
+            "SELECT COALESCE(SUM(n), 0), COUNT(*) FROM
+             (SELECT COUNT(*) n FROM signal_samples WHERE timestamp_ms >= ?1
+              GROUP BY direction, signal)",
+            [since],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let points_per_series = (HISTORY_SAMPLE_LIMIT / series_count.max(1)).clamp(8, 600);
+        // Leave room for the inclusive right edge and four points per bucket.
+        let buckets = points_per_series / 4 - 1;
+        let bucket_ms = (window_ms.max(1) as usize).div_ceil(buckets) as i64;
+        let mut stmt = conn.prepare(
+            "WITH bucketed AS (
+                SELECT *, (timestamp_ms - ?1) / ?2 AS bucket
+                FROM signal_samples WHERE timestamp_ms >= ?1
+             ), ranked AS (
+                SELECT *,
+                  ROW_NUMBER() OVER (PARTITION BY direction, signal, bucket ORDER BY timestamp_ms, id) first_point,
+                  ROW_NUMBER() OVER (PARTITION BY direction, signal, bucket ORDER BY timestamp_ms DESC, id DESC) last_point,
+                  ROW_NUMBER() OVER (PARTITION BY direction, signal, bucket ORDER BY COALESCE(value_f64, value_bool), id) low_point,
+                  ROW_NUMBER() OVER (PARTITION BY direction, signal, bucket ORDER BY COALESCE(value_f64, value_bool) DESC, id DESC) high_point
+                FROM bucketed
+             ), limited AS (
+                SELECT * FROM ranked
+                WHERE first_point = 1 OR last_point = 1 OR low_point = 1 OR high_point = 1
+                ORDER BY timestamp_ms DESC, id DESC LIMIT ?3
+             )
+             SELECT timestamp_ms, direction, signal, value_f64, value_bool FROM limited
+             ORDER BY timestamp_ms, id",
+        )?;
+        let samples = stmt
+            .query_map(params![since, bucket_ms, HISTORY_SAMPLE_LIMIT], |row| {
+                let numeric: Option<f64> = row.get(3)?;
+                let boolean: Option<i64> = row.get(4)?;
+                Ok(SignalSample {
+                    timestamp_ms: row.get(0)?,
+                    direction: row.get(1)?,
+                    signal: row.get(2)?,
+                    value: numeric
+                        .map(SignalValue::F64)
+                        .unwrap_or(SignalValue::Bool(boolean.unwrap_or(0) != 0)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(HistoryWindow {
+            downsampled: samples.len() < original_count,
+            samples,
+            original_count,
+            sample_limit: HISTORY_SAMPLE_LIMIT,
+        })
+    }
+
     pub fn read_series_catalog(&self) -> Result<Vec<SeriesCatalogEntry>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -313,6 +396,62 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn browser_history_preserves_spikes_boolean_excursions_and_latest_points() {
+        let dir = tempdir().expect("temporary history");
+        let db = SqliteStorage::new(dir.path().join("history.sqlite")).unwrap();
+        for timestamp in 0..8_000 {
+            db.store_signal_map_at(
+                timestamp,
+                "input",
+                &HashMap::from([
+                    (
+                        "pv".into(),
+                        SignalValue::F64(if timestamp == 2_033 {
+                            99.0
+                        } else if timestamp == 2_034 {
+                            -99.0
+                        } else {
+                            1.0
+                        }),
+                    ),
+                    ("enable".into(), SignalValue::Bool(timestamp == 3_005)),
+                ]),
+            )
+            .unwrap();
+        }
+        let window = db.read_browser_history_window(10_000).unwrap();
+        assert!(window.downsampled);
+        assert_eq!(window.original_count, 16_000);
+        assert!(window.samples.len() <= 1_200);
+        for (stamp, value) in [
+            (2_033, SignalValue::F64(99.0)),
+            (2_034, SignalValue::F64(-99.0)),
+            (3_005, SignalValue::Bool(true)),
+        ] {
+            assert!(
+                window
+                    .samples
+                    .iter()
+                    .any(|row| row.timestamp_ms == stamp && row.value == value)
+            );
+        }
+        assert_eq!(
+            window
+                .samples
+                .iter()
+                .filter(|row| row.timestamp_ms == 7_999)
+                .count(),
+            2
+        );
+        assert!(
+            window
+                .samples
+                .windows(2)
+                .all(|rows| rows[0].timestamp_ms <= rows[1].timestamp_ms)
+        );
+    }
 
     #[test]
     fn stores_and_reads_signal_samples() {

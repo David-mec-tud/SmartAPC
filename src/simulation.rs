@@ -29,6 +29,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SimulationSnapshot {
+    pub execution_id: String,
     pub project_name: String,
     pub state: RuntimeState,
     pub metrics: RuntimeMetrics,
@@ -38,6 +39,7 @@ pub struct SimulationSnapshot {
 }
 
 pub(crate) struct SimulationCore {
+    execution_id: String,
     config: ProjectConfig,
     logic_io: crate::project_config::IoConfig,
     limits: LimitsConfig,
@@ -47,6 +49,7 @@ pub(crate) struct SimulationCore {
     storage: SqliteStorage,
     log_file: BufWriter<File>,
     pending_log_records: usize,
+    last_log_flush: Instant,
     rng: SmallRng,
     state: RuntimeState,
     plant_state: Vec<f64>,
@@ -92,6 +95,7 @@ impl SimulationCore {
         reset_startup_scale_matrices(&mut config.simulation, &model);
 
         let mut core = Self {
+            execution_id: uuid::Uuid::new_v4().to_string(),
             current_cv: config.simulation.cv_initials.clone(),
             current_mv: config.simulation.mv_initials.clone(),
             current_dv: config.simulation.dv_initials.clone(),
@@ -118,6 +122,7 @@ impl SimulationCore {
             storage,
             log_file: BufWriter::with_capacity(64 * 1024, log_file),
             pending_log_records: 0,
+            last_log_flush: Instant::now(),
         };
         core.initialize_steady_state()?;
         core.last_inputs = core.build_inputs();
@@ -126,6 +131,7 @@ impl SimulationCore {
 
     pub(crate) fn snapshot(&self) -> SimulationSnapshot {
         SimulationSnapshot {
+            execution_id: self.execution_id.clone(),
             project_name: self.config.name.clone(),
             state: self.state,
             metrics: RuntimeMetrics {
@@ -515,11 +521,15 @@ impl SimulationCore {
         let encoded = serde_json::to_string(&record).context("failed to encode simulation log")?;
         writeln!(self.log_file, "{encoded}").context("failed writing simulation log line")?;
         self.pending_log_records += 1;
-        if self.pending_log_records >= 64 {
+        // Batch fast simulation logs while making slow real-time runs visible
+        // to the browser within one wall-clock second of their next cycle.
+        if self.pending_log_records >= 64 || self.last_log_flush.elapsed() >= Duration::from_secs(1)
+        {
             self.log_file
                 .flush()
                 .context("failed flushing simulation log")?;
             self.pending_log_records = 0;
+            self.last_log_flush = Instant::now();
         }
         Ok(())
     }

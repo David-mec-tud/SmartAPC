@@ -54,10 +54,36 @@ pub fn generate_template(
         bail!("I/O is empty. Complete the I/O definition first.");
     }
     let strategy_root = service.project_dir(name).join("logic/custom_strategy");
-    // Regeneration must never silently overwrite the user's controller code.
+    let project_root = service.project_dir(name).canonicalize()?;
+    // Check existing ancestors and files before creating directories or reading
+    // backups. A project may contain symlinks placed by an external editor.
+    for relative in ["Cargo.toml", "src/lib.rs", "src/generated_dispatch.rs"] {
+        require_project_path(&project_root, &strategy_root.join(relative))?;
+    }
+    require_project_path(
+        &project_root,
+        &service.project_dir(name).join("logic/backups"),
+    )?;
+    let mut backup_message = String::new();
+    // Regeneration preserves the three files it replaces plus the saved project.
+    // The compiled artifact is untouched until the user explicitly builds again.
     if strategy_root.join("src/lib.rs").exists() {
-        bail!(
-            "custom source already exists; edit or download it before generating another template"
+        let backup = service
+            .project_dir(name)
+            .join("logic/backups")
+            .join(uuid::Uuid::new_v4().to_string());
+        for relative in ["Cargo.toml", "src/lib.rs", "src/generated_dispatch.rs"] {
+            let original = strategy_root.join(relative);
+            if original.is_file() {
+                let saved = backup.join(relative);
+                fs::create_dir_all(saved.parent().context("missing backup directory")?)?;
+                fs::copy(original, saved)?;
+            }
+        }
+        fs::copy(service.config_path(name), backup.join("project.toml"))?;
+        backup_message = format!(
+            " Previous source and metadata backed up to {}.",
+            backup.strip_prefix(service.project_dir(name))?.display()
         );
     }
     let strategy_name = format!("{}_custom_logic", sanitize_crate_name(name));
@@ -99,7 +125,8 @@ pub fn generate_template(
     custom.required_inputs = inputs;
     custom.required_outputs = outputs;
     custom.compatible = false;
-    custom.last_build_message = "Template generated. Build and check the strategy.".into();
+    custom.last_build_message =
+        format!("Template generated. Build and check the strategy.{backup_message}");
     if cfg.logic.kind == LogicKind::CustomRust {
         cfg.logic.kind = LogicKind::PController;
     }
@@ -107,11 +134,31 @@ pub fn generate_template(
     service.load_config(name)
 }
 
+/// A missing destination is allowed only when its nearest existing ancestor is
+/// inside this project. Existing leaf symlinks are checked as well.
+fn require_project_path(root: &Path, destination: &Path) -> Result<()> {
+    let mut ancestor = destination;
+    while fs::symlink_metadata(ancestor).is_err() {
+        ancestor = ancestor.parent().context("missing project path ancestor")?;
+    }
+    if !ancestor.canonicalize()?.starts_with(root) {
+        bail!("custom strategy files must belong to the selected project");
+    }
+    Ok(())
+}
+
 /// Call on a blocking worker: Cargo and dynamic-library inspection can take minutes.
 pub fn build_strategy(service: &ProjectService, name: &str) -> Result<BuildReport> {
     let mut cfg = service.load_config(name)?;
     let source = source_path(service, name)?;
     let schema = parse_custom_parameter_schema_from_source(&fs::read_to_string(&source)?)?;
+    require_project_path(
+        &service.project_dir(name).canonicalize()?,
+        &source
+            .parent()
+            .context("missing source directory")?
+            .join("generated_dispatch.rs"),
+    )?;
     fs::write(
         source
             .parent()
@@ -620,4 +667,83 @@ pub fn parameter_schema() -> Vec<crate::ParameterSchemaEntry> {{
 }}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{project_config::SignalPoint, types::SignalType};
+
+    fn project(service: &ProjectService) {
+        let mut cfg = service.create_project("template").unwrap();
+        cfg.io.outputs.push(SignalPoint {
+            name: "mv.u1.write".into(),
+            signal_type: SignalType::F64,
+            address: "ns=2;s=u1_write".into(),
+            opc_tag: None,
+        });
+        service.save_config("template", &cfg).unwrap();
+    }
+
+    #[test]
+    fn regeneration_preserves_source_dispatch_manifest_and_saved_contract() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = ProjectService::new(temporary.path());
+        project(&service);
+        generate_template(&service, "template").unwrap();
+        let root = service.project_dir("template");
+        fs::write(
+            root.join("logic/custom_strategy/src/lib.rs"),
+            "// operator source",
+        )
+        .unwrap();
+        let saved_config = fs::read(service.config_path("template")).unwrap();
+        let regenerated = generate_template(&service, "template").unwrap();
+        let backup = fs::read_dir(root.join("logic/backups"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read_to_string(backup.join("src/lib.rs")).unwrap(),
+            "// operator source"
+        );
+        assert_eq!(fs::read(backup.join("project.toml")).unwrap(), saved_config);
+        assert!(backup.join("Cargo.toml").is_file());
+        assert!(backup.join("src/generated_dispatch.rs").is_file());
+        assert!(!regenerated.logic.custom_rust.compatible);
+        assert!(
+            regenerated
+                .logic
+                .custom_rust
+                .last_build_message
+                .contains("backed up")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regeneration_rejects_external_symlink_before_overwriting_or_backing_up() {
+        let temporary = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let service = ProjectService::new(temporary.path());
+        project(&service);
+        generate_template(&service, "template").unwrap();
+        let outside = external.path().join("source.rs");
+        fs::write(&outside, "// outside source").unwrap();
+        let source = service
+            .project_dir("template")
+            .join("logic/custom_strategy/src/lib.rs");
+        fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(&outside, &source).unwrap();
+        assert!(generate_template(&service, "template").is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "// outside source");
+        assert!(
+            !service
+                .project_dir("template")
+                .join("logic/backups")
+                .exists()
+        );
+    }
 }

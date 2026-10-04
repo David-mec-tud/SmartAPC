@@ -1,6 +1,7 @@
 pub mod communication;
 pub mod control_function_tests;
 pub mod deployment;
+#[cfg(feature = "legacy-native")]
 pub mod desktop;
 pub mod engineering;
 pub mod kalman_tuning;

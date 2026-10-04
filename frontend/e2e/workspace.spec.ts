@@ -1,59 +1,6 @@
-import { test, expect, type APIRequestContext } from "@playwright/test";
-// Every run creates a separate temporary project on the test backend. No OPC UA
-// test writes target any existing controller; engineering execution is simulated.
-async function seed(request: APIRequestContext, model = true) {
-  const name = `journey_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-  expect(
-    (await request.post("/api/projects", { data: { name } })).ok(),
-  ).toBeTruthy();
-  const response = await request.get(`/api/projects/${name}/config`);
-  const config = await response.json();
-  Object.assign(config.variables, { mvs: ["u1"], cvs: ["y1"], dvs: [] });
-  config.communication.endpoint_url = "mock://browser-journey";
-  config.communication.cycle_ms = 100;
-  config.io.cycle_ms = 100;
-  config.logic.cycle_ms = 100;
-  config.io_definition.mvs = [
-    {
-      name: "u1",
-      mv_write: "ns=2;s=U1_WRITE",
-      mv_read: "ns=2;s=U1_READ",
-      ll: -10,
-      hl: 10,
-    },
-  ];
-  config.io_definition.cvs = [
-    {
-      name: "y1",
-      setpoint: "ns=2;s=Y1_SP",
-      process_value: "ns=2;s=Y1_PV",
-      ll: -100,
-      hl: 100,
-    },
-  ];
-  config.logic.p_controller.pairs = [{ cv: "y1", mv: "u1", kp: 1, bias: 0 }];
-  if (model)
-    config.model = {
-      kind: "linear_state_space",
-      state_count: 1,
-      u_order: ["u1"],
-      y_order: ["y1"],
-      a: [[-1]],
-      b: [[1]],
-      c: [[1]],
-      d: [[0]],
-    };
-  config.simulation.cv_setpoints = { y1: 2 };
-  expect(
-    (
-      await request.put(`/api/projects/${name}/config`, {
-        data: config,
-        headers: { "If-Match": response.headers().etag },
-      })
-    ).ok(),
-  ).toBeTruthy();
-  return name;
-}
+import { test, expect } from "@playwright/test";
+import { seed, stopTestExecution } from "./fixtures";
+test.afterEach(async ({ request }) => stopTestExecution(request));
 test("save and reload optional CV offsets; report stale configuration without losing a draft", async ({
   page,
   request,
@@ -263,4 +210,161 @@ test("MPC movement cost stays boolean and external CV edges stay out of editing 
   await page
     .getByRole("button", { name: "Stop simulation", exact: true })
     .click();
+});
+
+test("custom source drafts follow their project; build, schema, simulation and user logs work through Rust", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+  const name = await seed(request);
+  const other = await seed(request);
+  await page.goto("/configuration/strategy");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page
+    .getByRole("button", { name: "Generate template", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+          .custom_rust.strategy_name,
+    )
+    .not.toBe("");
+  const editor = page.getByLabel("Custom Rust source");
+  await expect(editor).toContainText("pub fn control");
+  const source =
+    (await editor.inputValue())
+      .replace(
+        "pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs)",
+        "pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64, enabled: bool)",
+      )
+      .replace(
+        "let _ = ctx;",
+        'let _ = enabled;\n    out.log_value("web_custom", "custom.gain", SignalValue::F64(gain));\n    out.log_value("web_custom", "custom.history", SignalValue::F64(ctx.input_history.len() as f64));',
+      )
+      .replace(
+        "out.set_f64(output_name, 0.0);",
+        "out.set_f64(output_name, gain);",
+      ) + "\n// Draft owned by first project\n";
+  await editor.fill(source);
+  await page
+    .getByRole("link", { name: "Variables & I/O", exact: true })
+    .click();
+  await page
+    .getByRole("link", { name: "Control strategy", exact: true })
+    .click();
+  await expect(editor).toHaveValue(source);
+  await page.getByLabel("Editing project", { exact: true }).selectOption(other);
+  await expect(editor).toHaveCount(0);
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await expect(editor).toHaveValue(source);
+  await page.getByRole("button", { name: "Save source", exact: true }).click();
+  await expect(
+    page.getByText(
+      "Source saved. Build and check its contract before running.",
+    ),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Build & check contract", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/jobs`)).json())[0]
+          .phase,
+      { timeout: 90_000 },
+    )
+    .toBe("succeeded");
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+          .custom_rust.compatible,
+    )
+    .toBe(true);
+  await expect(
+    page.getByText("Build succeeded; contract is compatible", { exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("Selected strategy").selectOption("custom_rust");
+  await page
+    .getByRole("button", { name: "Save configuration", exact: true })
+    .click();
+  await expect(page.getByLabel("gain", { exact: true })).toBeVisible();
+  await page.getByLabel("gain", { exact: true }).fill("1.25");
+  await page
+    .getByRole("combobox", { name: "enabled", exact: true })
+    .selectOption("true");
+  await page
+    .getByRole("button", { name: "Save configuration", exact: true })
+    .click();
+  await page.getByRole("link", { name: "Simulation", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Start saved simulation", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get("/api/execution/state")).json()).snapshot
+          .last_outputs["mv.u1.write"]?.value,
+    )
+    .toBe(1.25);
+  await expect
+    .poll(async () =>
+      (
+        await (
+          await request.get(`/api/projects/${name}/logs?mode=simulation`)
+        ).json()
+      ).some((row: { user_logs?: { message: string }[] }) =>
+        row.user_logs?.some((log) => log.message === "web_custom"),
+      ),
+    )
+    .toBe(true);
+  await page.getByRole("link", { name: "Logs & events", exact: true }).click();
+  await page.getByLabel("Search logs").fill("web_custom");
+  await expect(page.locator(".log-list details").first()).toBeVisible();
+  await page
+    .getByRole("button", { name: "Stop simulation", exact: true })
+    .click();
+  await expect
+    .poll(async () => await (await request.get("/api/execution/state")).json())
+    .toBeNull();
+  await page
+    .getByRole("link", { name: "Control strategy", exact: true })
+    .click();
+  await page
+    .getByRole("button", {
+      name: "Regenerate template · back up current source",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByText(/Previous source and metadata backed up/),
+  ).toBeVisible();
+  await expect(editor).not.toHaveValue(source);
+  await editor.fill(
+    (await editor.inputValue()) +
+      "\nfn type_error() { let _ = unknown_identifier; }\n",
+  );
+  await page.getByRole("button", { name: "Save source", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Build & check contract", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/jobs`)).json())[0]
+          .phase,
+      { timeout: 90000 },
+    )
+    .toBe("failed");
+  const jobs = await (await request.get(`/api/projects/${name}/jobs`)).json();
+  const report = await (
+    await request.get(`/api/projects/${name}/jobs/${jobs[0].id}`)
+  ).json();
+  expect(report.result.output).toContain("unknown_identifier");
+  expect(
+    (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+      .custom_rust.compatible,
+  ).toBe(false);
 });

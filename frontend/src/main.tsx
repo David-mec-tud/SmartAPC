@@ -36,6 +36,7 @@ import {
 import { type Readiness, projectPath, request } from "./api";
 import { WorkspaceProvider, useWorkspace } from "./workspace";
 import { Configuration } from "./pages/Configuration";
+import { VirtualHardware } from "./pages/VirtualHardware";
 import { Engineering } from "./pages/Engineering";
 import { Operation, Trends } from "./pages/Operation";
 import { Deployment } from "./pages/Deployment";
@@ -308,6 +309,7 @@ function Shell() {
                     action: "stop",
                     project_name: execution.snapshot.project_name,
                     mode: execution.mode,
+                    execution_id: execution.snapshot.execution_id,
                   })
                     .catch(() => {})
                     .finally(() => setPending(false));
@@ -515,6 +517,15 @@ function Overview() {
     </>
   );
 }
+function Application() {
+  const location = useLocation();
+  if (location.pathname === "/virtual-hardware") return <VirtualHardware />;
+  return (
+    <WorkspaceProvider>
+      <Shell />
+    </WorkspaceProvider>
+  );
+}
 const query = new QueryClient({
   defaultOptions: {
     queries: { retry: 1, staleTime: 5000, refetchOnWindowFocus: true },
@@ -525,9 +536,7 @@ createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={query}>
       <BrowserRouter>
-        <WorkspaceProvider>
-          <Shell />
-        </WorkspaceProvider>
+        <Application />
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>,

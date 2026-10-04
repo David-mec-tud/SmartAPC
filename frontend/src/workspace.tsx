@@ -14,10 +14,25 @@ import {
   type Job,
   type ProjectConfig,
   type SavedProject,
+  type SourceDocument,
   type Workspace,
 } from "./api";
 interface Draft extends SavedProject {
   original: string;
+}
+interface SourceDraft extends SourceDocument {
+  original: string;
+}
+// Rust maps have no serialized key order. Compare values canonically so a
+// refreshed map does not manufacture an unsaved draft after a scoped save.
+function configurationFingerprint(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (item && typeof item === "object" && !Array.isArray(item))
+      return Object.fromEntries(
+        Object.entries(item).sort(([a], [b]) => a.localeCompare(b)),
+      );
+    return item;
+  });
 }
 function useWorkspaceState() {
   const client = useQueryClient();
@@ -25,8 +40,11 @@ function useWorkspaceState() {
     sessionStorage.getItem("project") || "",
   );
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  // Keep source text owned by its project across route changes and selection changes.
+  const [sources, setSources] = useState<Record<string, SourceDraft>>({});
   const [notification, setNotification] = useState("");
   const [streamConnected, setStreamConnected] = useState(false);
+  const [syncingJob, setSyncingJob] = useState(false);
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => request<string[]>("/api/projects"),
@@ -54,6 +72,27 @@ function useWorkspaceState() {
     enabled: !!project,
     refetchInterval: 1500,
   });
+  const terminalJobs = jobs.data
+    ?.filter((job) => job.phase !== "running")
+    .map((job) => `${job.id}:${job.finished_at}`)
+    .join(",");
+  useEffect(() => {
+    if (terminalJobs === undefined) return;
+    let disposed = false;
+    setSyncingJob(true);
+    // Builds update saved compatibility and schemas. Refresh before unlocking
+    // editors, so the next edit starts from the build's authoritative revision.
+    void Promise.all([
+      client.invalidateQueries({ queryKey: ["project", project] }),
+      client.invalidateQueries({ queryKey: ["catalog", project] }),
+      client.invalidateQueries({ queryKey: ["readiness", project] }),
+    ]).finally(() => {
+      if (!disposed) setSyncingJob(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [client, project, terminalJobs]);
   useEffect(() => {
     const events = new EventSource("/api/events");
     events.addEventListener("workspace", (event) => {
@@ -75,19 +114,78 @@ function useWorkspaceState() {
   const current = drafts[project];
   const config = current?.config ?? saved.data?.config;
   const dirty =
-    !!current && JSON.stringify(current.config) !== current.original;
+    !!current && configurationFingerprint(current.config) !== current.original;
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (
         Object.values(drafts).some(
-          (draft) => JSON.stringify(draft.config) !== draft.original,
+          (draft) => configurationFingerprint(draft.config) !== draft.original,
+        ) ||
+        Object.values(sources).some(
+          (source) => source.source !== source.original,
         )
       )
         event.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [drafts]);
+  }, [drafts, sources]);
+  async function loadSource(discardDraft = false) {
+    const name = project;
+    const requestedText = sources[name]?.source;
+    try {
+      const source = await request<SourceDocument>(
+        `${projectPath(name)}/strategy/source`,
+      );
+      setSources((previous) => {
+        // A delayed automatic/template load must never replace text typed while
+        // the request was in flight. Explicit Reload remains the discard action.
+        const current = previous[name];
+        if (
+          current &&
+          current.source !== current.original &&
+          (!discardDraft || current.source !== requestedText)
+        )
+          return previous;
+        return { ...previous, [name]: { ...source, original: source.source } };
+      });
+    } catch (error) {
+      setNotification((error as Error).message);
+    }
+  }
+  function editSource(text: string) {
+    setSources((previous) => {
+      const source = previous[project];
+      return source
+        ? { ...previous, [project]: { ...source, source: text } }
+        : previous;
+    });
+  }
+  async function saveSource() {
+    const name = project;
+    const submitted = sources[name];
+    if (!submitted) return;
+    try {
+      const result = await request<{
+        revision: string;
+        source_revision: string;
+      }>(`${projectPath(name)}/strategy/source`, submitted, "PUT");
+      setSources((previous) => ({
+        ...previous,
+        [name]: {
+          ...previous[name],
+          ...result,
+          original: submitted.source,
+        },
+      }));
+      await client.invalidateQueries({ queryKey: ["project", name] });
+      setNotification(
+        "Source saved. Build and check its contract before running.",
+      );
+    } catch (error) {
+      setNotification((error as Error).message);
+    }
+  }
   function edit(update: (cfg: ProjectConfig) => void) {
     if (!config || !saved.data) return;
     const next = structuredClone(config);
@@ -97,7 +195,8 @@ function useWorkspaceState() {
       [project]: {
         config: next,
         revision: current?.revision ?? saved.data.revision,
-        original: current?.original ?? JSON.stringify(saved.data.config),
+        original:
+          current?.original ?? configurationFingerprint(saved.data.config),
       },
     }));
   }
@@ -112,7 +211,7 @@ function useWorkspaceState() {
     mutationFn: async () => {
       if (!config || !saved.data) throw Error("No project selected");
       const name = project;
-      const submitted = JSON.stringify(config);
+      const submitted = configurationFingerprint(config);
       await request<ProjectConfig>(
         `${projectPath(name)}/config`,
         config,
@@ -126,13 +225,16 @@ function useWorkspaceState() {
       setDrafts((previous) => {
         const next = { ...previous };
         const draft = next[result.name];
-        if (draft && JSON.stringify(draft.config) === result.submitted)
+        if (
+          draft &&
+          configurationFingerprint(draft.config) === result.submitted
+        )
           delete next[result.name];
         else if (draft)
           next[result.name] = {
             ...draft,
             revision: result.saved.revision,
-            original: JSON.stringify(result.saved.config),
+            original: configurationFingerprint(result.saved.config),
           };
         return next;
       });
@@ -184,7 +286,7 @@ function useWorkspaceState() {
         [name]: {
           config,
           revision: authoritative.revision,
-          original: JSON.stringify(authoritative.config),
+          original: configurationFingerprint(authoritative.config),
         },
       };
     });
@@ -192,7 +294,7 @@ function useWorkspaceState() {
   const execution = workspace.data?.execution ?? null;
   const executingProject = execution?.snapshot.project_name;
   const busyJob = jobs.data?.some((job) => job.phase === "running");
-  const locked = executingProject === project || !!busyJob;
+  const locked = executingProject === project || !!busyJob || syncingJob;
   return {
     project,
     setProject,
@@ -214,6 +316,13 @@ function useWorkspaceState() {
     act,
     startJob,
     acceptSavedSection,
+    source: sources[project],
+    sourceDirty:
+      !!sources[project] &&
+      sources[project].source !== sources[project].original,
+    loadSource,
+    editSource,
+    saveSource,
   };
 }
 type State = ReturnType<typeof useWorkspaceState>;

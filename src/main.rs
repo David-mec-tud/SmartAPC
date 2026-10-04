@@ -3,11 +3,15 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "legacy-native")]
 use smartapc::{
     desktop::{DesktopSettings, run as run_desktop},
+    virtual_hardware::run_native,
+};
+use smartapc::{
     project::ProjectService,
     runtime::RuntimeManager,
-    virtual_hardware::{VirtualHardwareConfig, run as run_virtual_hardware},
+    virtual_hardware::{VirtualHardwareConfig, run as run_virtual_hardware, run_browser},
     web::{AppState, serve},
 };
 
@@ -20,6 +24,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[cfg(feature = "legacy-native")]
     Desktop {
         #[arg(long, default_value = "./projects")]
         project_root: PathBuf,
@@ -59,6 +64,16 @@ enum Command {
         gain: f64,
         #[arg(long, default_value_t = 120)]
         history: usize,
+        /// Serve the local React/Plotly feedback page on this HTTP port.
+        #[arg(long, default_value_t = 8081)]
+        web_port: u16,
+        /// Run only the OPC UA plant, with no HTTP feedback server.
+        #[arg(long)]
+        no_web: bool,
+        /// Use the transitional native plot window instead of browser feedback.
+        #[arg(long, conflicts_with = "no_web")]
+        #[cfg(feature = "legacy-native")]
+        native_plot: bool,
     },
 }
 
@@ -77,6 +92,7 @@ fn main() -> anyhow::Result<()> {
         project_root: PathBuf::from("./projects"),
         project: None,
     }) {
+        #[cfg(feature = "legacy-native")]
         Command::Desktop {
             project_root,
             host,
@@ -131,20 +147,38 @@ fn main() -> anyhow::Result<()> {
             tau_s,
             gain,
             history,
+            web_port,
+            no_web,
+            #[cfg(feature = "legacy-native")]
+            native_plot,
         } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .context("failed to create tokio runtime for virtual hardware")?;
 
-            runtime.block_on(run_virtual_hardware(VirtualHardwareConfig {
+            let web_bind: SocketAddr = format!("{host}:{web_port}")
+                .parse()
+                .context("invalid virtual hardware web host/port")?;
+            let config = VirtualHardwareConfig {
                 host,
                 port,
                 dt_ms,
                 tau_s,
                 gain,
                 history,
-            }))
+            };
+            runtime.block_on(async {
+                #[cfg(feature = "legacy-native")]
+                if native_plot {
+                    return run_native(config).await;
+                }
+                if no_web {
+                    run_virtual_hardware(config).await
+                } else {
+                    run_browser(config, web_bind).await
+                }
+            })
         }
     }
 }

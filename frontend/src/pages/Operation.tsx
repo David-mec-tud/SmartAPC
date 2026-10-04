@@ -7,6 +7,7 @@ import {
   type Parameters,
   type PlotConfig,
   type Sample,
+  type HistoryWindow,
   type Series,
   projectPath,
   request,
@@ -23,9 +24,11 @@ import {
 } from "../components/ui";
 import { Plot } from "../components/Plot";
 import { RangeTable } from "./Engineering";
+import { makeTraces, futureTraces } from "../charts";
 
 export function Operation() {
   const { section = "trends" } = useParams();
+  const { project, execution } = useWorkspace();
   return (
     <>
       <div className="page-title">
@@ -47,7 +50,9 @@ export function Operation() {
       {section === "trends" ? (
         <Trends />
       ) : section === "parameters" ? (
-        <OnlineParameters />
+        <OnlineParameters
+          key={`${project}:${execution?.snapshot.execution_id}`}
+        />
       ) : section === "optimization" ? (
         <OnlineOptimization />
       ) : section === "logs" ? (
@@ -59,100 +64,6 @@ export function Operation() {
   );
 }
 
-export function makeTraces(
-  samples: Sample[],
-  selected: Series[],
-  mode: Mode,
-): Data[] {
-  return selected.map((series) => {
-    const points = samples.filter(
-      (row) =>
-        row.direction === series.direction && row.signal === series.signal,
-    );
-    // Bound display work independently of backend/control frequency.
-    const step = Math.max(1, Math.ceil(points.length / 1800));
-    const displayed = points.filter(
-      (_, index) => index % step === 0 || index === points.length - 1,
-    );
-    return {
-      x: displayed.map((row) =>
-        mode === "simulation"
-          ? row.timestamp_ms / 1000
-          : new Date(row.timestamp_ms),
-      ),
-      y: displayed.map((row) => Number(row.value.value)),
-      name: `${series.signal} · ${series.direction}`,
-      uid: `${series.direction}::${series.signal}`,
-      type: "scatter",
-      mode: "lines",
-      line: {
-        shape: series.value_kind === "bool" ? "hv" : "linear",
-        color: signalColor(`${series.direction}::${series.signal}`),
-      },
-    };
-  });
-}
-function signalColor(identity: string) {
-  let hash = 0;
-  for (const character of identity)
-    hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  const palette = [
-    "#2c8a7a",
-    "#527ad4",
-    "#b17a34",
-    "#b86d9b",
-    "#6d8a46",
-    "#aa6458",
-  ];
-  return palette[Math.abs(hash) % palette.length];
-}
-function futureTraces(
-  samples: Sample[],
-  kind: "mv" | "cv",
-  name: string,
-  mode: Mode,
-  cycleMs: number,
-  futureSec: number,
-): Data[] {
-  if (!futureSec || !samples.length) return [];
-  const prefixes =
-    kind === "cv"
-      ? ["future_pred_without_control.cv", "future_pred_with_control.cv"]
-      : ["future_pred_with_control.mv"];
-  return prefixes.map((prefix) => {
-    const matches = samples.filter(
-      (row) =>
-        row.signal.startsWith(`${prefix}.${name}.k`) &&
-        row.value.kind === "f64",
-    );
-    const stamp = matches.reduce(
-      (latest, row) => Math.max(latest, row.timestamp_ms),
-      0,
-    );
-    const horizon = matches
-      .filter((row) => row.timestamp_ms === stamp)
-      .map((row) => ({
-        step: Number(row.signal.split(".k").at(-1)),
-        value: Number(row.value.value),
-      }))
-      .filter((row) => row.step * cycleMs <= futureSec * 1000)
-      .sort((a, b) => a.step - b.step);
-    return {
-      x: horizon.map((row) =>
-        mode === "simulation"
-          ? (stamp + row.step * cycleMs) / 1000
-          : new Date(stamp + row.step * cycleMs),
-      ),
-      y: horizon.map((row) => row.value),
-      type: "scatter",
-      mode: "lines",
-      name: prefix.includes("without")
-        ? "Future · no control"
-        : "Future · with control",
-      line: { dash: "dot" },
-    };
-  });
-}
 export function Trends({ compact = false }: { compact?: boolean }) {
   const { project, saved, execution, act, setNotification } = useWorkspace();
   const [mode, setMode] = useState<Mode>("runtime");
@@ -171,22 +82,33 @@ export function Trends({ compact = false }: { compact?: boolean }) {
     setCustomSeries([]);
   }, [project, saved.data?.config.plots]);
   const history = useQuery({
-    queryKey: ["history", project, mode, plotConfig?.window_sec],
+    queryKey: [
+      "history",
+      project,
+      mode,
+      plotConfig?.window_sec,
+      active ? execution?.snapshot.execution_id : "saved",
+    ],
     queryFn: () =>
-      request<Sample[]>(
+      request<HistoryWindow>(
         `${projectPath(project)}/history?mode=${mode}&window_ms=${(plotConfig?.window_sec ?? 180) * 1000}`,
       ),
     enabled: !!project,
     refetchInterval: active ? 1500 : false,
   });
   const catalog = useQuery({
-    queryKey: ["series", project, mode],
+    queryKey: [
+      "series",
+      project,
+      mode,
+      active ? execution?.snapshot.execution_id : "saved",
+    ],
     queryFn: () =>
       request<Series[]>(`${projectPath(project)}/history/catalog?mode=${mode}`),
     enabled: !!project,
     refetchInterval: active ? 5000 : false,
   });
-  const samples = history.data ?? [];
+  const samples = history.data?.samples ?? [];
   const rows = catalog.data ?? [];
   const orders = plotConfig
     ? {
@@ -251,6 +173,13 @@ export function Trends({ compact = false }: { compact?: boolean }) {
         </Badge>
       </div>
       {history.error && <Notice error>{history.error.message}</Notice>}
+      {history.data?.downsampled && (
+        <p className="muted">
+          Displaying a bounded history window with first/last points and
+          extrema. {history.data.samples.length.toLocaleString()} of{" "}
+          {history.data.original_count.toLocaleString()} stored samples.
+        </p>
+      )}
       <div className="tabs">
         {(["mv", "cv", "dv", "custom"] as const).map((kind) => (
           <Button
@@ -271,7 +200,9 @@ export function Trends({ compact = false }: { compact?: boolean }) {
               const series = rows.filter(
                 (row) =>
                   row.signal.startsWith(`${group}.${name}.`) ||
-                  row.signal.startsWith(`io.${group}.${name}.`),
+                  row.signal.startsWith(`io.${group}.${name}.`) ||
+                  (group === "cv" &&
+                    row.signal.startsWith(`mpc.target.cv.${name}.`)),
               );
               // Absolute CV LL/HL describe optimization safety. Keeping them out
               // of ordinary trends also avoids flattening the measured CV scale.
@@ -455,14 +386,24 @@ function OnlineParameters() {
   const { project, execution, workspace, act } = useWorkspace();
   const active = execution?.snapshot.project_name === project;
   const params = useQuery({
-    queryKey: ["online-params", project, execution?.mode],
-    queryFn: () => request<Parameters>("/api/execution/params"),
+    queryKey: ["online-params", project, execution?.snapshot.execution_id],
+    queryFn: async () =>
+      (
+        await request<{ params: Parameters }>(
+          `/api/execution/parameters?project_name=${encodeURIComponent(project)}&mode=${execution?.mode}&execution_id=${execution?.snapshot.execution_id}`,
+        )
+      ).params,
     enabled: active,
     refetchInterval: 1500,
   });
   const [draft, setDraft] = useState<Parameters>({});
+  const [expected, setExpected] = useState<Parameters>({});
+  const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
-  useEffect(() => setDraft({}), [project, execution?.mode]);
+  useEffect(() => {
+    setDraft({});
+    setExpected({});
+  }, [project, execution?.snapshot.execution_id]);
   const locked = workspace.data?.online_optimization?.phase === "running";
   if (!active)
     return (
@@ -511,12 +452,19 @@ function OnlineParameters() {
                         aria-label={key}
                         disabled={locked}
                         value={String(draft[key] ?? value)}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          setExpected((previous) => ({
+                            ...previous,
+                            [key]:
+                              draft[key] === undefined
+                                ? value
+                                : (previous[key] ?? value),
+                          }));
                           setDraft((previous) => ({
                             ...previous,
                             [key]: event.target.value === "true",
-                          }))
-                        }
+                          }));
+                        }}
                       >
                         <option value="false">
                           {key.endsWith(".use_l1")
@@ -534,38 +482,90 @@ function OnlineParameters() {
                         aria-label={key}
                         disabled={locked}
                         value={Number(draft[key] ?? value)}
-                        onChange={(next) =>
+                        onChange={(next) => {
+                          setExpected((previous) => ({
+                            ...previous,
+                            [key]:
+                              draft[key] === undefined
+                                ? value
+                                : (previous[key] ?? value),
+                          }));
                           setDraft((previous) => ({
                             ...previous,
                             [key]: next ?? 0,
-                          }))
-                        }
+                          }));
+                        }}
                       />
                     )}
                   </td>
                   <td>
                     <Button
                       size="small"
-                      disabled={locked || draft[key] === undefined}
-                      onClick={() =>
+                      disabled={
+                        locked || applying[key] || draft[key] === undefined
+                      }
+                      onClick={() => {
+                        const submitted = draft[key];
+                        setApplying((previous) => ({
+                          ...previous,
+                          [key]: true,
+                        }));
                         void act("/api/execution/parameters", {
                           project_name: project,
                           mode: execution.mode,
+                          execution_id: execution.snapshot.execution_id,
                           params: { [key]: draft[key] },
+                          expected_params: { [key]: expected[key] },
                         })
                           .then(() => {
                             setDraft((previous) => {
                               const next = { ...previous };
-                              delete next[key];
+                              if (next[key] === submitted) delete next[key];
                               return next;
                             });
+                            setExpected((previous) => ({
+                              ...previous,
+                              [key]: submitted,
+                            }));
                             void params.refetch();
                           })
                           .catch(() => {})
-                      }
+                          .finally(() =>
+                            setApplying((previous) => ({
+                              ...previous,
+                              [key]: false,
+                            })),
+                          );
+                      }}
                     >
                       Apply online
                     </Button>
+                    {draft[key] !== undefined && expected[key] !== value && (
+                      <small>
+                        Applied value changed. Keep or reload your draft.
+                      </small>
+                    )}
+                    {draft[key] !== undefined && (
+                      <Button
+                        variant="ghost"
+                        size="small"
+                        aria-label={`Reload ${key} applied value`}
+                        onClick={() => {
+                          setDraft((previous) => {
+                            const next = { ...previous };
+                            delete next[key];
+                            return next;
+                          });
+                          setExpected((previous) => {
+                            const next = { ...previous };
+                            delete next[key];
+                            return next;
+                          });
+                        }}
+                      >
+                        Reload applied value
+                      </Button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -617,6 +617,7 @@ function OnlineOptimization() {
                 action: "start",
                 project_name: project,
                 mode: execution?.mode,
+                execution_id: execution?.snapshot.execution_id,
               }).catch(() => {})
             }
           >
@@ -630,6 +631,7 @@ function OnlineOptimization() {
                 action: "stop",
                 project_name: project,
                 mode: execution?.mode,
+                execution_id: execution?.snapshot.execution_id,
               }).catch(() => {})
             }
           >
@@ -643,6 +645,7 @@ function OnlineOptimization() {
                 action: "save_best",
                 project_name: project,
                 mode: execution?.mode,
+                execution_id: execution?.snapshot.execution_id,
               }).catch(() => {})
             }
           >
