@@ -2386,6 +2386,19 @@ mod tests {
             .await
             .assert_status_ok();
 
+        let current = server
+            .get("/api/execution/state")
+            .await
+            .json::<serde_json::Value>();
+        server
+            .post("/api/execution/command")
+            .json(&serde_json::json!({
+                "action": "enable_control", "mode": "runtime", "project_name": "demo",
+                "execution_id": current["snapshot"]["execution_id"]
+            }))
+            .await
+            .assert_status_ok();
+
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
         let db = SqliteStorage::new(

@@ -5,11 +5,13 @@ import { type Job, type SignalValue, projectPath, request } from "../api";
 import { useWorkspace } from "../workspace";
 import { Badge, Notice } from "./ui";
 
-type TestKind = "watchdog_test" | "io_read" | "io_write";
+type TestKind =
+  "watchdog_test" | "io_read" | "io_write" | "controller_signals_test";
 type TestRequest =
-  | { kind: "watchdog_test" | "io_read" }
+  | { kind: "watchdog_test" | "io_read" | "controller_signals_test" }
   | { kind: "io_write"; values: Record<string, SignalValue> };
 const labels: Record<TestKind, string> = {
+  controller_signals_test: "Controller signals test",
   watchdog_test: "Watchdog test",
   io_read: "Read test",
   io_write: "Write test",
@@ -128,7 +130,7 @@ function TestResult({ summary, kind }: { summary?: Job; kind: TestKind }) {
     job?.phase === "failed"
       ? job.error || "The hardware test could not complete."
       : errors
-        ? `${errors} of ${readings.length} nodes could not be read. ${firstError?.signal}: ${shortReason(firstError?.error || "")}`
+        ? `${errors} of ${readings.length} nodes failed. ${firstError?.signal}: ${shortReason(firstError?.error || "")}`
         : null;
   const disabled = result?.status === "disabled";
   const passed =
@@ -236,7 +238,7 @@ function TestResult({ summary, kind }: { summary?: Job; kind: TestKind }) {
           </span>
         </Notice>
       )}
-      {result && kind === "io_read" && (
+      {result && (kind === "io_read" || kind === "controller_signals_test") && (
         <>
           {!failureMessage && (
             <Notice error={errors > 0}>

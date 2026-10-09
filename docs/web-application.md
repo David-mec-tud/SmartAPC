@@ -165,8 +165,28 @@ browser disconnects, and are not resumed automatically after backend shutdown.
 
 Deployment readiness distinguishes required strategy/I/O/model configuration from
 optional simulation and tuning. It does not imply that hardware has been contacted.
-Starting runtime is an explicit action that connects to OPC UA and enables output
-writes. Native fault handling and timing ownership remain in Rust.
+Starting runtime connects to OPC UA in shadow mode. It calculates suggestions and
+warms up any observer without writing actuators. The shared **Turn controller on/off**
+button controls the active runtime; enable resets on every start and is never saved.
+The scoped execution command accepts `enable_control` and `disable_control`, with
+project, runtime mode and execution ID. An external enable Node ID rejects manual
+commands in the backend as well as disabling the button.
+
+Deployment edits `deployment.controller_is_ready`, `controller_has_control` and
+`external_controller_enable` (optional Boolean Node IDs). The engineering job
+`controller_signals_test` checks type, writes false/readbacks status nodes, and
+only reads external enable. Its persisted per-node errors use the same retained
+failure UI as other hardware tests. Runtime snapshots expose `controller` with
+`is_ready`, `has_control`, `enabled`, `external_enable`, `observer_converged` and
+`reason`; cycle logs include these fields and faults emit `controller_fault`.
+
+Readiness requires observer convergence and a valid successful suggestion;
+ownership requires enabled, ready, successful actuator writes. Errors, deadlines,
+empty/invalid suggestions, MPC fallback and stop clear the appropriate flags.
+An independent monitor revokes readiness during slow calculations. Communication
+and I/O timing remain independent of the scheduled logic deadline. See the
+[handshake contract](../README.md#controller-deployment-handshake) for convergence,
+custom observer compatibility and behavior during OPC UA transport loss.
 
 Windows commands can be copied/downloaded. This is command generation only:
 SmartAPC does not currently implement or verify a Windows Service Control Manager

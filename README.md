@@ -14,15 +14,54 @@ styles and no required external account or CDN.
 Rust owns the controller, OPC UA, watchdog, independent cycle times and background
 jobs. Closing a browser does not stop execution or engineering jobs. Projects
 remain TOML, with SQLite history and JSONL logs. Fault transitions remain
-`Running -> Hold -> Alarm -> Off`; Off writes no outputs. Online tuning restores
+`Running -> Hold -> Alarm -> Off`; faults suppress actuator writes and clear the
+controller handshake flags. Online tuning restores
 original values on manual/safety/execution stops and applies best values on normal
 completion. The optional continuous model uses `x_dot = A x + B u`, `y = C x + D u`;
 offline simulation integrates it with RK4. Runtime does not simulate the plant.
 
 Deployment validates saved strategy requirements, generates Copy/Download commands,
-and offers explicit runtime start and verification. Simulation and tuning remain
+and offers explicit runtime start and verification in shadow mode. Simulation and tuning remain
 optional. Windows Service Control Manager integration is **not implemented or
 verified**; Windows service commands are reference generation only.
+
+## Controller deployment handshake
+
+In **Deployment → Controller OPC UA handshake**, save optional Boolean Node IDs:
+
+- `ControllerIsReady`: SmartAPC writes true after the observer converges and a
+  valid control suggestion succeeds. P control has no observer warm-up.
+- `ControllerHasControl`: SmartAPC writes true only while enabled, ready, and
+  successfully writing actuator outputs.
+- `ExternalControllerEnable`: optional read-only input; when configured, it owns
+  controller on/off and disables the UI's manual button. SmartAPC never writes it.
+
+**Test saved controller signals** checks Boolean types, writes false to the two
+status outputs, and confirms readback. It only reads the external enable. Node IDs
+must be distinct from each other, I/O, and watchdog nodes. Blank status addresses
+support existing local-only projects; their state remains visible in the UI.
+
+Every runtime start, including `serve --project`, resets to shadow mode. The
+observer and suggestions run while actuator writes wait for **Turn controller on**
+or a true external enable. Turning off returns to shadow mode without resetting
+the observer. Status output writes and watchdog exchanges continue in shadow mode.
+Faults, invalid/empty suggestions, MPC solver fallback, missed suggestion deadlines,
+and stop clear readiness/control. Healthy fresh cycles can establish readiness
+again. A failed external read also clears the requested enable.
+
+Linear MPC convergence requires five consecutive finite posterior covariance
+updates with relative matrix change at most `0.001`. Custom strategies can return
+`observer_converged`; generated `SmartApcOutputs` exposes `Option<bool>` for this.
+Strategies declaring observer/Kalman parameters must report `Some(true)` explicitly;
+older strategies without those parameters remain compatible. Custom observers
+without such parameters should report `Some(false)` during warm-up.
+
+The deadline monitor runs independently of synchronous calculations. Each scheduled
+suggestion has one `logic.cycle_ms` window to complete; missed calculation windows
+or skipped cycles revoke readiness and late results cannot reassert it. Flag writes
+are attempted immediately on faults and at exchanges. If OPC UA is disconnected,
+the device cannot receive false until transport is available; its watchdog remains
+necessary to detect loss of the software.
 
 ## Build, Test, and Run
 
@@ -109,7 +148,8 @@ cargo run -- serve --project-root ./projects
    - Set the endpoint to `opc.tcp://127.0.0.1:4855/`.
    - Configure `read_node = ns=2;s=wd_counter_read` and `write_node = ns=2;s=wd_counter_mirror`.
    - Define variables and I/O, for example `cv.y1.*` and `mv.u1.*`.
-   - Select a control strategy and start the runtime.
+   - Select a control strategy, configure/test deployment signals, start in shadow
+     mode, and explicitly turn the controller on.
 
 The plant feedback page is `http://127.0.0.1:8081/virtual-hardware`, with local
 Plotly charts and manual node values. Use `--no-web` for OPC UA only, or
@@ -125,6 +165,9 @@ Virtual hardware OPC UA Node IDs:
 - `ns=2;s=u1_read`
 - `ns=2;s=wd_counter_read`
 - `ns=2;s=wd_counter_mirror`
+- `ns=2;s=ControllerIsReady` (Boolean)
+- `ns=2;s=ControllerHasControl` (Boolean)
+- `ns=2;s=ExternalControllerEnable` (Boolean)
 
 ## Control Strategies
 

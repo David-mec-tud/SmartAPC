@@ -3,9 +3,23 @@ import { Link } from "react-router-dom";
 import { CheckCircle2, CircleAlert, Clipboard, Download } from "lucide-react";
 import { type Readiness, download, projectPath, request } from "../api";
 import { useWorkspace } from "../workspace";
-import { Button, Badge, Notice } from "../components/ui";
+import { Button, Badge, Notice, Field, Input } from "../components/ui";
+import {
+  HardwareTestResults,
+  useHardwareTest,
+} from "../components/HardwareTestResults";
 export function Deployment() {
-  const { project, execution, dirty, act, setNotification } = useWorkspace();
+  const {
+    project,
+    execution,
+    dirty,
+    config,
+    edit,
+    locked,
+    act,
+    setNotification,
+  } = useWorkspace();
+  const test = useHardwareTest();
   const readiness = useQuery({
     queryKey: ["readiness", project],
     queryFn: () => request<Readiness>(`${projectPath(project)}/readiness`),
@@ -47,12 +61,88 @@ export function Deployment() {
         </Notice>
       )}
       {readiness.error && <Notice error>{readiness.error.message}</Notice>}
+      {config && (
+        <section className="panel">
+          <h2>
+            <span className="step-number">1</span> Controller OPC UA handshake
+          </h2>
+          <p className="muted">
+            Configure Boolean Node IDs. Status outputs are written by SmartAPC.
+            ExternalControllerEnable is optional and read only; when configured
+            it owns on/off control.
+          </p>
+          <fieldset disabled={locked}>
+            <div className="form-grid">
+              {(
+                [
+                  [
+                    "controller_is_ready",
+                    "ControllerIsReady",
+                    "Write · observer converged and a suggestion succeeded",
+                  ],
+                  [
+                    "controller_has_control",
+                    "ControllerHasControl",
+                    "Write · enabled, ready, and actuator writes succeeded",
+                  ],
+                  [
+                    "external_controller_enable",
+                    "ExternalControllerEnable",
+                    "Read only · optional external on/off",
+                  ],
+                ] as const
+              ).map(([key, label, help]) => (
+                <Field key={key} label={`${label} Node ID`} hint={help}>
+                  <Input
+                    aria-label={`${label} Node ID`}
+                    value={config.deployment[key] ?? ""}
+                    placeholder="ns=2;s=..."
+                    onChange={(event) =>
+                      edit((next) => {
+                        next.deployment[key] =
+                          event.target.value.trim() || null;
+                      })
+                    }
+                  />
+                </Field>
+              ))}
+            </div>
+          </fieldset>
+          <div className="inline">
+            <Button
+              variant="outline"
+              disabled={
+                locked ||
+                dirty ||
+                test.isPending ||
+                ![
+                  config.deployment.controller_is_ready,
+                  config.deployment.controller_has_control,
+                  config.deployment.external_controller_enable,
+                ].some((node) => node?.trim())
+              }
+              onClick={() => test.mutate({ kind: "controller_signals_test" })}
+            >
+              Test saved controller signals
+            </Button>
+          </div>
+          <p className="muted">
+            The test writes false to each status output and verifies readback.
+            It reads ExternalControllerEnable without writing it. Run these
+            tests with the controller stopped.
+          </p>
+          <HardwareTestResults
+            kinds={["controller_signals_test"]}
+            test={test}
+          />
+        </section>
+      )}
       {readiness.data && (
         <>
           <section className="panel">
             <div className="section-title">
               <h2>
-                <span className="step-number">1</span> Validate saved
+                <span className="step-number">2</span> Validate saved
                 configuration
               </h2>
               <Badge tone={readiness.data.ready ? "good" : "danger"}>
@@ -87,12 +177,13 @@ export function Deployment() {
           </section>
           <section className="panel">
             <h2>
-              <span className="step-number">2</span> Run the saved project
+              <span className="step-number">3</span> Run the saved project
             </h2>
             <p className="muted">
               The backend must run on a host that can reach the configured OPC
-              UA endpoint. Starting explicitly connects and enables controller
-              output writes.
+              UA endpoint. Startup always enters shadow mode: suggestions and
+              the observer run without actuator writes. Use Turn controller on
+              after startup, or the optional ExternalControllerEnable signal.
             </p>
             <div className="command">
               <code>{readiness.data.local_command}</code>
@@ -126,7 +217,7 @@ export function Deployment() {
           </section>
           <section className="panel">
             <h2>
-              <span className="step-number">3</span> Verify execution
+              <span className="step-number">4</span> Verify execution
             </h2>
             {active && execution.mode === "runtime" ? (
               <>
@@ -137,6 +228,33 @@ export function Deployment() {
                     controller cycles
                   </span>
                 </div>
+                <div className="readiness-row">
+                  <span>ControllerIsReady</span>
+                  <Badge
+                    tone={
+                      execution.snapshot.controller?.is_ready
+                        ? "good"
+                        : "warning"
+                    }
+                  >
+                    {String(execution.snapshot.controller?.is_ready ?? false)}
+                  </Badge>
+                </div>
+                <div className="readiness-row">
+                  <span>ControllerHasControl</span>
+                  <Badge
+                    tone={
+                      execution.snapshot.controller?.has_control
+                        ? "good"
+                        : "neutral"
+                    }
+                  >
+                    {String(
+                      execution.snapshot.controller?.has_control ?? false,
+                    )}
+                  </Badge>
+                </div>
+                <p>{execution.snapshot.controller?.reason}</p>
                 <p>
                   Watchdog: {JSON.stringify(execution.snapshot.watchdog_status)}
                 </p>

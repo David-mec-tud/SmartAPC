@@ -43,6 +43,18 @@ pub trait ControlLogic: Send + Sync {
         inputs: &HashMap<String, SignalValue>,
         state: RuntimeState,
     ) -> Result<HashMap<String, SignalValue>>;
+    /// Runtime shadow calculations must not assume their suggestions were applied.
+    fn set_shadow_mode(&mut self, _shadow: bool) {}
+    /// Feed back confirmed runtime writes when an optional MV readback is absent.
+    fn outputs_applied(&mut self, _outputs: &HashMap<String, SignalValue>) {}
+    /// Strategies with observers must report convergence before runtime is ready.
+    fn observer_converged(&self) -> bool {
+        true
+    }
+    /// A fallback output is useful for diagnostics but is not a successful suggestion.
+    fn suggestion_succeeded(&self) -> bool {
+        true
+    }
     fn parameter_schema(&self) -> Vec<ParameterSchemaEntry>;
     fn set_params(&mut self, params: HashMap<String, LogicParamValue>);
     fn current_params(&self) -> HashMap<String, LogicParamValue>;
@@ -267,12 +279,16 @@ struct CustomCallRequest<'a> {
 
 #[derive(Debug, Deserialize)]
 struct CustomCallResponse {
+    #[serde(default)]
+    observer_converged: Option<bool>,
     outputs: HashMap<String, SignalValue>,
     #[serde(default)]
     logs: Vec<LogicUserLog>,
 }
 
 pub struct CustomRustLogic {
+    observer_converged: bool,
+    observer_required: bool,
     _library: Library,
     control_fn: ControlFn,
     free_fn: FreeStringFn,
@@ -323,7 +339,7 @@ impl CustomRustLogic {
             bail!("custom strategy metadata has no required outputs");
         }
 
-        let schema = metadata
+        let schema: Vec<ParameterSchemaEntry> = metadata
             .parameter_schema
             .iter()
             .map(|entry| ParameterSchemaEntry {
@@ -348,7 +364,14 @@ impl CustomRustLogic {
 
         let _required_inputs = metadata.required_inputs;
 
+        let observer_required = schema.iter().any(|entry: &ParameterSchemaEntry| {
+            entry.name.starts_with("observer.")
+                || entry.name.starts_with("kalman.")
+                || entry.name.contains(".kalman.")
+        });
         Ok(Self {
+            observer_required,
+            observer_converged: !observer_required,
             _library: library,
             control_fn,
             free_fn,
@@ -449,6 +472,10 @@ pub fn inspect_custom_library_contract(
 }
 
 impl ControlLogic for CustomRustLogic {
+    fn observer_converged(&self) -> bool {
+        self.observer_converged
+    }
+
     fn metadata(&self) -> LogicMetadata {
         LogicMetadata {
             kind: "custom_rust".to_string(),
@@ -462,6 +489,7 @@ impl ControlLogic for CustomRustLogic {
         params: HashMap<String, LogicParamValue>,
     ) {
         self._initial_values = initial_values;
+        self.observer_converged = !self.observer_required;
         self.pending_logs.clear();
         self.input_history.clear();
         self.output_history.clear();
@@ -516,6 +544,9 @@ impl ControlLogic for CustomRustLogic {
         for (key, value) in &response.outputs {
             Self::push_signal_history(&mut self.output_history, key, value, self.max_history_len);
         }
+        self.observer_converged = response
+            .observer_converged
+            .unwrap_or(!self.observer_required);
         self.pending_logs = response.logs;
 
         Ok(response.outputs)

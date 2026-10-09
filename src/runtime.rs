@@ -20,6 +20,7 @@ use tokio::{
 
 use crate::{
     communication::{HealthStatus, ProtocolAdapter, opcua::OpcUaClientAdapter},
+    controller_signals::{ControllerSignals, ControllerStatus},
     linear_mpc::LinearMpcLogic,
     logic::{ControlLogic, CustomRustLogic, LogicUserLog, PControllerLogic},
     model::ModelModule,
@@ -50,6 +51,7 @@ pub struct RuntimeMetrics {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSnapshot {
+    pub controller: ControllerStatus,
     pub execution_id: String,
     pub project_name: String,
     pub state: RuntimeState,
@@ -68,6 +70,7 @@ pub enum ExecutionSnapshot {
 }
 
 struct RuntimeCore {
+    controller: Arc<ControllerSignals>,
     execution_id: String,
     config: ProjectConfig,
     protocol: Arc<dyn ProtocolAdapter>,
@@ -79,6 +82,7 @@ struct RuntimeCore {
     state: RuntimeState,
     watchdog_status: WatchdogStatus,
     fault_started_at: Option<Instant>,
+    input_fault: bool,
     last_inputs: HashMap<String, SignalValue>,
     last_outputs: HashMap<String, SignalValue>,
     total_cycles: u64,
@@ -104,6 +108,16 @@ impl RuntimeCore {
         log_file: File,
     ) -> Result<Self> {
         protocol.connect().await?;
+        let controller = Arc::new(ControllerSignals::new(
+            config.deployment.clone(),
+            Arc::clone(&protocol),
+            config.communication.cycle_ms,
+        ));
+        // Clear stale device flags before watchdog/strategy initialization.
+        {
+            let _exchange = controller.exchange.lock().await;
+            controller.publish().await?;
+        }
         watchdog.init(protocol.as_ref()).await?;
         logic.init(
             config.logic.initial_values.clone(),
@@ -111,6 +125,7 @@ impl RuntimeCore {
         );
 
         Ok(Self {
+            controller,
             execution_id: uuid::Uuid::new_v4().to_string(),
             config,
             protocol,
@@ -122,6 +137,7 @@ impl RuntimeCore {
             state: RuntimeState::Running,
             watchdog_status: WatchdogStatus::Ok,
             fault_started_at: None,
+            input_fault: false,
             last_inputs: HashMap::new(),
             last_outputs: HashMap::new(),
             total_cycles: 0,
@@ -139,6 +155,7 @@ impl RuntimeCore {
 
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
+            controller: self.controller.snapshot(),
             execution_id: self.execution_id.clone(),
             project_name: self.config.name.clone(),
             state: self.state,
@@ -260,6 +277,26 @@ impl RuntimeCore {
     }
 
     async fn tick_once(&mut self) -> Result<()> {
+        let result = self.tick_inner().await;
+        if let Err(err) = &result {
+            self.state = self.compute_next_state(false);
+            if let Err(clear_error) = self
+                .controller
+                .revoke(format!("Runtime error: {err:#}"))
+                .await
+            {
+                tracing::error!(error = %clear_error, "failed clearing controller flags");
+            }
+            // Keep the fault and its effect machine-readable even after a failed cycle.
+            let _ = self.append_log_record(json!({"timestamp_ms": now_ms(), "event": "controller_fault", "error": format!("{err:#}"), "controller": self.controller.snapshot()}));
+        }
+        result
+    }
+
+    async fn tick_inner(&mut self) -> Result<()> {
+        if self.controller.is_stopped() {
+            return Ok(());
+        }
         let cycle_start = Instant::now();
         let communication_due = cycle_due(
             self.last_communication_cycle,
@@ -272,38 +309,72 @@ impl RuntimeCore {
             cycle_start,
             self.config.logic.cycle_ms,
         );
+        let period = Duration::from_millis(self.config.logic.cycle_ms);
+        let scheduled_start = self
+            .last_controller_cycle
+            .map(|last| last + period)
+            .unwrap_or(cycle_start);
+        let suggestion_deadline = scheduled_start + period;
+        if controller_due {
+            self.controller.arm(suggestion_deadline);
+        }
+        let generation = self.controller.generation();
 
         let input_ok = if io_due {
             match self.read_inputs().await {
                 Ok(inputs) => {
                     self.storage.store_signal_map("input", &inputs)?;
                     self.last_inputs = inputs;
+                    self.input_fault = false;
                     true
                 }
                 Err(err) => {
-                    tracing::warn!(error = %err, "failed reading inputs; entering fault path");
+                    self.input_fault = true;
+                    self.controller
+                        .revoke(format!("Input error: {err:#}"))
+                        .await?;
                     false
                 }
             }
         } else {
             true
         };
-
+        if io_due {
+            if let Err(err) = self.controller.read_enable().await {
+                self.controller.set_enabled(false, true)?;
+                return Err(err);
+            }
+        }
         if communication_due {
-            let watchdog_status = match self.watchdog.tick(self.protocol.as_ref()).await {
-                Ok(status) => status,
-                Err(err) => WatchdogStatus::Fault {
+            self.watchdog_status = match tokio::time::timeout(
+                Duration::from_millis(self.config.communication.cycle_ms),
+                self.watchdog.tick(self.protocol.as_ref()),
+            )
+            .await
+            {
+                Ok(Ok(status)) => status,
+                Ok(Err(err)) => WatchdogStatus::Fault {
                     reason: format!("watchdog tick failed: {err}"),
                 },
+                Err(err) => WatchdogStatus::Fault {
+                    reason: format!("watchdog tick timed out: {err}"),
+                },
             };
-            self.watchdog_status = watchdog_status.clone();
-            let healthy_protocol = self.protocol.health() == HealthStatus::Healthy && input_ok;
-            let healthy_watchdog = !matches!(&watchdog_status, WatchdogStatus::Fault { .. });
-            self.state = self.compute_next_state(healthy_protocol && healthy_watchdog);
             self.last_communication_cycle = Some(cycle_start);
         }
+        // An I/O failure takes effect immediately, including between watchdog ticks.
+        let healthy = input_ok
+            && !self.input_fault
+            && self.protocol.health() == HealthStatus::Healthy
+            && !matches!(&self.watchdog_status, WatchdogStatus::Fault { .. });
+        self.state = self.compute_next_state(healthy);
+        if !healthy {
+            self.controller
+                .revoke("Communication or watchdog fault")
+                .await?;
+        }
 
-        let mut user_logs: Vec<LogicUserLog> = Vec::new();
+        let mut user_logs = Vec::new();
         if controller_due {
             if let Some(mut session) = self.online_optimization.take() {
                 let tick = session.pre_cycle(self.state, &self.last_inputs);
@@ -311,49 +382,124 @@ impl RuntimeCore {
                 self.online_optimization = Some(session);
             }
             if self.state == RuntimeState::Running {
-                let mut outputs = self.logic.step(&self.last_inputs, self.state)?;
+                // A custom synchronous controller may be slow. Keep the async
+                // deadline monitor able to revoke readiness while it calculates.
+                let mut logic = std::mem::replace(
+                    &mut self.logic,
+                    Box::new(PControllerLogic::new(Vec::new(), HashMap::new())),
+                );
+                let status = self.controller.snapshot();
+                logic.set_shadow_mode(!status.enabled || !status.is_ready);
+                let inputs = self.last_inputs.clone();
+                let state = self.state;
+                let (returned_logic, result) = tokio::task::spawn_blocking(move || {
+                    let result = logic.step(&inputs, state);
+                    (logic, result)
+                })
+                .await
+                .context("controller worker failed")?;
+                self.logic = returned_logic;
+                let mut outputs = result?;
                 user_logs = self.logic.drain_user_logs();
+                // Invalid values must never become an actuator command or readiness.
+                for point in &self.config.io.outputs {
+                    if let Some(value) = outputs.get(&point.name) {
+                        match (value, point.signal_type) {
+                            (SignalValue::F64(v), SignalType::F64) if v.is_finite() => {}
+                            (SignalValue::Bool(_), SignalType::Bool) => {}
+                            _ => bail!("invalid controller output '{}'", point.name),
+                        }
+                    }
+                }
+                let successful = self.logic.suggestion_succeeded()
+                    && self
+                        .config
+                        .io
+                        .outputs
+                        .iter()
+                        .any(|point| outputs.contains_key(&point.name));
                 apply_output_limits(&self.config, &mut outputs);
                 self.last_outputs = outputs;
+                if Instant::now() < suggestion_deadline {
+                    self.controller.suggestion(
+                        generation,
+                        self.logic.observer_converged(),
+                        successful,
+                        scheduled_start + period * 2,
+                    );
+                } else {
+                    self.controller
+                        .revoke("Control suggestion deadline missed")
+                        .await?;
+                }
             }
             self.store_online_param_samples()?;
             self.store_user_log_samples(&user_logs)?;
-            self.append_cycle_log(
-                &self.last_inputs.clone(),
-                Some(&self.last_outputs.clone()),
-                &user_logs,
-            )?;
             if let Some(mut session) = self.online_optimization.take() {
                 let tick = session.observe(&self.last_inputs, &self.last_outputs);
                 self.apply_online_optimization_tick(tick)?;
                 self.online_optimization = Some(session);
             }
-            let duration = cycle_start.elapsed();
-            self.update_metrics(cycle_start, duration)?;
             self.total_cycles += 1;
-            self.last_controller_cycle = Some(cycle_start);
+            // Advance scheduled slots rather than accumulating scheduler jitter.
+            self.last_controller_cycle = Some(if cycle_start >= suggestion_deadline {
+                cycle_start
+            } else {
+                scheduled_start
+            });
         }
 
         if io_due {
-            if self.state != RuntimeState::Off && !self.last_outputs.is_empty() {
+            let controller = Arc::clone(&self.controller);
+            let _exchange = controller.exchange.lock().await;
+            let status = controller.snapshot();
+            if self.state == RuntimeState::Running
+                && status.enabled
+                && status.is_ready
+                && !self.last_outputs.is_empty()
+            {
                 self.write_outputs(&self.last_outputs).await?;
+                self.logic.outputs_applied(&self.last_outputs);
                 self.storage
                     .store_signal_map("output", &self.last_outputs)?;
+                controller.mark_control(true);
+            } else {
+                controller.mark_control(false);
             }
+            controller.publish().await?;
             self.last_io_cycle = Some(cycle_start);
         }
-
+        if controller_due {
+            if !io_due {
+                let _exchange = self.controller.exchange.lock().await;
+                self.controller.publish().await?;
+            }
+            let missed = Instant::now() >= suggestion_deadline;
+            self.update_metrics(cycle_start, cycle_start.elapsed(), missed)?;
+            if missed {
+                self.controller
+                    .revoke("Control cycle deadline missed")
+                    .await?;
+            }
+            self.append_cycle_log(
+                &self.last_inputs.clone(),
+                Some(&self.last_outputs.clone()),
+                &user_logs,
+            )?;
+        }
         Ok(())
     }
 
     async fn read_inputs(&self) -> Result<HashMap<String, SignalValue>> {
         let mut inputs = HashMap::new();
         for point in &self.config.io.inputs {
-            let value = self
-                .protocol
-                .read(&point.address)
-                .await
-                .with_context(|| format!("failed reading input '{}'", point.name))?;
+            let value = tokio::time::timeout(
+                Duration::from_millis(self.config.communication.cycle_ms),
+                self.protocol.read(&point.address),
+            )
+            .await
+            .context("input read timed out")?
+            .with_context(|| format!("failed reading input '{}'", point.name))?;
             inputs.insert(point.name.clone(), value);
         }
         Ok(inputs)
@@ -380,17 +526,28 @@ impl RuntimeCore {
 
     async fn write_outputs(&self, outputs: &HashMap<String, SignalValue>) -> Result<()> {
         for point in &self.config.io.outputs {
+            if !self.controller.snapshot().is_ready {
+                bail!("controller readiness expired before actuator write");
+            }
             if let Some(value) = outputs.get(&point.name) {
-                self.protocol
-                    .write(&point.address, value.clone())
-                    .await
-                    .with_context(|| format!("failed writing output '{}'", point.name))?;
+                tokio::time::timeout(
+                    Duration::from_millis(self.config.communication.cycle_ms),
+                    self.protocol.write(&point.address, value.clone()),
+                )
+                .await
+                .context("output write timed out")?
+                .with_context(|| format!("failed writing output '{}'", point.name))?;
             }
         }
         Ok(())
     }
 
-    fn update_metrics(&mut self, cycle_start: Instant, duration: Duration) -> Result<()> {
+    fn update_metrics(
+        &mut self,
+        cycle_start: Instant,
+        duration: Duration,
+        missed: bool,
+    ) -> Result<()> {
         let duration_us = duration.as_micros() as u64;
         let cycle_target_us = self.config.logic.cycle_ms * 1_000;
 
@@ -403,7 +560,7 @@ impl RuntimeCore {
             0
         };
 
-        let deadline_miss = duration_us > cycle_target_us;
+        let deadline_miss = missed || duration_us > cycle_target_us;
         if deadline_miss {
             self.deadline_misses += 1;
         }
@@ -433,6 +590,7 @@ impl RuntimeCore {
         let record = json!({
             "timestamp_ms": now_ms(),
             "event": "runtime_cycle",
+            "controller": self.controller.snapshot(),
             "state": self.state,
             "watchdog_status": self.watchdog_status,
             "inputs": inputs,
@@ -487,6 +645,8 @@ fn apply_output_limits(config: &ProjectConfig, outputs: &mut HashMap<String, Sig
 }
 
 struct RuntimeHandle {
+    controller: Arc<ControllerSignals>,
+    deadline_monitor: JoinHandle<()>,
     project_name: String,
     core: Arc<Mutex<RuntimeCore>>,
     shutdown: oneshot::Sender<()>,
@@ -560,6 +720,8 @@ impl RuntimeManager {
         )
         .await?;
         core_value.online_optimization_stop = Arc::clone(&self.online_optimization_stop);
+        let controller = Arc::clone(&core_value.controller);
+        let deadline_monitor = tokio::spawn(Arc::clone(&controller).monitor());
         let core = Arc::new(Mutex::new(core_value));
 
         let (tx, mut rx) = oneshot::channel();
@@ -567,6 +729,7 @@ impl RuntimeManager {
         let cycle_ms = gcd(config.communication.cycle_ms, config.logic.cycle_ms);
         let join = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(cycle_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {
@@ -584,12 +747,35 @@ impl RuntimeManager {
         });
 
         *guard = Some(ActiveHandle::Runtime(RuntimeHandle {
+            controller,
+            deadline_monitor,
             project_name: project_name.to_string(),
             core,
             shutdown: tx,
             join,
         }));
 
+        Ok(())
+    }
+
+    /// Manual enable is execution-scoped by the caller and never persisted.
+    pub async fn set_controller_enabled(&self, enabled: bool) -> Result<()> {
+        let guard = self.handle.lock().await;
+        let Some(ActiveHandle::Runtime(handle)) = guard.as_ref() else {
+            bail!("runtime not running");
+        };
+        let mut core = handle.core.lock().await;
+        let controller = Arc::clone(&core.controller);
+        let _exchange = controller.exchange.lock().await;
+        core.controller.set_enabled(enabled, false)?;
+        if let Err(err) = core.controller.publish().await {
+            core.controller
+                .fault(format!("Controller status write error: {err:#}"));
+            let _ = core.controller.publish().await;
+            return Err(err);
+        }
+        let controller = core.controller.snapshot();
+        core.append_log_record(json!({"timestamp_ms": now_ms(), "event": "controller_enable", "controller": controller}))?;
         Ok(())
     }
 
@@ -692,16 +878,21 @@ impl RuntimeManager {
             None => return Ok(()),
         };
 
+        // Latch shutdown before waiting on a potentially slow calculation. Its
+        // eventual result cannot reassert readiness or write any actuator.
+        let mut stop_result = handle.controller.stop().await;
         {
             let mut core = handle.core.lock().await;
             if let Some(mut session) = core.online_optimization.take() {
                 let tick = session.stop("execution_stopped");
-                core.apply_online_optimization_tick(tick)?;
+                stop_result = core.apply_online_optimization_tick(tick);
             }
+            core.state = RuntimeState::Off;
         }
+        handle.deadline_monitor.abort();
         let _ = handle.shutdown.send(());
         let _ = handle.join.await;
-        Ok(())
+        stop_result
     }
 
     pub async fn stop_simulation(&self) -> Result<()> {
@@ -1087,7 +1278,13 @@ fn build_model(model_config: Option<&ModelConfig>) -> Option<Box<dyn ModelModule
     }
 }
 
-fn seed_protocol_nodes(adapter: &OpcUaClientAdapter, config: &ProjectConfig) -> Result<()> {
+pub(crate) fn seed_protocol_nodes(
+    adapter: &OpcUaClientAdapter,
+    config: &ProjectConfig,
+) -> Result<()> {
+    for (_, node) in config.deployment.signal_nodes() {
+        adapter.seed_node(node, SignalValue::Bool(false));
+    }
     for input in &config.io.inputs {
         let value = match input.signal_type {
             SignalType::F64 => SignalValue::F64(0.0),
@@ -1226,11 +1423,18 @@ mod tests {
 
     #[derive(Default)]
     struct LoggingTestLogic {
+        delay: Duration,
+        fail: bool,
+        converged_after: usize,
+        calls: usize,
         params: HashMap<String, LogicParamValue>,
         pending_logs: Vec<LogicUserLog>,
     }
 
     impl ControlLogic for LoggingTestLogic {
+        fn observer_converged(&self) -> bool {
+            self.calls >= self.converged_after
+        }
         fn metadata(&self) -> LogicMetadata {
             LogicMetadata {
                 kind: "test_logging".to_string(),
@@ -1251,6 +1455,11 @@ mod tests {
             _inputs: &HashMap<String, SignalValue>,
             _state: RuntimeState,
         ) -> Result<HashMap<String, SignalValue>> {
+            self.calls += 1;
+            std::thread::sleep(self.delay);
+            if self.fail {
+                bail!("injected controller error");
+            }
             self.pending_logs = vec![LogicUserLog {
                 message: "runtime log values".to_string(),
                 values: HashMap::from([("ff.signal".to_string(), SignalValue::F64(7.0))]),
@@ -1276,6 +1485,166 @@ mod tests {
         fn drain_user_logs(&mut self) -> Vec<LogicUserLog> {
             std::mem::take(&mut self.pending_logs)
         }
+    }
+
+    async fn handshake_core(
+        mut cfg: ProjectConfig,
+        logic: Box<dyn ControlLogic>,
+    ) -> (RuntimeCore, Arc<OpcUaClientAdapter>, tempfile::TempDir) {
+        cfg.deployment.controller_is_ready = Some("ns=2;s=ControllerIsReady".into());
+        cfg.deployment.controller_has_control = Some("ns=2;s=ControllerHasControl".into());
+        let adapter = Arc::new(OpcUaClientAdapter::new("mock://handshake"));
+        seed_protocol_nodes(&adapter, &cfg).unwrap();
+        let dir = tempdir().unwrap();
+        let storage = SqliteStorage::new(dir.path().join("runtime.sqlite")).unwrap();
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.path().join("runtime.log"))
+            .unwrap();
+        let core = RuntimeCore::new(
+            cfg,
+            adapter.clone(),
+            Box::new(NoneWatchdog),
+            logic,
+            None,
+            storage,
+            log_file,
+        )
+        .await
+        .unwrap();
+        (core, adapter, dir)
+    }
+
+    async fn assert_flags(adapter: &OpcUaClientAdapter, ready: bool, control: bool) {
+        assert_eq!(
+            adapter.read("ns=2;s=ControllerIsReady").await.unwrap(),
+            SignalValue::Bool(ready)
+        );
+        assert_eq!(
+            adapter.read("ns=2;s=ControllerHasControl").await.unwrap(),
+            SignalValue::Bool(control)
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_starts_shadow_waits_for_observer_and_requires_enable() {
+        let (mut core, adapter, _dir) = handshake_core(
+            base_config(),
+            Box::new(LoggingTestLogic {
+                converged_after: 2,
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_flags(&adapter, false, false).await;
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, false, false).await;
+        core.last_controller_cycle = None;
+        core.last_io_cycle = None;
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, false).await;
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.unwrap(),
+            SignalValue::F64(0.0)
+        );
+        core.controller.set_enabled(true, false).unwrap();
+        core.last_io_cycle = None;
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, true).await;
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.unwrap(),
+            SignalValue::F64(3.0)
+        );
+        core.controller.set_enabled(false, false).unwrap();
+        core.last_io_cycle = None;
+        adapter.seed_node("ns=2;s=U1_WRITE", SignalValue::F64(9.0));
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, false).await;
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.unwrap(),
+            SignalValue::F64(9.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn external_enable_is_boolean_read_only_and_locks_manual_enable() {
+        let mut cfg = base_config();
+        cfg.deployment.external_controller_enable = Some("ns=2;s=ExternalControllerEnable".into());
+        let (mut core, adapter, _dir) =
+            handshake_core(cfg, Box::new(LoggingTestLogic::default())).await;
+        assert!(core.controller.set_enabled(true, false).is_err());
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, false).await;
+        adapter.seed_node("ns=2;s=ExternalControllerEnable", SignalValue::Bool(true));
+        core.last_io_cycle = None;
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, true).await;
+        assert_eq!(
+            adapter
+                .read("ns=2;s=ExternalControllerEnable")
+                .await
+                .unwrap(),
+            SignalValue::Bool(true)
+        );
+        adapter.seed_node("ns=2;s=ExternalControllerEnable", SignalValue::F64(1.0));
+        core.last_io_cycle = None;
+        assert!(core.tick_once().await.is_err());
+        assert_flags(&adapter, false, false).await;
+        assert!(!core.controller.snapshot().enabled);
+    }
+
+    #[tokio::test]
+    async fn controller_error_clears_ready_and_control_and_does_not_rewrite_old_output() {
+        let (mut core, adapter, _dir) =
+            handshake_core(base_config(), Box::new(LoggingTestLogic::default())).await;
+        core.controller.set_enabled(true, false).unwrap();
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, true).await;
+        core.logic = Box::new(LoggingTestLogic {
+            fail: true,
+            ..Default::default()
+        });
+        core.last_controller_cycle = None;
+        assert!(core.tick_once().await.is_err());
+        assert_flags(&adapter, false, false).await;
+        adapter.seed_node("ns=2;s=U1_WRITE", SignalValue::F64(9.0));
+        core.last_io_cycle = None;
+        core.last_controller_cycle = Some(Instant::now());
+        core.tick_once().await.unwrap();
+        assert_eq!(
+            adapter.read("ns=2;s=U1_WRITE").await.unwrap(),
+            SignalValue::F64(9.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_monitor_revokes_flags_while_slow_controller_is_still_running() {
+        let mut cfg = base_config();
+        cfg.logic.cycle_ms = 50;
+        let (mut core, adapter, _dir) =
+            handshake_core(cfg, Box::new(LoggingTestLogic::default())).await;
+        core.controller.set_enabled(true, false).unwrap();
+        core.tick_once().await.unwrap();
+        assert_flags(&adapter, true, true).await;
+        let controller = Arc::clone(&core.controller);
+        let monitor = tokio::spawn(Arc::clone(&controller).monitor());
+        core.logic = Box::new(LoggingTestLogic {
+            delay: Duration::from_millis(200),
+            ..Default::default()
+        });
+        core.last_controller_cycle = Some(Instant::now() - Duration::from_millis(50));
+        let worker = tokio::spawn(async move {
+            core.tick_once().await.unwrap();
+            core
+        });
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert!(!worker.is_finished());
+        assert_flags(&adapter, false, false).await;
+        let core = worker.await.unwrap();
+        assert!(!core.controller.snapshot().is_ready);
+        assert!(core.deadline_misses > 0);
+        monitor.abort();
     }
 
     #[tokio::test]
@@ -1315,6 +1684,9 @@ mod tests {
         .await
         .expect("runtime core");
 
+        core.controller
+            .set_enabled(true, false)
+            .expect("explicit enable");
         core.tick_once().await.expect("tick");
 
         let written = adapter.read("ns=2;s=U1_WRITE").await.expect("read output");
@@ -1441,6 +1813,9 @@ mod tests {
         .await
         .expect("runtime");
 
+        core.controller
+            .set_enabled(true, false)
+            .expect("explicit enable");
         core.tick_once().await.expect("initial coincident tick");
         adapter
             .write("ns=2;s=U1_WRITE", SignalValue::F64(9.0))

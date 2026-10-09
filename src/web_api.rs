@@ -424,6 +424,19 @@ async fn execution_command(
                 }
             }
         }
+        "enable_control" | "disable_control" => {
+            require_execution(&state, &request.identity).await?;
+            if !matches!(request.identity.mode, ExecutionMode::Runtime) {
+                return Err(AppError::status(
+                    StatusCode::CONFLICT,
+                    "controller enable requires a runtime",
+                ));
+            }
+            state
+                .runtime
+                .set_controller_enabled(request.action == "enable_control")
+                .await?;
+        }
         "stop" => {
             require_execution(&state, &request.identity).await?;
             match request.identity.mode {

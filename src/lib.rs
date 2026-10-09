@@ -22,3 +22,5 @@ pub mod watchdog;
 pub mod web;
 mod web_api;
 mod web_assets;
+
+pub mod controller_signals;

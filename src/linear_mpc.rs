@@ -33,6 +33,9 @@ pub struct LinearMpcLogic {
     y_bias: DVector<f64>,
     covariance: DMatrix<f64>,
     initialized: bool,
+    observer_stable_cycles: usize,
+    suggestion_succeeded: bool,
+    shadow_mode: bool,
     last_mv: Vec<f64>,
     last_u_total: Vec<f64>,
     pending_logs: Vec<LogicUserLog>,
@@ -91,6 +94,9 @@ impl LinearMpcLogic {
             last_mv: vec![0.0; mv_count],
             last_u_total: vec![0.0; u_count],
             initialized: false,
+            observer_stable_cycles: 0,
+            suggestion_succeeded: false,
+            shadow_mode: false,
             pending_logs: Vec::new(),
             cycle_s: cycle_ms as f64 / 1000.0,
             model,
@@ -364,6 +370,7 @@ impl LinearMpcLogic {
             h[(index, nx + index)] = 1.0;
         }
 
+        let previous_covariance = self.covariance.clone();
         let p_pred = &f * &self.covariance * f.transpose() + q;
         let y_direct = &model.d * u_total;
         let y_measured = DVector::from_column_slice(y_measured);
@@ -374,6 +381,7 @@ impl LinearMpcLogic {
             self.x_hat = x_state_pred;
             self.y_bias = z_pred.rows(nx, ny).into_owned();
             self.covariance = p_pred;
+            self.observer_stable_cycles = 0;
             return;
         };
         let k = k_t.transpose();
@@ -382,6 +390,21 @@ impl LinearMpcLogic {
         self.y_bias = z_hat.rows(nx, ny).into_owned();
         let identity = DMatrix::identity(nz, nz);
         self.covariance = (&identity - &k * &h) * p_pred;
+        // Convergence means a stable finite posterior covariance, not merely
+        // initializing the state from one measurement. Require five updates.
+        let relative_change = (&self.covariance - &previous_covariance).norm()
+            / previous_covariance.norm().max(MIN_WEIGHT);
+        let finite = self
+            .covariance
+            .iter()
+            .chain(self.x_hat.iter())
+            .chain(self.y_bias.iter())
+            .all(|v| v.is_finite());
+        self.observer_stable_cycles = if finite && relative_change <= 1.0e-3 {
+            self.observer_stable_cycles + 1
+        } else {
+            0
+        };
     }
 
     pub(crate) fn replay_observer_step(
@@ -791,6 +814,27 @@ impl LinearMpcLogic {
 }
 
 impl ControlLogic for LinearMpcLogic {
+    fn set_shadow_mode(&mut self, shadow: bool) {
+        self.shadow_mode = shadow;
+    }
+    fn outputs_applied(&mut self, outputs: &HashMap<String, SignalValue>) {
+        for (index, mv) in self.vars.mvs.iter().enumerate() {
+            if let Some(value) = outputs
+                .get(&format!("mv.{mv}.write"))
+                .and_then(SignalValue::as_f64)
+            {
+                self.last_mv[index] = value;
+                self.last_u_total[index] = value;
+            }
+        }
+    }
+    fn observer_converged(&self) -> bool {
+        self.observer_stable_cycles >= 5
+    }
+    fn suggestion_succeeded(&self) -> bool {
+        self.suggestion_succeeded
+    }
+
     fn metadata(&self) -> LogicMetadata {
         LogicMetadata {
             kind: "linear_mpc".to_string(),
@@ -821,6 +865,8 @@ impl ControlLogic for LinearMpcLogic {
         self.x_hat.fill(0.0);
         self.y_bias.fill(0.0);
         self.initialized = false;
+        self.observer_stable_cycles = 0;
+        self.suggestion_succeeded = false;
         self.pending_logs.clear();
     }
 
@@ -830,6 +876,7 @@ impl ControlLogic for LinearMpcLogic {
         _state: RuntimeState,
     ) -> Result<HashMap<String, SignalValue>> {
         self.pending_logs.clear();
+        self.suggestion_succeeded = false;
         if !self.all_enabled(inputs) {
             return Ok(HashMap::new());
         }
@@ -874,10 +921,20 @@ impl ControlLogic for LinearMpcLogic {
             outputs.insert(format!("mv.{mv}.write"), SignalValue::F64(next_mv[index]));
         }
 
+        self.suggestion_succeeded = !solution.fallback;
         self.emit_logs(&solution, &data, &setpoints, &next_mv);
-        self.last_mv = next_mv;
+        if !self.shadow_mode {
+            self.last_mv = next_mv;
+        }
         self.last_u_total = self
-            .total_input_vector(&self.last_mv, &current_dv)
+            .total_input_vector(
+                if self.shadow_mode {
+                    &current_mv
+                } else {
+                    &self.last_mv
+                },
+                &current_dv,
+            )
             .as_slice()
             .to_vec();
         Ok(outputs)
@@ -1098,6 +1155,42 @@ mod tests {
             dvs: Vec::new(),
         };
         LinearMpcLogic::new(model, vars, 1000, HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn readiness_requires_stable_kalman_covariance_and_a_successful_suggestion() {
+        let mut logic = one_by_one_logic();
+        let inputs = HashMap::from([
+            ("cv.y1.process_value".into(), SignalValue::F64(0.0)),
+            ("cv.y1.setpoint".into(), SignalValue::F64(1.0)),
+            ("mv.u1.read".into(), SignalValue::F64(0.0)),
+        ]);
+        logic.init(HashMap::new(), HashMap::new());
+        logic.set_shadow_mode(true);
+        logic.step(&inputs, RuntimeState::Running).unwrap();
+        assert!(!logic.observer_converged());
+        assert!(logic.suggestion_succeeded());
+        for _ in 0..200 {
+            logic.step(&inputs, RuntimeState::Running).unwrap();
+        }
+        assert!(logic.observer_converged());
+        assert!(logic.suggestion_succeeded());
+        assert_eq!(
+            logic.last_mv,
+            vec![0.0],
+            "shadow suggestions are not applied feedback"
+        );
+        let mut disabled = inputs.clone();
+        disabled.insert("cv.y1.enable".into(), SignalValue::Bool(false));
+        assert!(
+            logic
+                .step(&disabled, RuntimeState::Running)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!logic.suggestion_succeeded());
+        logic.init(HashMap::new(), HashMap::new());
+        assert!(!logic.observer_converged());
     }
 
     // Identity predictions isolate the move objective from discretization/observer behavior.

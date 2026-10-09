@@ -70,6 +70,20 @@
 - Online optimization events must remain structured. Manual/safety/execution stops restore the
   original parameters before the next controller calculation; only normal convergence/completion
   restores the best-known parameters.
+- Runtime starts in shadow mode; actuator writes require explicit manual enable
+  or the optional read-only `deployment.external_controller_enable` Boolean node.
+  Its presence locks manual enable in the UI and backend. Never persist enable.
+- Deployment Boolean outputs `ControllerIsReady` and `ControllerHasControl` use
+  dedicated Node IDs. Readiness requires observer convergence and a valid successful
+  suggestion; ownership additionally requires enabled, successful actuator writes.
+  Faults, missed suggestion deadlines, and stop clear both; watchdog/status writes
+  remain active when actuator writes are suppressed. Deployment tests write false
+  to status nodes and verify readback; they never write the external enable node.
+- Linear MPC observer convergence uses five finite posterior covariance updates
+  with relative change <= 0.001. Custom observer strategies report convergence via
+  the optional `observer_converged` response; generated outputs document this field.
+  Declared observer/Kalman parameters require explicit convergence. Preserve the
+  old response contract for custom strategies without observers.
 - Keep timing ownership explicit: communication/watchdog use `communication.cycle_ms`, I/O exchanges use `io.cycle_ms`, and controller/runtime simulation/tuning use `logic.cycle_ms`.
 - Keep `io.cycle_ms` aligned as a multiple of `communication.cycle_ms`; controller timing remains independent.
 

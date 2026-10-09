@@ -37,6 +37,10 @@ const U_READ: &str = "u1_read";
 const WD_COUNTER: &str = "wd_counter_read";
 const WD_MIRROR: &str = "wd_counter_mirror";
 
+const CONTROLLER_READY: &str = "ControllerIsReady";
+const CONTROLLER_CONTROL: &str = "ControllerHasControl";
+const CONTROLLER_ENABLE: &str = "ExternalControllerEnable";
+
 const PLOT_WINDOW_SECONDS: f64 = 180.0;
 #[cfg(feature = "legacy-native")]
 const PLOT_REFRESH_MS: u64 = 100;
@@ -87,6 +91,7 @@ impl Default for ExternalInputs {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PendingManualWrites {
+    external_controller_enable: Option<bool>,
     u_write: Option<f64>,
     target: Option<f64>,
     hl: Option<f64>,
@@ -123,10 +128,13 @@ struct PlantState {
     namespace: u16,
     history: Arc<RwLock<VecDeque<TimedSample>>>,
     pending: Arc<RwLock<PendingManualWrites>>,
+    node_manager: Arc<SimpleNodeManager>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ManualValues {
+    #[serde(default)]
+    external_controller_enable: Option<bool>,
     u_write: f64,
     target: f64,
     hl: f64,
@@ -146,7 +154,33 @@ async fn plant_snapshot(State(state): State<PlantState>) -> Json<serde_json::Val
         Y_VALUE, Y_TARGET, Y_HL, Y_LL, U_WRITE, U_READ, WD_COUNTER, WD_MIRROR,
     ]
     .map(|node| format!("ns={};s={node}", state.namespace));
+    let address_space = state.node_manager.address_space().read();
+    let controller_signals = [CONTROLLER_READY, CONTROLLER_CONTROL, CONTROLLER_ENABLE]
+        .into_iter()
+        .map(|name| {
+            let value = address_space
+                .find_node(&NodeId::new(state.namespace, name))
+                .and_then(|node| {
+                    node.as_node().get_attribute(
+                        async_opcua::types::TimestampsToReturn::Neither,
+                        AttributeId::Value,
+                        &async_opcua::types::NumericRange::None,
+                        &DataEncoding::Binary,
+                    )
+                })
+                .and_then(|value| value.value)
+                .and_then(|value| {
+                    if let async_opcua::types::Variant::Boolean(value) = value {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                });
+            (name, value)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     Json(serde_json::json!({
+        "controller_signals": controller_signals,
         "endpoint": state.endpoint, "config": state.config, "namespace": state.namespace,
         "history": samples, "latest": history.back(),
         "nodes": nodes,
@@ -169,6 +203,7 @@ async fn plant_manual(
     // One atomic queue update; the existing plant loop writes all requested nodes
     // on its next plant tick, independently of the browser refresh interval.
     *state.pending.write() = PendingManualWrites {
+        external_controller_enable: values.external_controller_enable,
         u_write: Some(values.u_write),
         target: Some(values.target),
         hl: Some(values.hl),
@@ -259,6 +294,9 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
         );
         let _ = address_space.add_variables(
             vec![
+                rw_bool_var(&NodeId::new(ns, CONTROLLER_READY), CONTROLLER_READY),
+                rw_bool_var(&NodeId::new(ns, CONTROLLER_CONTROL), CONTROLLER_CONTROL),
+                rw_bool_var(&NodeId::new(ns, CONTROLLER_ENABLE), CONTROLLER_ENABLE),
                 ro_f64_var(&y_value_id, Y_VALUE, 0.0),
                 rw_f64_var(&y_target_id, Y_TARGET, 0.0),
                 rw_f64_var(&y_hl_id, Y_HL, 1.0),
@@ -300,6 +338,7 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
         namespace: ns,
         history: Arc::clone(&history),
         pending: Arc::clone(&pending_manual_writes),
+        node_manager: Arc::clone(&node_manager),
     };
 
     let server_task = tokio::spawn(async move { server.run_with(listener).await });
@@ -329,6 +368,14 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
             }
 
             let pending = take_pending_manual_writes(&sim_pending_manual_writes);
+            if let Some(value) = pending.external_controller_enable {
+                let _ = sim_node_manager.set_value(
+                    subscriptions.as_ref(),
+                    &NodeId::new(ns, CONTROLLER_ENABLE),
+                    None,
+                    DataValue::new_now(value),
+                );
+            }
             if let Some(value) = pending.u_write {
                 let _ = sim_node_manager.set_value(
                     subscriptions.as_ref(),
@@ -516,6 +563,13 @@ fn virtual_hardware_pki_dir(port: u16) -> PathBuf {
     std::env::temp_dir().join(format!("smartapc_virtual_hw_pki_{port}_{now}"))
 }
 
+fn rw_bool_var(id: &NodeId, browse_name: &str) -> Variable {
+    let mut var = Variable::new(id, browse_name, browse_name, false);
+    var.set_access_level(AccessLevel::CURRENT_READ | AccessLevel::CURRENT_WRITE);
+    var.set_user_access_level(AccessLevel::CURRENT_READ | AccessLevel::CURRENT_WRITE);
+    var
+}
+
 fn rw_f64_var(id: &NodeId, browse_name: &str, initial: f64) -> Variable {
     let mut var = Variable::new(id, browse_name, browse_name, initial);
     var.set_access_level(AccessLevel::CURRENT_READ | AccessLevel::CURRENT_WRITE);
@@ -643,6 +697,7 @@ impl PlotWindowApp {
         };
 
         *self.pending_manual_writes.write() = PendingManualWrites {
+            external_controller_enable: None,
             u_write: Some(u_write),
             target: Some(target),
             hl: Some(hl),
@@ -842,6 +897,7 @@ mod tests {
     #[test]
     fn take_pending_manual_writes_returns_and_clears_values() {
         let pending = RwLock::new(PendingManualWrites {
+            external_controller_enable: None,
             u_write: Some(1.25),
             target: Some(2.5),
             hl: Some(3.75),

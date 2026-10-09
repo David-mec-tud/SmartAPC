@@ -61,6 +61,7 @@ impl ProjectConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.communication.validate()?;
+        self.deployment.validate(&self.io, &self.watchdog)?;
         if self.io.cycle_ms == 0 {
             bail!("io.cycle_ms must be > 0");
         }
@@ -2763,14 +2764,70 @@ const fn default_off_timeout_ms() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentConfig {
+    /// Boolean status outputs are optional for older/local-only projects.
+    #[serde(default)]
+    pub controller_is_ready: Option<String>,
+    #[serde(default)]
+    pub controller_has_control: Option<String>,
+    /// Read-only enable source. Its presence transfers on/off ownership to the device.
+    #[serde(default)]
+    pub external_controller_enable: Option<String>,
     pub service_name: String,
     pub display_name: String,
     pub description: String,
 }
 
 impl DeploymentConfig {
+    pub fn signal_nodes(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("ControllerIsReady", &self.controller_is_ready),
+            ("ControllerHasControl", &self.controller_has_control),
+            ("ExternalControllerEnable", &self.external_controller_enable),
+        ]
+        .into_iter()
+        .filter_map(|(name, node)| {
+            node.as_deref()
+                .map(str::trim)
+                .filter(|node| !node.is_empty())
+                .map(|node| (name, node))
+        })
+        .collect()
+    }
+
+    fn validate(&self, io: &IoConfig, watchdog: &WatchdogConfig) -> Result<()> {
+        let mut seen = HashSet::new();
+        for (name, node) in self.signal_nodes() {
+            if node.parse::<async_opcua::types::NodeId>().is_err() {
+                bail!("{name} requires a valid OPC UA Node ID");
+            }
+            if !seen.insert(node)
+                || io
+                    .inputs
+                    .iter()
+                    .chain(&io.outputs)
+                    .any(|point| point.address.trim() == node)
+            {
+                bail!("{name} must use a dedicated OPC UA Node ID");
+            }
+            if let WatchdogConfig::CounterMirror {
+                read_node,
+                write_node,
+                ..
+            } = watchdog
+            {
+                if node == read_node.trim() || node == write_node.trim() {
+                    bail!("{name} must not share a watchdog Node ID");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn default_for_project(project: &str) -> Self {
         Self {
+            controller_is_ready: None,
+            controller_has_control: None,
+            external_controller_enable: None,
             service_name: format!("smartapc_{}", project),
             display_name: format!("SmartAPC {}", project),
             description: "SmartAPC controller runtime".to_string(),
@@ -2927,6 +2984,28 @@ mod tests {
             deadband_value: None,
             enable: None,
         });
+    }
+
+    #[test]
+    fn controller_signal_nodes_are_optional_distinct_and_cannot_alias_io_or_watchdog() {
+        let mut cfg = ProjectConfig::new("handshake");
+        let saved = to_toml_string(&cfg).unwrap();
+        let old = from_toml_str(&saved).unwrap();
+        assert!(old.deployment.signal_nodes().is_empty());
+        cfg.deployment.controller_is_ready = Some("not-a-node".into());
+        assert!(cfg.validate().is_err());
+        cfg.deployment.controller_is_ready = Some("ns=2;s=ready".into());
+        cfg.deployment.controller_has_control = Some("ns=2;s=ready".into());
+        assert!(cfg.validate().is_err());
+        cfg.deployment.controller_has_control = Some("ns=2;s=control".into());
+        cfg.deployment.external_controller_enable = Some("ns=2;s=enable".into());
+        cfg.validate().unwrap();
+        cfg.watchdog = WatchdogConfig::CounterMirror {
+            read_node: "ns=2;s=enable".into(),
+            write_node: "ns=2;s=mirror".into(),
+            stale_timeout_ms: 1000,
+        };
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

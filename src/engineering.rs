@@ -104,6 +104,7 @@ pub enum JobRequest {
         values: HashMap<String, SignalValue>,
     },
     WatchdogTest,
+    ControllerSignalsTest,
 }
 
 impl JobRequest {
@@ -116,6 +117,7 @@ impl JobRequest {
             Self::IoRead => "io_read",
             Self::IoWrite { .. } => "io_write",
             Self::WatchdogTest => "watchdog_test",
+            Self::ControllerSignalsTest => "controller_signals_test",
         }
     }
 }
@@ -297,6 +299,7 @@ impl EngineeringService {
                 JobRequest::IoRead => test_io_read(&cfg).await,
                 JobRequest::IoWrite { values } => test_io_write(&cfg, values).await,
                 JobRequest::WatchdogTest => test_watchdog(&cfg).await,
+                JobRequest::ControllerSignalsTest => test_controller_signals(&cfg).await,
                 blocking_request => {
                     let worker_service = service.clone();
                     let worker_name = name.clone();
@@ -551,6 +554,42 @@ async fn test_watchdog(cfg: &ProjectConfig) -> Result<Value> {
             )
         }
     }
+}
+
+/// Test the saved handshake contract without claiming readiness or ownership.
+/// Outputs are written false and read back; the external enable is only read.
+async fn test_controller_signals(cfg: &ProjectConfig) -> Result<Value> {
+    cfg.validate()?;
+    let adapter = OpcUaClientAdapter::new(cfg.communication.endpoint_url.clone());
+    crate::runtime::seed_protocol_nodes(&adapter, cfg)?;
+    adapter.connect().await?;
+    let mut readings = Vec::new();
+    for (signal, address) in cfg.deployment.signal_nodes() {
+        let result: Result<SignalValue> = async {
+            let initial = adapter.read(address).await?;
+            if !matches!(initial, SignalValue::Bool(_)) {
+                bail!("{signal} must be an OPC UA Boolean");
+            }
+            if signal != "ExternalControllerEnable" {
+                adapter.write(address, SignalValue::Bool(false)).await?;
+                let readback = adapter.read(address).await?;
+                if readback != SignalValue::Bool(false) {
+                    bail!("{signal} false write was not confirmed by readback");
+                }
+                Ok(readback)
+            } else {
+                Ok(initial)
+            }
+        }
+        .await;
+        readings.push(match result {
+            Ok(value) => json!({"signal": signal, "address": address, "value": value}),
+            Err(err) => json!({"signal": signal, "address": address, "error": format!("{err:#}")}),
+        });
+    }
+    Ok(
+        json!({"readings": readings, "status": if cfg.deployment.signal_nodes().is_empty() { "disabled" } else { "tested" }}),
+    )
 }
 
 /// Readiness concerns saved configuration; it does not contact or write hardware.

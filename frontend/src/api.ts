@@ -178,6 +178,9 @@ export interface ProjectConfig {
   runtime: Record<string, unknown>;
   alarms: { alarm_timeout_ms: number; off_timeout_ms: number };
   deployment: {
+    controller_is_ready?: string | null;
+    controller_has_control?: string | null;
+    external_controller_enable?: string | null;
     service_name: string;
     display_name: string;
     description: string;
@@ -196,6 +199,14 @@ export interface Execution {
     execution_id: string;
     project_name: string;
     state: string;
+    controller?: {
+      is_ready: boolean;
+      has_control: boolean;
+      enabled: boolean;
+      external_enable: boolean;
+      observer_converged: boolean;
+      reason: string;
+    };
     connection_health?: "healthy" | "unhealthy";
     watchdog_status?: string | { fault: { reason: string } };
     metrics: Metrics;

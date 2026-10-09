@@ -97,3 +97,25 @@ browser closure and persist completed reports; jobs interrupted by backend
 shutdown are not automatically resumed. SQLite stores complete samples while
 browser windows intentionally downsample large results. These limits are visible
 in documentation and do not turn optional engineering work into deployment gates.
+
+## Controller handshake evidence (2026-10-09)
+
+Deployment configures/tests Boolean ControllerIsReady/ControllerHasControl outputs
+and the optional read-only ExternalControllerEnable input. Scoped manual enable
+commands are enforced in Rust, and the shared runtime button is disabled for
+external ownership. Startup always calculates in shadow mode. Runtime snapshots
+and structured cycle/fault logs expose observer convergence, enable, readiness,
+ownership and reasons. The isolated virtual plant exposes the three Boolean nodes.
+
+Rust coverage includes shadow startup/observer warm-up, explicit enable/disable,
+read-only Boolean external ownership, invalid external types, controller errors,
+late-worker deadline revocation, stable Kalman convergence, and Node ID conflicts.
+`hardware` browser journeys configure/save/test handshake nodes, verify unchanged
+actuation in shadow mode, manual control, external control with disabled/rejected
+manual actions, and cleared device flags on stop.
+
+Validation: `cargo fmt`, default/native `cargo check --offline` and `cargo test
+--offline` passed (111/125 tests); frontend typecheck/build and four Vitest tests
+passed with Node 24. All 18 browser journeys passed, including both handshake
+journeys against real OPC UA. The separate package-only production test is skipped
+in this development suite; serving and packaging were unchanged by this task.

@@ -39,6 +39,7 @@ import { Configuration } from "./pages/Configuration";
 import { VirtualHardware } from "./pages/VirtualHardware";
 import { Engineering } from "./pages/Engineering";
 import { Operation, Trends } from "./pages/Operation";
+import { ControllerControl } from "./components/ControllerControl";
 import { Deployment } from "./pages/Deployment";
 import { Button, Badge, Input, Notice, Select } from "./components/ui";
 import "./styles.css";
@@ -283,6 +284,19 @@ function Shell() {
               </Badge>
             )}
             {execution?.mode === "runtime" && (
+              <Badge
+                tone={
+                  execution.snapshot.controller?.has_control
+                    ? "good"
+                    : "neutral"
+                }
+              >
+                {execution.snapshot.controller?.has_control
+                  ? "Controlling"
+                  : "Shadow mode"}
+              </Badge>
+            )}
+            {execution?.mode === "runtime" && (
               <span>
                 Watchdog ·{" "}
                 {typeof execution.snapshot.watchdog_status === "string"
@@ -298,6 +312,9 @@ function Shell() {
             <span className="data-age">
               {age < 60 ? `${age}s ago` : "unavailable"}
             </span>
+            {execution?.mode === "runtime" && (
+              <ControllerControl disabled={stale} />
+            )}
             {execution ? (
               <Button
                 variant="destructive"

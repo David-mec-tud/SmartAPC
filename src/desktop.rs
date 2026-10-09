@@ -1541,6 +1541,7 @@ enum Message {
     ProjectCreated(Result<String, String>),
     StartRuntimePressed,
     StopRuntimePressed,
+    SetControllerEnabled(bool),
     RuntimeActionFinished(Result<String, String>),
     Tick,
     Refreshed(Result<RefreshData, String>),
@@ -2568,6 +2569,25 @@ impl DesktopApp {
                     Arc::clone(&self.runtime),
                     self.project_service.clone(),
                     project_name,
+                )
+            }
+            Message::SetControllerEnabled(enabled) => {
+                let runtime = Arc::clone(&self.runtime);
+                Task::perform(
+                    async move {
+                        runtime
+                            .set_controller_enabled(enabled)
+                            .await
+                            .map(|()| {
+                                if enabled {
+                                    "Controller enabled".to_string()
+                                } else {
+                                    "Controller in shadow mode".to_string()
+                                }
+                            })
+                            .map_err(|err| err.to_string())
+                    },
+                    Message::RuntimeActionFinished,
                 )
             }
             Message::StopRuntimePressed => stop_runtime_task(Arc::clone(&self.runtime)),
@@ -3900,12 +3920,26 @@ impl DesktopApp {
             button("Stop Runtime")
         };
 
+        let control_button = match &self.active_snapshot {
+            Some(ExecutionSnapshot::Runtime(snapshot)) if !snapshot.controller.external_enable => {
+                button(if snapshot.controller.enabled {
+                    "Turn controller off"
+                } else {
+                    "Turn controller on"
+                })
+                .on_press(Message::SetControllerEnabled(!snapshot.controller.enabled))
+            }
+            Some(ExecutionSnapshot::Runtime(_)) => button("ExternalControllerEnable owns on/off"),
+            _ => button("Turn controller on"),
+        };
         let summary = match &self.active_snapshot {
             Some(ExecutionSnapshot::Runtime(snapshot)) => format!(
-                "Runtime | Project={} | State={:?} | Watchdog={:?} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
+                "Runtime | Project={} | State={:?} | Watchdog={:?} | Ready={} | HasControl={} | Cycles={} | DeadlineMiss={} | LastDuration={}us | LastJitter={}us",
                 snapshot.project_name,
                 snapshot.state,
                 snapshot.watchdog_status,
+                snapshot.controller.is_ready,
+                snapshot.controller.has_control,
                 snapshot.metrics.total_cycles,
                 snapshot.metrics.deadline_misses,
                 snapshot.metrics.last_duration_us,
@@ -3922,9 +3956,17 @@ impl DesktopApp {
             None => "No runtime or simulation is active".to_string(),
         };
 
-        container(row![start_button, stop_button, text(summary).size(14)].spacing(12))
-            .padding(12)
-            .into()
+        container(
+            row![
+                start_button,
+                control_button,
+                stop_button,
+                text(summary).size(14)
+            ]
+            .spacing(12),
+        )
+        .padding(12)
+        .into()
     }
 
     fn sidebar_view(&self) -> Element<'_, Message> {

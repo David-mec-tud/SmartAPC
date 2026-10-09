@@ -448,6 +448,10 @@ pub struct SmartApcContext {{
 #[derive(Debug, Clone, Default)]
 pub struct SmartApcOutputs {{
     pub values: HashMap<String, SignalValue>,
+    // Set Some(false) while a custom observer warms up, then Some(true) after
+    // convergence. Required for strategies declaring observer/Kalman parameters.
+    // Leave None for strategies without an observer.
+    pub observer_converged: Option<bool>,
     // Additional user logs emitted by the control strategy.
     pub logs: Vec<UserLogEntry>,
 }}
@@ -529,6 +533,7 @@ struct CallRequest {{
 
 #[derive(Debug, Serialize)]
 struct CallResponse {{
+    observer_converged: Option<bool>,
     outputs: HashMap<String, SignalValue>,
     logs: Vec<UserLogEntry>,
 }}
@@ -599,6 +604,7 @@ pub extern "C" fn smartapc_control_json(input: *const c_char) -> *mut c_char {{
     call_control(&ctx, &mut out);
 
     let resp = CallResponse {{
+        observer_converged: out.observer_converged,
         outputs: out.values,
         logs: out.logs,
     }};

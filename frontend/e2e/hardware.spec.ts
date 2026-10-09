@@ -401,3 +401,165 @@ test("a rejected test request retains its error across navigation until a succes
   await expect(result.getByText("Passed", { exact: true })).toBeVisible();
   await expect(result.getByRole("alert")).toHaveCount(0);
 });
+
+test("deployment handshake tests preserve shadow startup and clear flags on stop", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(90_000);
+  const name = await createHardwareProject(request);
+  await page.goto("/deployment");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page
+    .getByLabel("ControllerIsReady Node ID", { exact: true })
+    .fill("ns=2;s=ControllerIsReady");
+  await page
+    .getByLabel("ControllerHasControl Node ID", { exact: true })
+    .fill("ns=2;s=ControllerHasControl");
+  await page
+    .getByRole("button", { name: "Save configuration", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Test saved controller signals", exact: true })
+    .click();
+  const result = page.getByRole("region", {
+    name: "Controller signals test result",
+  });
+  await expect(result.getByText("Passed", { exact: true })).toBeVisible();
+  await expect(
+    result.getByRole("row", { name: /ControllerIsReady/ }),
+  ).toContainText("false");
+  await expect(
+    result.getByRole("row", { name: /ControllerHasControl/ }),
+  ).toContainText("false");
+  await request.post(`${plantUrl}/api/virtual-hardware`, {
+    data: { u_write: 0.5, target: 3, hl: 10, ll: -10 },
+  });
+  const plant = async () =>
+    await (await request.get(`${plantUrl}/api/virtual-hardware`)).json();
+  await expect.poll(async () => (await plant()).latest.sample.u).toBe(0.5);
+  await page
+    .getByRole("button", { name: "Start saved runtime", exact: true })
+    .click();
+  const execution = async () =>
+    await (await request.get("/api/execution/state")).json();
+  await expect
+    .poll(async () => (await execution())?.snapshot.controller.is_ready)
+    .toBe(true);
+  expect((await execution()).snapshot.controller.enabled).toBe(false);
+  expect((await plant()).latest.sample.u).toBe(0.5);
+  expect((await plant()).controller_signals.ControllerHasControl).toBe(false);
+  await expect(page.getByText("Shadow mode", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Turn controller on", exact: true })
+    .click();
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerHasControl)
+    .toBe(true);
+  await page
+    .getByRole("button", { name: "Turn controller off", exact: true })
+    .click();
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerHasControl)
+    .toBe(false);
+  expect((await execution()).snapshot.controller.is_ready).toBe(true);
+  await page.getByRole("button", { name: "Stop runtime", exact: true }).click();
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerIsReady)
+    .toBe(false);
+  expect((await plant()).controller_signals.ControllerHasControl).toBe(false);
+});
+
+test("external enable is tested read only, disables the UI, and owns runtime on/off", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(90_000);
+  const name = await createHardwareProject(request);
+  const saved = await request.get(`/api/projects/${name}/config`);
+  const config = await saved.json();
+  Object.assign(config.deployment, {
+    controller_is_ready: "ns=2;s=ControllerIsReady",
+    controller_has_control: "ns=2;s=ControllerHasControl",
+    external_controller_enable: "ns=2;s=ExternalControllerEnable",
+  });
+  expect(
+    (
+      await request.put(`/api/projects/${name}/config`, {
+        data: config,
+        headers: { "If-Match": saved.headers().etag },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  const setEnable = (enabled: boolean) =>
+    request.post(`${plantUrl}/api/virtual-hardware`, {
+      data: {
+        u_write: 0,
+        target: 2,
+        hl: 10,
+        ll: -10,
+        external_controller_enable: enabled,
+      },
+    });
+  const plant = async () =>
+    await (await request.get(`${plantUrl}/api/virtual-hardware`)).json();
+  await setEnable(true);
+  await expect
+    .poll(
+      async () => (await plant()).controller_signals.ExternalControllerEnable,
+    )
+    .toBe(true);
+  await page.goto("/deployment");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page
+    .getByRole("button", { name: "Test saved controller signals", exact: true })
+    .click();
+  await expect(
+    page
+      .getByRole("region", { name: "Controller signals test result" })
+      .getByText("Passed", { exact: true }),
+  ).toBeVisible();
+  expect((await plant()).controller_signals.ExternalControllerEnable).toBe(
+    true,
+  );
+  await setEnable(false);
+  await expect
+    .poll(
+      async () => (await plant()).controller_signals.ExternalControllerEnable,
+    )
+    .toBe(false);
+  await page
+    .getByRole("button", { name: "Start saved runtime", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", {
+      name: "ExternalControllerEnable owns on/off",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  const current = await (await request.get("/api/execution/state")).json();
+  expect(
+    (
+      await request.post("/api/execution/command", {
+        data: {
+          action: "enable_control",
+          mode: "runtime",
+          project_name: name,
+          execution_id: current.snapshot.execution_id,
+        },
+      })
+    ).ok(),
+  ).toBeFalsy();
+  await setEnable(true);
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerHasControl)
+    .toBe(true);
+  await setEnable(false);
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerHasControl)
+    .toBe(false);
+  await page.getByRole("button", { name: "Stop runtime", exact: true }).click();
+  await expect
+    .poll(async () => (await plant()).controller_signals.ControllerIsReady)
+    .toBe(false);
+});
