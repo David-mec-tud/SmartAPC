@@ -659,6 +659,32 @@ summary small {
 .job-body .inline {
   margin-bottom: 15px;
 }
+.hardware-test-results {
+  margin-top: 24px;
+}
+.hardware-test-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-wrap: anywhere;
+}
+.hardware-test-feedback svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.hardware-test-results > section + section {
+  border-top: 1px solid var(--border);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+.hardware-test-results .section-title small {
+  display: block;
+  margin-top: 5px;
+}
+.hardware-test-results .error-text {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
 .plot {
   width: 100%;
   min-width: 0;

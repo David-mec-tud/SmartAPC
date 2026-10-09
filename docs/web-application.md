@@ -72,6 +72,16 @@ MV/target/limit values on plant ticks, independently of open tabs.
 
 ## Validation
 
+Hardware tests show their results beside the controls in **Connection & timing**
+and **Variables & I/O**. A red **Test failed** indicator includes a short reason;
+editing or saving configuration and starting a retry keep the failure visible
+until that test succeeds. Read and write results remain independent. Read reports
+show values and errors per Node ID, including partial failures, and successful
+write tests confirm the number of values sent. Completed reports return after
+navigation or refresh and stay scoped to their project. Watchdog tests check a
+single counter read and mirror write; they do not measure counter freshness over
+the configured timeout. Save configuration drafts before running hardware tests.
+
 ```sh
 cargo fmt
 cargo check

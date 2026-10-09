@@ -21,10 +21,14 @@ import {
 } from "../components/ui";
 import { MatrixEditor, resizeMatrix } from "../components/MatrixEditor";
 import { renameVariable } from "../configuration-drafts";
+import {
+  HardwareTestResults,
+  useHardwareTest,
+} from "../components/HardwareTestResults";
 
 export function Configuration() {
   const { section = "communication" } = useParams();
-  const { config, edit, locked } = useWorkspace();
+  const { config, project, locked } = useWorkspace();
   if (!config) return null;
   return (
     <>
@@ -51,9 +55,9 @@ export function Configuration() {
       )}
       <fieldset disabled={locked} className="editor-fieldset">
         {section === "communication" ? (
-          <Communication />
+          <Communication key={project} />
         ) : section === "io" ? (
-          <Io />
+          <Io key={project} />
         ) : section === "model" ? (
           <ModelEditor />
         ) : section === "strategy" ? (
@@ -66,7 +70,8 @@ export function Configuration() {
   );
 }
 function Communication() {
-  const { config: cfg, edit, startJob, locked } = useWorkspace();
+  const { config: cfg, edit, locked, dirty } = useWorkspace();
+  const test = useHardwareTest();
   if (!cfg) return null;
   return (
     <>
@@ -179,13 +184,16 @@ function Communication() {
         )}
         <Button
           variant="outline"
-          disabled={locked}
-          onClick={() =>
-            void startJob({ kind: "watchdog_test" }).catch(() => {})
-          }
+          disabled={locked || dirty || test.isPending}
+          onClick={() => test.mutate({ kind: "watchdog_test" })}
         >
           Test saved watchdog · reads and mirrors counter
         </Button>
+        <p className="muted">
+          The test uses saved configuration and checks one counter read and
+          mirror write. Save your draft before testing.
+        </p>
+        <HardwareTestResults kinds={["watchdog_test"]} test={test} />
       </section>
     </>
   );
@@ -223,7 +231,8 @@ const columns: Record<
   ],
 };
 function Io() {
-  const { config: cfg, edit, startJob, locked, dirty } = useWorkspace();
+  const { config: cfg, edit, locked, dirty } = useWorkspace();
+  const test = useHardwareTest();
   const [group, setGroup] = useState<"mvs" | "cvs" | "dvs">("mvs");
   const [newName, setNewName] = useState("");
   const [writeValues, setWriteValues] = useState<Record<string, number>>({});
@@ -395,16 +404,21 @@ function Io() {
         <div className="inline">
           <Button
             variant="outline"
-            disabled={locked || dirty}
-            onClick={() => void startJob({ kind: "io_read" }).catch(() => {})}
+            disabled={locked || dirty || test.isPending}
+            onClick={() => test.mutate({ kind: "io_read" })}
           >
             Run read test
           </Button>
           <Button
             variant="outline"
-            disabled={locked || dirty || !Object.keys(writeValues).length}
+            disabled={
+              locked ||
+              dirty ||
+              test.isPending ||
+              !Object.keys(writeValues).length
+            }
             onClick={() =>
-              void startJob({
+              test.mutate({
                 kind: "io_write",
                 values: Object.fromEntries(
                   Object.entries(writeValues).map(([name, value]) => [
@@ -412,12 +426,13 @@ function Io() {
                     { kind: "f64", value },
                   ]),
                 ),
-              }).catch(() => {})
+              })
             }
           >
             Write entered test values
           </Button>
         </div>
+        <HardwareTestResults kinds={["io_read", "io_write"]} test={test} />
       </section>
       <InitialValues />
     </>
