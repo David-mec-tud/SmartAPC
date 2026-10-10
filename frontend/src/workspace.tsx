@@ -19,6 +19,7 @@ import {
 } from "./api";
 interface Draft extends SavedProject {
   original: string;
+  autoSaveLogic?: boolean;
 }
 interface SourceDraft extends SourceDocument {
   original: string;
@@ -45,6 +46,9 @@ function useWorkspaceState() {
   const [notification, setNotification] = useState("");
   const [streamConnected, setStreamConnected] = useState(false);
   const [syncingJob, setSyncingJob] = useState(false);
+  const [strategyFailures, setStrategyFailures] = useState<
+    Record<string, { submitted: string; message: string }>
+  >({});
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => request<string[]>("/api/projects"),
@@ -186,7 +190,7 @@ function useWorkspaceState() {
       setNotification((error as Error).message);
     }
   }
-  function edit(update: (cfg: ProjectConfig) => void) {
+  function edit(update: (cfg: ProjectConfig) => void, autoSaveLogic = false) {
     if (!config || !saved.data) return;
     const next = structuredClone(config);
     update(next);
@@ -197,8 +201,12 @@ function useWorkspaceState() {
         revision: current?.revision ?? saved.data.revision,
         original:
           current?.original ?? configurationFingerprint(saved.data.config),
+        autoSaveLogic: autoSaveLogic || current?.autoSaveLogic,
       },
     }));
+  }
+  function editStrategy(update: (cfg: ProjectConfig) => void) {
+    edit(update, true);
   }
   function discard() {
     setDrafts((previous) => {
@@ -243,6 +251,131 @@ function useWorkspaceState() {
     },
     onError: (error) => setNotification(error.message),
   });
+  const strategySave = useMutation({
+    mutationFn: async ({ name, draft }: { name: string; draft: Draft }) => ({
+      name,
+      revision: draft.revision,
+      submitted: configurationFingerprint(draft.config.logic),
+      saved: await request<SavedProject>(
+        `${projectPath(name)}/strategy/config`,
+        { revision: draft.revision, config: draft.config.logic },
+        "PUT",
+      ),
+    }),
+    onSuccess: async (result) => {
+      client.setQueryData(["project", result.name], result.saved);
+      setDrafts((previous) => {
+        const draft = previous[result.name];
+        if (!draft) return previous;
+        const original = JSON.parse(draft.original) as ProjectConfig;
+        const nextConfig = { ...draft.config };
+        const newerLogic =
+          configurationFingerprint(draft.config.logic) !== result.submitted;
+        // Accept Rust normalization only for unchanged sections. Preserve both
+        // unrelated drafts and edits typed while this request was in flight.
+        for (const section of Object.keys(
+          nextConfig,
+        ) as (keyof ProjectConfig)[]) {
+          if (
+            section === "logic"
+              ? !newerLogic
+              : configurationFingerprint(nextConfig[section]) ===
+                configurationFingerprint(original[section])
+          )
+            Object.assign(nextConfig, {
+              [section]: result.saved.config[section],
+            });
+        }
+        if (
+          configurationFingerprint(nextConfig) ===
+          configurationFingerprint(result.saved.config)
+        ) {
+          const next = { ...previous };
+          delete next[result.name];
+          return next;
+        }
+        return {
+          ...previous,
+          [result.name]: {
+            config: nextConfig,
+            revision: result.saved.revision,
+            original: configurationFingerprint(result.saved.config),
+            autoSaveLogic: newerLogic,
+          },
+        };
+      });
+      // Our own logic save did not change source bytes. Advance its configuration
+      // revision so a retained source draft can still be saved after switching strategies.
+      setSources((previous) => {
+        const source = previous[result.name];
+        return source?.revision === result.revision
+          ? {
+              ...previous,
+              [result.name]: { ...source, revision: result.saved.revision },
+            }
+          : previous;
+      });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["catalog", result.name] }),
+        client.invalidateQueries({ queryKey: ["readiness", result.name] }),
+      ]);
+    },
+    onError: (error, { name, draft }) => {
+      setStrategyFailures((previous) => ({
+        ...previous,
+        [name]: {
+          submitted: configurationFingerprint(draft.config.logic),
+          message: error.message,
+        },
+      }));
+    },
+  });
+  useEffect(() => {
+    if (save.isPending || strategySave.isPending || syncingJob) return;
+    const pending = Object.entries(drafts).find(
+      ([name, draft]) =>
+        draft.autoSaveLogic &&
+        workspace.data?.execution?.snapshot.project_name !== name &&
+        !(
+          name === project && jobs.data?.some((job) => job.phase === "running")
+        ) &&
+        strategyFailures[name]?.submitted !==
+          configurationFingerprint(draft.config.logic),
+    );
+    if (!pending) return;
+    // The provider owns this debounce: navigation and project switching cannot
+    // cancel the last edit. Serialize saves to avoid competing revision writes.
+    const timer = window.setTimeout(() => {
+      strategySave.mutate({ name: pending[0], draft: pending[1] });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    drafts,
+    save.isPending,
+    strategySave.isPending,
+    strategySave.mutate,
+    syncingJob,
+    project,
+    jobs.data,
+    workspace.data,
+    strategyFailures,
+  ]);
+  const strategyError =
+    current?.autoSaveLogic &&
+    strategyFailures[project]?.submitted ===
+      configurationFingerprint(current.config.logic)
+      ? strategyFailures[project].message
+      : undefined;
+  const strategyPending =
+    !!current?.autoSaveLogic ||
+    (strategySave.isPending && strategySave.variables?.name === project);
+  function retryStrategySave() {
+    setStrategyFailures((previous) => {
+      const next = { ...previous };
+      delete next[project];
+      return next;
+    });
+  }
   async function refresh() {
     await Promise.all([
       client.invalidateQueries({ queryKey: ["projects"] }),
@@ -302,6 +435,10 @@ function useWorkspaceState() {
     saved,
     config,
     edit,
+    editStrategy,
+    strategyPending,
+    strategyError,
+    retryStrategySave,
     dirty,
     discard,
     save,

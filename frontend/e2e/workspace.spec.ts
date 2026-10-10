@@ -212,6 +212,117 @@ test("MPC movement cost stays boolean and external CV edges stay out of editing 
     .click();
 });
 
+test("strategy parameters preview immediately and autosave through navigation without saving other drafts", async ({
+  page,
+  request,
+}) => {
+  const name = await seed(request);
+  const other = await seed(request);
+  await page.goto("/configuration/io");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page.getByRole("button", { name: "CVS 1", exact: true }).click();
+  await page.getByLabel("y1 Band high offset").fill("3");
+  await page
+    .getByRole("link", { name: "Control strategy", exact: true })
+    .click();
+  let releaseSave!: () => void;
+  const pausedSave = new Promise<void>((resolve) => {
+    releaseSave = resolve;
+  });
+  let firstSave = true;
+  let saving = false;
+  await page.route(`**/api/projects/${name}/strategy/config`, async (route) => {
+    if (firstSave) {
+      firstSave = false;
+      saving = true;
+      await pausedSave;
+    }
+    await route.continue();
+  });
+  await page.getByLabel("Selected strategy").selectOption("linear_mpc");
+  await expect(
+    page.getByLabel("mpc.prediction_horizon", { exact: true }),
+  ).toBeVisible();
+  await expect.poll(() => saving).toBe(true);
+  await page.getByLabel("mpc.cv.y1.q", { exact: true }).fill("2.5");
+  await page
+    .getByRole("combobox", { name: "mpc.mv.u1 · movement cost", exact: true })
+    .selectOption("true");
+  await page
+    .getByRole("link", { name: "Variables & I/O", exact: true })
+    .click();
+  await page.getByRole("button", { name: "CVS 1", exact: true }).click();
+  await expect(page.getByLabel("y1 Band high offset")).toHaveValue("3");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(other);
+  releaseSave();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+          .params,
+    )
+    .toMatchObject({ "mpc.cv.y1.q": 2.5, "mpc.mv.u1.use_l1": true });
+  const saved = await (
+    await request.get(`/api/projects/${name}/config`)
+  ).json();
+  expect(saved.io_definition.cvs[0].band_high_value).toBeNull();
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page.getByRole("button", { name: "CVS 1", exact: true }).click();
+  await expect(page.getByLabel("y1 Band high offset")).toHaveValue("3");
+  await page
+    .getByRole("link", { name: "Control strategy", exact: true })
+    .click();
+  await expect(page.getByLabel("mpc.cv.y1.q", { exact: true })).toHaveValue(
+    "2.5",
+  );
+  await page.reload();
+  await expect(page.getByLabel("mpc.cv.y1.q", { exact: true })).toHaveValue(
+    "2.5",
+  );
+  await expect(
+    page.getByRole("combobox", {
+      name: "mpc.mv.u1 · movement cost",
+      exact: true,
+    }),
+  ).toHaveValue("true");
+});
+
+test("strategy autosave retains invalid edits and recovers when corrected", async ({
+  page,
+  request,
+}) => {
+  const name = await seed(request);
+  await page.goto("/configuration/strategy");
+  await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await page.getByLabel("Controller cycle (ms)", { exact: true }).fill("0");
+  await expect(page.getByRole("alert")).toContainText(
+    "Strategy changes could not be saved",
+  );
+  await expect(
+    page.getByLabel("Controller cycle (ms)", { exact: true }),
+  ).toHaveValue("0");
+  expect(
+    (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+      .cycle_ms,
+  ).toBe(100);
+  await page.getByLabel("Controller cycle (ms)", { exact: true }).fill("200");
+  await page.getByRole("link", { name: "Plant model", exact: true }).click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+          .cycle_ms,
+    )
+    .toBe(200);
+  await page
+    .getByRole("link", { name: "Control strategy", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(
+    page.getByLabel("Controller cycle (ms)", { exact: true }),
+  ).toHaveValue("200");
+});
+
 test("custom source drafts follow their project; build, schema, simulation and user logs work through Rust", async ({
   page,
   request,
@@ -250,9 +361,6 @@ test("custom source drafts follow their project; build, schema, simulation and u
   await expect(customConfiguration).toHaveCount(0);
   await selectedStrategy.selectOption("custom_rust");
   await expect(customConfiguration).toBeVisible();
-  await page
-    .getByRole("button", { name: "Save configuration", exact: true })
-    .click();
   await page
     .getByRole("button", { name: "Generate template", exact: true })
     .click();
@@ -303,8 +411,10 @@ test("custom source drafts follow their project; build, schema, simulation and u
     await selectedStrategy.selectOption("custom_rust");
     await expect(editor).toHaveValue(source);
   }
-  await page.getByRole("button", { name: "Discard draft", exact: true }).click();
   await expect(editor).toHaveValue(source);
+  await expect(
+    page.getByRole("button", { name: "Save source", exact: true }),
+  ).toBeEnabled();
   await page.getByRole("button", { name: "Save source", exact: true }).click();
   await expect(
     page.getByText(
@@ -338,9 +448,13 @@ test("custom source drafts follow their project; build, schema, simulation and u
   await page
     .getByRole("combobox", { name: "enabled", exact: true })
     .selectOption("true");
-  await page
-    .getByRole("button", { name: "Save configuration", exact: true })
-    .click();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`/api/projects/${name}/config`)).json()).logic
+          .params,
+    )
+    .toMatchObject({ gain: 1.25, enabled: true });
   await page.getByRole("link", { name: "Simulation", exact: true }).click();
   await page
     .getByRole("button", { name: "Start saved simulation", exact: true })
@@ -352,10 +466,13 @@ test("custom source drafts follow their project; build, schema, simulation and u
           .last_outputs["mv.u1.write"]?.value,
     )
     .toBe(1.25);
-  await expect.poll(async () =>
-    (await (await request.get("/api/execution/state")).json()).snapshot
-      .last_outputs["custom.lamp.write"],
-  ).toEqual({ kind: "bool", value: false });
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get("/api/execution/state")).json()).snapshot
+          .last_outputs["custom.lamp.write"],
+    )
+    .toEqual({ kind: "bool", value: false });
   await expect
     .poll(async () =>
       (

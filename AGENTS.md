@@ -96,8 +96,8 @@
 - Keep `io.cycle_ms` aligned as a multiple of `communication.cycle_ms`; controller timing remains independent.
 
 ## 9. Custom Rust Strategy Workflow (Quick Reference)
-1. Select and save Custom Rust in Control Strategy to show its configuration,
-   then generate a template.
+1. Select Custom Rust in Control Strategy to show its configuration immediately;
+   strategy changes save automatically, then generate a template.
 2. Edit `control(...)` in `projects/<project>/logic/custom_strategy/src/lib.rs`.
 3. Build/check strategy via UI button.
 4. Verify compatibility result against current I/O definition.
@@ -107,6 +107,10 @@
 - Use user-log helpers from the template to emit custom runtime logs.
 - Browser source saves check both configuration and source revisions. Regeneration
   backs up replaced source/manifest/dispatch and saved TOML under `logic/backups/<id>`.
+- Browser strategy parameters preview from the draft through Rust. Strategy edits
+  autosave only the logic section with revision and execution/job guards; preserve
+  other configuration drafts and edits made during a pending save. Failed saves
+  retain the draft and stop retrying until corrected or explicitly retried.
 - Scoped browser execution mutations require project, mode and execution ID; online
   parameter writes also require the expected applied values to reject stale clients.
 - Browser history is bounded with extrema-preserving sampling. Full job reports

@@ -129,6 +129,8 @@ function Shell() {
     setNotification,
     dirty,
     save,
+    strategyPending,
+    strategyError,
     discard,
     locked,
     act,
@@ -409,7 +411,9 @@ function Shell() {
         {project && (
           <div className="save-bar">
             <span>
-              {dirty ? (
+              {strategyPending && !strategyError ? (
+                <>Saving strategy changes… · {project}</>
+              ) : dirty ? (
                 <>
                   <span className="unsaved-dot" /> Unsaved draft · {project}
                 </>
@@ -421,14 +425,23 @@ function Shell() {
               <Button
                 variant="ghost"
                 size="small"
-                disabled={!dirty || save.isPending}
+                disabled={
+                  !dirty ||
+                  save.isPending ||
+                  (strategyPending && !strategyError)
+                }
                 onClick={discard}
               >
                 Discard draft
               </Button>
               <Button
                 size="small"
-                disabled={!dirty || locked || save.isPending}
+                disabled={
+                  !dirty ||
+                  locked ||
+                  save.isPending ||
+                  (strategyPending && !strategyError)
+                }
                 onClick={() => save.mutate()}
               >
                 <Save size={14} />

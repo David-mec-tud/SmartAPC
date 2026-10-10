@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import {
   type Cv,
@@ -11,6 +12,7 @@ import {
   request,
   type ProjectConfig,
   type SignalValue,
+  type Parameters,
 } from "../api";
 import { useWorkspace } from "../workspace";
 import {
@@ -48,7 +50,9 @@ export function Configuration() {
           }[section] || section}
         </h1>
         <p>
-          Define and save the controller’s hardware and calculation contract.
+          {section === "strategy"
+            ? "Configure the controller. Strategy changes save automatically."
+            : "Define and save the controller’s hardware and calculation contract."}
         </p>
       </div>
       {locked && (
@@ -673,20 +677,51 @@ function ModelEditor() {
 function Strategy() {
   const {
     config: cfg,
-    edit,
-    catalog,
+    editStrategy: edit,
     startJob,
     act,
     project,
     locked,
     dirty,
+    strategyPending,
+    strategyError,
+    retryStrategySave,
     source,
     sourceDirty,
     loadSource,
     editSource,
     saveSource,
   } = useWorkspace();
+  const parameters = useQuery({
+    // Defaults depend on the draft contract, not its parameter values. Editing a
+    // value overlays these typed Rust defaults without refetching on each keystroke.
+    queryKey: [
+      "strategy-parameters",
+      project,
+      cfg?.logic.kind,
+      cfg?.variables,
+      cfg?.model,
+      cfg?.io_definition,
+      cfg?.logic.p_controller,
+      cfg?.logic.custom_rust.parameter_schema,
+    ],
+    queryFn: () =>
+      request<Parameters>(
+        `${projectPath(project)}/strategy/parameters`,
+        cfg,
+        "POST",
+      ),
+    enabled: !!cfg,
+  });
   if (!cfg) return null;
+  const parameterValues = Object.fromEntries(
+    Object.entries(parameters.data ?? cfg.logic.params).map(([key, value]) => [
+      key,
+      typeof cfg.logic.params[key] === typeof value
+        ? cfg.logic.params[key]
+        : value,
+    ]),
+  );
   return (
     <>
       <section className="panel">
@@ -722,6 +757,21 @@ function Strategy() {
           Rust validates strategy compatibility against the complete current I/O
           contract when saving and running.
         </p>
+        {strategyError ? (
+          <Notice error>
+            Strategy changes could not be saved: {strategyError}. Your draft is
+            retained.
+            <Button variant="outline" size="small" onClick={retryStrategySave}>
+              Retry automatic save
+            </Button>
+          </Notice>
+        ) : (
+          <p role="status" className="muted">
+            {strategyPending
+              ? "Saving strategy changes…"
+              : "Strategy changes saved automatically."}
+          </p>
+        )}
       </section>
       {cfg.logic.kind === "p_controller" && (
         <section className="panel">
@@ -777,6 +827,9 @@ function Strategy() {
                           edit((next) => {
                             next.logic.p_controller.pairs[index].kp =
                               value ?? 0;
+                            const pair = next.logic.p_controller.pairs[index];
+                            next.logic.params[`p.${pair.cv}.${pair.mv}.kp`] =
+                              pair.kp;
                           })
                         }
                       />
@@ -788,6 +841,9 @@ function Strategy() {
                           edit((next) => {
                             next.logic.p_controller.pairs[index].bias =
                               value ?? 0;
+                            const pair = next.logic.p_controller.pairs[index];
+                            next.logic.params[`p.${pair.cv}.${pair.mv}.bias`] =
+                              pair.bias;
                           })
                         }
                       />
@@ -835,14 +891,18 @@ function Strategy() {
         </Notice>
       )}
       <section className="panel">
-        <h2>Saved strategy parameters</h2>
-        {dirty && (
-          <p className="muted">
-            Save strategy changes to obtain its authoritative parameter schema.
-          </p>
+        <h2>Strategy parameters</h2>
+        {parameters.isPending && (
+          <p className="muted">Loading strategy parameters…</p>
+        )}
+        {parameters.error && <Notice error>{parameters.error.message}</Notice>}
+        {cfg.logic.kind === "linear_mpc" && !cfg.model && (
+          <Notice>
+            Configure a plant model to obtain the Linear MPC parameters.
+          </Notice>
         )}
         <div className="form-grid">
-          {Object.entries(cfg.logic.params)
+          {Object.entries(parameterValues)
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([key, value]) => (
               <Field
@@ -961,7 +1021,7 @@ function Strategy() {
               />
               <div className="inline">
                 <Button
-                  disabled={locked || !sourceDirty}
+                  disabled={locked || strategyPending || !sourceDirty}
                   onClick={() => void saveSource()}
                 >
                   Save source

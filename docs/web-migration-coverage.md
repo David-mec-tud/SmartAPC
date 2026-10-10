@@ -84,6 +84,19 @@ navigation and deployment-readiness journey passed against an isolated Rust back
 
 ## Operating and platform limits
 
+Strategy preview and autosave verified on 2026-10-10: `cargo fmt`,
+`cargo check --offline`, and `cargo test --offline` passed (121 tests), plus
+frontend typecheck/build and four Vitest tests with Node 24. All seven `workspace`
+journeys passed across the final targeted runs, including parameters visible
+before a delayed save completes, subsequent numeric/boolean edits, navigation and
+project switching during a save, preservation of unrelated I/O drafts, invalid
+edits retained until corrected, and custom template/source/build/schema/simulation
+without manual configuration saves. The new Rust route test verifies preview
+without persistence, external-band exclusion, Boolean preservation, stale revision
+rejection, validation failure, and execution locks. In-app inspection confirmed
+the MPC parameter form and automatic-save status at the default narrow viewport.
+Strategy autosave is scoped to logic; other configuration pages retain explicit saves.
+
 Custom strategy visibility was verified on 2026-10-10: `cargo fmt`, default/native
 `cargo check --offline` and `cargo test --offline` passed (120/134 tests), plus
 frontend typecheck/build and four Vitest tests with Node 24. All five `workspace`

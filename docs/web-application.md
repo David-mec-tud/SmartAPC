@@ -223,6 +223,8 @@ unchanged for existing project compatibility.
 | `POST /api/projects/{name}/jobs/{id}/cancel` | Request cancellation where supported (offline optimization) |
 | `POST /api/projects/{name}/jobs/{id}/apply` | Apply an offline result only while stopped and with unchanged project revision |
 | `POST /api/projects/{name}/strategy/template` | Generate/regenerate source; back up replaced files and saved TOML under `logic/backups/<id>` |
+| `POST /api/projects/{name}/strategy/parameters` | Complete configuration draft; returns typed parameter defaults without persistence, including exclusion of external CV bands |
+| `PUT /api/projects/{name}/strategy/config` | `{revision, config: logic}`; autosave only strategy settings through configuration validation and execution/job locks; returns `{config, revision}` for the complete saved project |
 | `GET/PUT /api/projects/{name}/strategy/source` | Read/save project-local source; checks configuration and source revisions; save invalidates compatibility |
 | `PUT /api/projects/{name}/online-optimization/config` | Save objective/search configuration with a revision; locks during optimization |
 | `GET /api/projects/{name}/history?mode=runtime\|simulation&window_ms=180000` | SQLite window `{samples, original_count, downsampled, sample_limit}`; at most 20,000 samples, preserving extrema |

@@ -8,7 +8,8 @@ use crate::{
     model_csv::ModelCsvLayout,
     parameter_optimization::apply_optimized_parameters,
     project_config::{
-        LogicParamValue, ModelConfig, SimulationConfig, from_toml_str, to_toml_string,
+        LogicConfig, LogicParamValue, ModelConfig, ProjectConfig, SimulationConfig, from_toml_str,
+        to_toml_string,
     },
     storage::SqliteStorage,
     strategy_service,
@@ -39,6 +40,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/events", get(events))
         .route("/api/workspace", get(workspace))
         .route("/api/projects/{name}/engineering", get(catalog))
+        .route(
+            "/api/projects/{name}/strategy/parameters",
+            post(strategy_parameters),
+        )
+        .route(
+            "/api/projects/{name}/strategy/config",
+            axum::routing::put(save_strategy_config),
+        )
         .route("/api/projects/{name}/readiness", get(readiness))
         .route(
             "/api/projects/{name}/online-optimization/config",
@@ -118,6 +127,52 @@ async fn catalog(
     Ok(Json(engineering_catalog(
         &state.project_service.load_config(&name)?,
     )?))
+}
+
+/// Preview defaults from the complete browser draft without persisting it. Rust
+/// owns parameter types and excludes externally supplied CV band edges here too.
+async fn strategy_parameters(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(mut cfg): Json<ProjectConfig>,
+) -> Result<Json<HashMap<String, LogicParamValue>>, AppError> {
+    state.project_service.load_config(&name)?;
+    cfg.normalize_model_config();
+    cfg.logic.params.clear();
+    cfg.sync_active_online_params();
+    Ok(Json(cfg.logic.params))
+}
+
+#[derive(Deserialize)]
+struct StrategyConfigUpdate {
+    revision: String,
+    config: LogicConfig,
+}
+
+/// Strategy autosave uses the same locks, revision check and validation as a
+/// complete save, but never persists drafts belonging to other configuration pages.
+async fn save_strategy_config(
+    State(state): State<AppState>,
+    Extension(engineering): Extension<EngineeringService>,
+    Path(name): Path<String>,
+    Json(request): Json<StrategyConfigUpdate>,
+) -> Result<Json<Value>, AppError> {
+    let _mutation = engineering.mutations.lock().await;
+    engineering.require_editable(&state.runtime, &name).await?;
+    if request.revision != config_revision(&state.project_service, &name)? {
+        return Err(AppError::status(
+            StatusCode::PRECONDITION_FAILED,
+            "saved project changed; reload before saving this draft",
+        ));
+    }
+    let mut cfg = state.project_service.load_config(&name)?;
+    cfg.logic = request.config;
+    cfg.sync_active_online_params();
+    state.project_service.save_config(&name, &cfg)?;
+    Ok(Json(json!({
+        "config": state.project_service.load_config(&name)?,
+        "revision": config_revision(&state.project_service, &name)?,
+    })))
 }
 
 async fn readiness(
@@ -753,6 +808,98 @@ mod model_csv_tests {
     use crate::{project::ProjectService, runtime::RuntimeManager, web::build_router};
     use axum_test::TestServer;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn strategy_preview_and_autosave_preserve_types_revisions_and_execution_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = ProjectService::new(root.path());
+        let mut cfg = serde_json::to_value(projects.create_project("strategy").unwrap()).unwrap();
+        cfg["variables"] = json!({"mvs": ["u1"], "cvs": ["y1"], "dvs": []});
+        cfg["io_definition"] = json!({
+            "mvs": [{"name": "u1", "mv_write": "ns=2;s=U1_WRITE", "mv_read": "ns=2;s=U1_READ", "ll": -10, "hl": 10}],
+            "cvs": [{"name": "y1", "setpoint": "ns=2;s=Y1_SP", "process_value": "ns=2;s=Y1_PV", "band_low_opc": "ns=2;s=LOW"}],
+            "dvs": [], "custom": [],
+        });
+        cfg["model"] = json!({"kind": "linear_state_space", "state_count": 1,
+            "u_order": ["u1"], "y_order": ["y1"], "a": [[-1]], "b": [[1]], "c": [[1]], "d": [[0]]});
+        cfg["logic"]["p_controller"]["pairs"] =
+            json!([{"cv": "y1", "mv": "u1", "kp": 1, "bias": 0}]);
+        let mut cfg: ProjectConfig = serde_json::from_value(cfg).unwrap();
+        cfg.rebuild_runtime_io_from_definition().unwrap();
+        projects.save_config("strategy", &cfg).unwrap();
+        let original = config_revision(&projects, "strategy").unwrap();
+        let runtime = Arc::new(RuntimeManager::new());
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: runtime.clone(),
+            executable_path: "smartapc".into(),
+        }))
+        .unwrap();
+
+        cfg.logic.kind = crate::project_config::LogicKind::LinearMpc;
+        let response = server
+            .post("/api/projects/strategy/strategy/parameters")
+            .json(&cfg)
+            .await;
+        response.assert_status_ok();
+        let parameters = response.json::<Value>();
+        assert_eq!(parameters["mpc.mv.u1.use_l1"], false);
+        assert!(parameters["mpc.prediction_horizon"].is_number());
+        assert!(parameters.get("mpc.cv.y1.band_low").is_none());
+        assert_eq!(config_revision(&projects, "strategy").unwrap(), original);
+
+        cfg.logic
+            .params
+            .insert("mpc.mv.u1.use_l1".into(), LogicParamValue::Bool(true));
+        let request = json!({"revision": original, "config": cfg.logic});
+        let response = server
+            .put("/api/projects/strategy/strategy/config")
+            .json(&request)
+            .await;
+        response.assert_status_ok();
+        let saved = projects.load_config("strategy").unwrap();
+        assert_eq!(
+            saved.logic.params["mpc.mv.u1.use_l1"],
+            LogicParamValue::Bool(true)
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.io_definition).unwrap(),
+            serde_json::to_value(&cfg.io_definition).unwrap()
+        );
+        assert_eq!(
+            saved.communication.endpoint_url,
+            cfg.communication.endpoint_url
+        );
+        server
+            .put("/api/projects/strategy/strategy/config")
+            .json(&request)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+
+        let mut request = json!({"revision": config_revision(&projects, "strategy").unwrap(), "config": saved.logic});
+        request["config"]["cycle_ms"] = json!(0);
+        server
+            .put("/api/projects/strategy/strategy/config")
+            .json(&request)
+            .await
+            .assert_status_bad_request();
+        assert_eq!(
+            projects.load_config("strategy").unwrap().logic.cycle_ms,
+            saved.logic.cycle_ms
+        );
+
+        request["config"]["cycle_ms"] = json!(200);
+        runtime
+            .start_simulation(&projects, "strategy")
+            .await
+            .unwrap();
+        server
+            .put("/api/projects/strategy/strategy/config")
+            .json(&request)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        runtime.stop_simulation().await.unwrap();
+    }
 
     #[tokio::test]
     async fn io_csv_import_stages_then_saves_a_typed_directional_contract() {

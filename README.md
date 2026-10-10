@@ -200,6 +200,14 @@ The **Project configuration → Control strategy** page offers only strategies c
 - `Linear MPC` (`linear_mpc`)
 - `Custom Control Strategy` (`custom_rust`)
 
+Selecting a strategy shows its settings and typed parameters immediately, using
+Rust defaults for the current draft I/O and plant model. Control Strategy edits
+save automatically after a short pause, including parameter changes. The page
+shows saving status or a validation/conflict error and retains failed edits.
+Automatic saves persist only strategy settings; drafts on other configuration
+pages still use **Save configuration**. Custom template/build actions become
+available once saving finishes and there are no other configuration or source drafts.
+
 ### P Controller
 
 - Uses explicit CV-to-MV pairings with `kp` and `bias`
@@ -285,7 +293,7 @@ Prerequisites:
 Workflow:
 
 1. Open **Project configuration → Control strategy**, choose **Custom Rust** under
-   **Selected strategy**, save the configuration, and generate a template. The custom
+   **Selected strategy**, then generate a template once automatic saving finishes. The custom
    configuration appears only while Custom Rust is selected. Generation keeps this selection
    and invalidates compatibility until the new source builds successfully.
 2. Edit the source in the browser or `projects/<project>/logic/custom_strategy/src/lib.rs`.
