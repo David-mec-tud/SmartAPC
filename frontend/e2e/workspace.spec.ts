@@ -239,6 +239,20 @@ test("custom source drafts follow their project; build, schema, simulation and u
   ).toBeTruthy();
   await page.goto("/configuration/strategy");
   await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  const selectedStrategy = page.getByLabel("Selected strategy");
+  const customConfiguration = page.getByRole("heading", {
+    name: "Custom Rust strategy",
+    exact: true,
+  });
+  await expect(selectedStrategy).toHaveValue("p_controller");
+  await expect(customConfiguration).toHaveCount(0);
+  await page.getByLabel("Selected strategy").selectOption("linear_mpc");
+  await expect(customConfiguration).toHaveCount(0);
+  await selectedStrategy.selectOption("custom_rust");
+  await expect(customConfiguration).toBeVisible();
+  await page
+    .getByRole("button", { name: "Save configuration", exact: true })
+    .click();
   await page
     .getByRole("button", { name: "Generate template", exact: true })
     .click();
@@ -249,6 +263,7 @@ test("custom source drafts follow their project; build, schema, simulation and u
           .custom_rust.strategy_name,
     )
     .not.toBe("");
+  await expect(selectedStrategy).toHaveValue("custom_rust");
   const editor = page.getByLabel("Custom Rust source");
   await expect(editor).toContainText("pub fn control");
   await expect(editor).toContainText(
@@ -280,6 +295,16 @@ test("custom source drafts follow their project; build, schema, simulation and u
   await expect(editor).toHaveCount(0);
   await page.getByLabel("Editing project", { exact: true }).selectOption(name);
   await expect(editor).toHaveValue(source);
+  // Hiding custom configuration must retain its project-owned source draft.
+  for (const kind of ["p_controller", "linear_mpc"]) {
+    await selectedStrategy.selectOption(kind);
+    await expect(customConfiguration).toHaveCount(0);
+    await expect(editor).toHaveCount(0);
+    await selectedStrategy.selectOption("custom_rust");
+    await expect(editor).toHaveValue(source);
+  }
+  await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+  await expect(editor).toHaveValue(source);
   await page.getByRole("button", { name: "Save source", exact: true }).click();
   await expect(
     page.getByText(
@@ -307,10 +332,7 @@ test("custom source drafts follow their project; build, schema, simulation and u
   await expect(
     page.getByText("Build succeeded; contract is compatible", { exact: true }),
   ).toBeVisible();
-  await page.getByLabel("Selected strategy").selectOption("custom_rust");
-  await page
-    .getByRole("button", { name: "Save configuration", exact: true })
-    .click();
+  await expect(selectedStrategy).toHaveValue("custom_rust");
   await expect(page.getByLabel("gain", { exact: true })).toBeVisible();
   await page.getByLabel("gain", { exact: true }).fill("1.25");
   await page
@@ -366,6 +388,7 @@ test("custom source drafts follow their project; build, schema, simulation and u
   await expect(
     page.getByText(/Previous source and metadata backed up/),
   ).toBeVisible();
+  await expect(selectedStrategy).toHaveValue("custom_rust");
   await expect(editor).not.toHaveValue(source);
   await editor.fill(
     (await editor.inputValue()) +

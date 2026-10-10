@@ -4,7 +4,7 @@
 use crate::{
     logic::{inspect_custom_library_contract, parse_custom_parameter_schema_from_source},
     project::ProjectService,
-    project_config::{LogicKind, LogicParamType},
+    project_config::LogicParamType,
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -127,9 +127,8 @@ pub fn generate_template(
     custom.compatible = false;
     custom.last_build_message =
         format!("Template generated. Build and check the strategy.{backup_message}");
-    if cfg.logic.kind == LogicKind::CustomRust {
-        cfg.logic.kind = LogicKind::PController;
-    }
+    // Keep the selected strategy's configuration visible during setup. Clearing
+    // compatibility above blocks execution until the replacement passes a build.
     service.save_config(name, &cfg)?;
     service.load_config(name)
 }
@@ -693,7 +692,10 @@ pub fn parameter_schema() -> Vec<crate::ParameterSchemaEntry> {{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{project_config::SignalPoint, types::SignalType};
+    use crate::{
+        project_config::{LogicKind, SignalPoint},
+        types::SignalType,
+    };
 
     fn project(service: &ProjectService) {
         let mut cfg = service.create_project("template").unwrap();
@@ -711,13 +713,23 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let service = ProjectService::new(temporary.path());
         project(&service);
-        generate_template(&service, "template").unwrap();
+        let mut cfg = service.load_config("template").unwrap();
+        cfg.logic.kind = LogicKind::CustomRust;
+        service.save_config("template", &cfg).unwrap();
+        let generated = generate_template(&service, "template").unwrap();
+        assert_eq!(generated.logic.kind, LogicKind::CustomRust);
+        assert!(!generated.logic.is_configured_for(&generated.io));
         let root = service.project_dir("template");
         fs::write(
             root.join("logic/custom_strategy/src/lib.rs"),
             "// operator source",
         )
         .unwrap();
+        // Replacing a previously valid template must preserve selection while
+        // invalidating its contract, so a stale artifact cannot be executed.
+        let mut cfg = service.load_config("template").unwrap();
+        cfg.logic.custom_rust.compatible = true;
+        service.save_config("template", &cfg).unwrap();
         let saved_config = fs::read(service.config_path("template")).unwrap();
         let regenerated = generate_template(&service, "template").unwrap();
         let backup = fs::read_dir(root.join("logic/backups"))
@@ -733,6 +745,8 @@ mod tests {
         assert_eq!(fs::read(backup.join("project.toml")).unwrap(), saved_config);
         assert!(backup.join("Cargo.toml").is_file());
         assert!(backup.join("src/generated_dispatch.rs").is_file());
+        assert_eq!(regenerated.logic.kind, LogicKind::CustomRust);
+        assert!(!regenerated.logic.is_configured_for(&regenerated.io));
         assert!(!regenerated.logic.custom_rust.compatible);
         assert!(
             regenerated

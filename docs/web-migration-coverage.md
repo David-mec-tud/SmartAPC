@@ -27,7 +27,7 @@ Browser journeys use real Axum/Rust services and disposable projects. `workspace
 | Model dimensions/order/A/B/C/D/import/preview | `model_csv`, project-scoped template/import APIs; saved continuous model normalization/validation | One CSV for A/B/C/D, downloadable labeled placeholders from draft signals, matrix editors, signal order and equations | `model` template/download, MV/CV/DV draft order, atomic errors/import/save/reload, stale edits/project isolation; `parity` resize/import; Rust CSV shape/order/finite-value and draft-only API tests |
 | Custom variables and I/O CSV | `io_csv`, typed `IoDefinitionConfig.custom`, project-scoped example/import APIs and saved I/O derivation | Fourth I/O section with numeric/Boolean type and independent read/write addresses; example download and atomic draft import | `io` example/import/save/reload, manual custom editing, delayed edits/project isolation and actual typed OPC UA read/write tests; `workspace` generated Boolean output compiled and executed; desktop/tablet visual inspection; Rust direction/type/strict compatibility, invalid files, legacy TOML and revision-checked save tests |
 | P/MPC/custom and manual L1/L2 | `logic`, `linear_mpc`, engineering compatibility catalog | Strategy selector, P pair table, numeric/boolean inputs | `workspace` P/custom/MPC real simulation and boolean online changes; Rust strict I/O compatibility, L1/L2 and observer continuity tests |
-| Custom templates/source/build/schema/history/logs | Shared `strategy_service`, revision-checked source routes, build job | Project-owned source editor, external editor path, save/build output/source download; regeneration backups | `workspace` real Cargo build, f64/bool schema, source across navigation/projects, input history/user logs, regeneration and compiler failure; Rust external-editor conflict and backup/symlink tests |
+| Custom templates/source/build/schema/history/logs | Shared `strategy_service`, revision-checked source routes, build job | Custom configuration appears only for the selected Custom Rust strategy; project-owned source editor, external editor path, save/build output/source download; regeneration backups retain selection and invalidate compatibility | `workspace` strategy visibility, source drafts across strategy/navigation/project changes, real Cargo build, f64/bool schema, input history/user logs, regeneration and compiler failure; Rust selection retention, execution compatibility invalidation, external-editor conflict and backup/symlink tests |
 | Simulation speed/initial values/disturbances/noise/live A/B | `RuntimeManager`, existing `SimulationCore`, scoped live config | Simulation settings, speed and scaling matrices; live apply | `workspace` lifecycle/close/reconnect/parameters; `parity` live speed/noise/A/B apply and persistence; Rust initial-state/offset/band/RK4 tests |
 | Control tests/input-parameter sweeps/timing/output reports | `control_function_tests`, persisted engineering jobs | Sweep selection/ranges/count; downloadable report | `workspace` job across navigation; `parity` selected 3-point sweep plus baseline, full report download and compact list; Rust fallback/output validation/timing tests |
 | Kalman upload/observer aliases/replay/persistence/charts | `kalman_tuning::import_csv_bytes`, replay job and observer schema | CSV upload, observer values, result plots and saved parameters | `tuning` real CSV replay/charts/save/reload; Rust custom aliases, input validation and replay series tests |
@@ -76,6 +76,16 @@ plots actions become the normal served application and embedded charts.
   live controller received test writes. Original user edits are preserved.
 
 ## Operating and platform limits
+
+Custom strategy visibility was verified on 2026-10-10: `cargo fmt`, default/native
+`cargo check --offline` and `cargo test --offline` passed (120/134 tests), plus
+frontend typecheck/build and four Vitest tests with Node 24. All five `workspace`
+browser journeys passed against isolated Rust/OPC UA servers. The custom journey
+checks visibility for P/MPC/custom selection, source draft retention when hiding
+the panel, selection through generation/regeneration, build/schema/simulation/logs,
+and compiler failure. In-app visual inspection confirmed hidden configuration for
+P/MPC and visible custom fields for Custom Rust. Template compatibility remains
+invalid until a successful build; regeneration retains the selected strategy.
 
 Model CSV workflow verified on 2026-10-10: `cargo fmt`, default/native
 `cargo check --offline` and `cargo test --offline` passed (116/130 tests), plus

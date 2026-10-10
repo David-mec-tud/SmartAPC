@@ -284,13 +284,16 @@ Prerequisites:
 
 Workflow:
 
-1. Open **Project configuration → Control strategy** and generate a template.
+1. Open **Project configuration → Control strategy**, choose **Custom Rust** under
+   **Selected strategy**, save the configuration, and generate a template. The custom
+   configuration appears only while Custom Rust is selected. Generation keeps this selection
+   and invalidates compatibility until the new source builds successfully.
 2. Edit the source in the browser or `projects/<project>/logic/custom_strategy/src/lib.rs`.
    Save browser source edits before building. Regeneration backs up replaced source, manifest,
    dispatch and saved project under `logic/backups/<id>/`.
 3. Implement `control(...)` and optionally add `f64` or `bool` arguments after `ctx` and `out`.
 4. Build and check the strategy.
-5. Select and save it after the contract matches the current I/O definition.
+5. Verify that the contract matches the current I/O definition before running it.
 
 Required signature:
 

@@ -887,94 +887,96 @@ function Strategy() {
             ))}
         </div>
       </section>
-      <section className="panel">
-        <h2>Custom Rust strategy</h2>
-        <p className="muted">
-          Use your external editor or edit the project source below. Templates
-          include history context and structured user-log helpers.
-        </p>
-        <p className="mono">
-          {cfg.logic.custom_rust.source_path || "No template generated"}
-        </p>
-        <div className="form-grid">
-          {(["strategy_name", "source_path", "artifact_path"] as const).map(
-            (key) => (
-              <Field key={key} label={`Custom ${key.replaceAll("_", " ")}`}>
-                <Input
-                  value={cfg.logic.custom_rust[key]}
-                  onChange={(event) =>
-                    edit((next) => {
-                      next.logic.custom_rust[key] = event.target.value;
-                      next.logic.custom_rust.compatible = false;
-                    })
-                  }
-                />
-              </Field>
-            ),
-          )}
-        </div>
-        <p>{cfg.logic.custom_rust.last_build_message}</p>
-        <div className="inline">
-          <Button
-            variant="outline"
-            disabled={locked || dirty || sourceDirty}
-            onClick={() =>
-              void act(`${projectPath(project)}/strategy/template`)
-                .then(() => loadSource())
-                .catch(() => {})
-            }
-          >
-            {cfg.logic.custom_rust.strategy_name
-              ? "Regenerate template · back up current source"
-              : "Generate template"}
-          </Button>
-          <Button
-            variant="outline"
-            disabled={locked || dirty || sourceDirty}
-            onClick={() =>
-              void startJob({ kind: "strategy_build" }).catch(() => {})
-            }
-          >
-            Build & check contract
-          </Button>
-          <Button variant="ghost" onClick={() => void loadSource(true)}>
-            {sourceDirty
-              ? "Reload saved source · discard draft"
-              : "Load source"}
-          </Button>
-        </div>
-        {source && (
-          <>
-            {sourceDirty && (
-              <Notice>
-                Unsaved source draft · {project}. Navigation preserves this
-                draft.
-              </Notice>
+      {cfg.logic.kind === "custom_rust" && (
+        <section className="panel">
+          <h2>Custom Rust strategy</h2>
+          <p className="muted">
+            Use your external editor or edit the project source below. Templates
+            include history context and structured user-log helpers.
+          </p>
+          <p className="mono">
+            {cfg.logic.custom_rust.source_path || "No template generated"}
+          </p>
+          <div className="form-grid">
+            {(["strategy_name", "source_path", "artifact_path"] as const).map(
+              (key) => (
+                <Field key={key} label={`Custom ${key.replaceAll("_", " ")}`}>
+                  <Input
+                    value={cfg.logic.custom_rust[key]}
+                    onChange={(event) =>
+                      edit((next) => {
+                        next.logic.custom_rust[key] = event.target.value;
+                        next.logic.custom_rust.compatible = false;
+                      })
+                    }
+                  />
+                </Field>
+              ),
             )}
-            <textarea
-              className="source-editor"
-              spellCheck={false}
-              aria-label="Custom Rust source"
-              value={source.source}
-              onChange={(event) => editSource(event.target.value)}
-            />
-            <div className="inline">
-              <Button
-                disabled={locked || !sourceDirty}
-                onClick={() => void saveSource()}
-              >
-                Save source
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => download("lib.rs", source.source)}
-              >
-                Download source
-              </Button>
-            </div>
-          </>
-        )}
-      </section>
+          </div>
+          <p>{cfg.logic.custom_rust.last_build_message}</p>
+          <div className="inline">
+            <Button
+              variant="outline"
+              disabled={locked || dirty || sourceDirty}
+              onClick={() =>
+                void act(`${projectPath(project)}/strategy/template`)
+                  .then(() => loadSource())
+                  .catch(() => {})
+              }
+            >
+              {cfg.logic.custom_rust.strategy_name
+                ? "Regenerate template · back up current source"
+                : "Generate template"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={locked || dirty || sourceDirty}
+              onClick={() =>
+                void startJob({ kind: "strategy_build" }).catch(() => {})
+              }
+            >
+              Build & check contract
+            </Button>
+            <Button variant="ghost" onClick={() => void loadSource(true)}>
+              {sourceDirty
+                ? "Reload saved source · discard draft"
+                : "Load source"}
+            </Button>
+          </div>
+          {source && (
+            <>
+              {sourceDirty && (
+                <Notice>
+                  Unsaved source draft · {project}. Navigation preserves this
+                  draft.
+                </Notice>
+              )}
+              <textarea
+                className="source-editor"
+                spellCheck={false}
+                aria-label="Custom Rust source"
+                value={source.source}
+                onChange={(event) => editSource(event.target.value)}
+              />
+              <div className="inline">
+                <Button
+                  disabled={locked || !sourceDirty}
+                  onClick={() => void saveSource()}
+                >
+                  Save source
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => download("lib.rs", source.source)}
+                >
+                  Download source
+                </Button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
     </>
   );
 }

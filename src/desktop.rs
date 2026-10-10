@@ -8294,7 +8294,7 @@ fn generate_logic_template_task(
             .await
             .map_err(|err| err.to_string())?
             .map(|_| {
-                "Template generated. Build and check the strategy before selecting it.".to_string()
+                "Template generated. Build and check the strategy before running it.".to_string()
             })
             .map_err(|err| err.to_string())
         },

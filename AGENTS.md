@@ -96,10 +96,13 @@
 - Keep `io.cycle_ms` aligned as a multiple of `communication.cycle_ms`; controller timing remains independent.
 
 ## 9. Custom Rust Strategy Workflow (Quick Reference)
-1. Generate template in Control Strategy tab.
+1. Select and save Custom Rust in Control Strategy to show its configuration,
+   then generate a template.
 2. Edit `control(...)` in `projects/<project>/logic/custom_strategy/src/lib.rs`.
 3. Build/check strategy via UI button.
 4. Verify compatibility result against current I/O definition.
+- Template generation preserves the selected strategy but invalidates compatibility;
+  execution requires a successful build matching the current I/O contract.
 - Available context includes current `inputs`, input/output/parameter history, and online parameters.
 - Use user-log helpers from the template to emit custom runtime logs.
 - Browser source saves check both configuration and source revisions. Regeneration
