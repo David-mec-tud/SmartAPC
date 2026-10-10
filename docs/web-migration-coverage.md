@@ -75,6 +75,13 @@ plots actions become the normal served application and embedded charts.
 - All test projects and plants are isolated under `/private/tmp`; no unrelated
   live controller received test writes. Original user edits are preserved.
 
+Navigation order verified on 2026-10-10: Deployment appears between Engineering
+and Operation in the shared browser sidebar, with the repository design reference
+aligned to that order. In-app visual inspection confirmed the order at 1280×720.
+`cargo fmt`, `cargo check --offline`, `cargo test --offline` (120 tests), frontend
+typecheck/build and four Vitest tests passed. The existing `workspace` control-test
+navigation and deployment-readiness journey passed against an isolated Rust backend.
+
 ## Operating and platform limits
 
 Custom strategy visibility was verified on 2026-10-10: `cargo fmt`, default/native

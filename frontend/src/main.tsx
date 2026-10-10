@@ -93,6 +93,10 @@ const groups = [
     ],
   },
   {
+    title: "Deployment",
+    items: [{ to: "/deployment", label: "Validate & run", icon: Rocket }],
+  },
+  {
     title: "Operation",
     items: [
       { to: "/operation/trends", label: "Trends", icon: ChartNoAxesCombined },
@@ -109,10 +113,6 @@ const groups = [
       { to: "/operation/logs", label: "Logs & events", icon: Terminal },
       { to: "/operation/diagnostics", label: "Diagnostics", icon: CircleGauge },
     ],
-  },
-  {
-    title: "Deployment",
-    items: [{ to: "/deployment", label: "Validate & run", icon: Rocket }],
   },
 ];
 function Shell() {

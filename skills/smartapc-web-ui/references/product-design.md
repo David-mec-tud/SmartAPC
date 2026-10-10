@@ -11,8 +11,8 @@ point, not a requirement to invent a page for every label.
 | Overview | Active project, connection, execution, recent events, useful trends | See what is happening and reach the next action |
 | Project configuration | Communication, watchdog, timing, MV/CV/DV catalog, I/O definition, model, control strategy | Define the controller and its hardware contract |
 | Engineering | Simulation, control function tests, Kalman tuning, offline parameter optimization | Evaluate and improve a configuration |
-| Operation | Live trends, online parameters, online optimization, structured logs and diagnostics | Observe and operate the active runtime or simulation |
 | Deployment | Backend readiness, saved configuration, supported run/service commands, verification | Prepare and run a configured project on a target host |
+| Operation | Live trends, online parameters, online optimization, structured logs and diagnostics | Observe and operate the active runtime or simulation |
 
 Use nested navigation, tabs, or submenus where they make related work easier to
 find. Keep the main navigation compact. Project creation and selection belong in a
