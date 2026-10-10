@@ -20,6 +20,7 @@ import {
   Select,
 } from "../components/ui";
 import { MatrixEditor, resizeMatrix } from "../components/MatrixEditor";
+import { ModelCsv } from "../components/ModelCsv";
 import { renameVariable } from "../configuration-drafts";
 import {
   HardwareTestResults,
@@ -59,7 +60,7 @@ export function Configuration() {
         ) : section === "io" ? (
           <Io key={project} />
         ) : section === "model" ? (
-          <ModelEditor />
+          <ModelEditor key={project} />
         ) : section === "strategy" ? (
           <Strategy />
         ) : (
@@ -489,7 +490,7 @@ function InitialValues() {
   );
 }
 function ModelEditor() {
-  const { config: cfg, edit, locked } = useWorkspace();
+  const { config: cfg, edit, locked, project } = useWorkspace();
   if (!cfg) return null;
   function setDimensions(count: number) {
     const n = Math.max(1, Math.min(100, Math.trunc(count)));
@@ -543,6 +544,16 @@ function ModelEditor() {
           </Button>
         )}
       </div>
+      <ModelCsv
+        project={project}
+        config={cfg}
+        disabled={locked}
+        onChange={(imported) =>
+          edit((next) => {
+            next.model = imported;
+          })
+        }
+      />
       {model && (
         <>
           <section className="panel model-preview">
@@ -562,6 +573,7 @@ function ModelEditor() {
                 rows={key === "c" || key === "d" ? model.y_order : undefined}
                 cols={key === "b" || key === "d" ? model.u_order : undefined}
                 disabled={locked}
+                importCsv={false}
                 onChange={(matrix) =>
                   edit((next) => {
                     if (next.model) next.model[key] = matrix;

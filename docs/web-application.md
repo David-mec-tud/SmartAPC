@@ -70,6 +70,40 @@ feedback page at `http://127.0.0.1:8081/virtual-hardware`. Override HTTP with
 feedback. The browser page charts a bounded live history and applies manual
 MV/target/limit values on plant ticks, independently of open tabs.
 
+## Model CSV import
+
+In **Configuration → Plant model**, choose the state dimensions and download the
+**model CSV template**. One UTF-8, comma-separated file contains A, B, C and D
+blocks, each starting with its matrix name and column labels. State labels are
+`x1`, `x2`, etc.; B/D columns use MV then DV names, and C/D rows use CV names from
+the current I/O draft, including unsaved changes. The template is available before
+creating an optional model.
+
+Replace `a11`, `a12`, `b11`, `c11`, `d11`, etc. with finite numeric coefficients
+(including explicit zeros). Keep all four headings, labels and their order. For
+one state, MV `valve`, CV `temperature`, and DV `feed`, the template is:
+
+```csv
+A,x1
+x1,a11
+
+B,valve,feed
+x1,b11,b12
+
+C,x1
+temperature,c11
+
+D,valve,feed
+temperature,d11,d12
+```
+
+**Import model CSV** validates the whole file in Rust before replacing all four
+matrices in the editable draft. Missing cells, placeholders, non-finite values,
+wrong dimensions or stale signal labels report an error and preserve the draft.
+Use **Save configuration** to persist an import; manual matrix editing remains
+available. After changing state dimensions or I/O names/order, download a new
+template. Simulation scaling matrices retain their separate import controls.
+
 ## Validation
 
 Hardware tests show their results beside the controls in **Connection & timing**
@@ -126,6 +160,8 @@ unchanged for existing project compatibility.
 | `PUT /api/projects/{name}/config` | Requires matching `If-Match`; returns normalized saved config and new `ETag` |
 | `GET /api/projects/{name}/config/download` | Browser TOML download |
 | `POST /api/projects/{name}/config/parse` | Parse uploaded TOML into a draft; does not save |
+| `POST /api/projects/{name}/model/template` | `{state_count, variables}` from the draft; returns `{csv}` with labeled A/B/C/D placeholders |
+| `POST /api/projects/{name}/model/import` | `{state_count, variables, csv}`; validates all four blocks and returns a model draft without saving |
 | `GET /api/projects/{name}/engineering` | Active parameters, sweep dimensions, observer schema, safety limits and engineering availability |
 | `GET /api/projects/{name}/readiness` | Saved configuration readiness and supported local command; no hardware writes |
 | `POST /api/projects/{name}/jobs` | `strategy_build`, `control_tests`, `kalman_replay`, `offline_optimization`, `io_read`, `io_write`, `watchdog_test` |

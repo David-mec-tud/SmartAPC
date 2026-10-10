@@ -19,6 +19,7 @@ export function MatrixEditor({
   cols,
   onChange,
   disabled,
+  importCsv = true,
 }: {
   name: string;
   matrix: Matrix;
@@ -26,6 +27,7 @@ export function MatrixEditor({
   cols?: string[];
   onChange: (matrix: Matrix) => void;
   disabled?: boolean;
+  importCsv?: boolean;
 }) {
   const id = useId();
   const [error, setError] = useState<string>();
@@ -58,26 +60,30 @@ export function MatrixEditor({
     <section className="matrix-block">
       <div className="section-title">
         <strong>{name}</strong>
-        <label className="upload-button" htmlFor={id}>
-          Import CSV / text
-        </label>
-        <input
-          id={id}
-          type="file"
-          aria-label={`Import ${name} matrix`}
-          accept=".csv,.txt"
-          hidden
-          disabled={disabled}
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            setError(undefined);
-            if (file)
-              void importMatrix(file).catch((error) =>
-                setError((error as Error).message),
-              );
-            event.target.value = "";
-          }}
-        />
+        {importCsv && (
+          <>
+            <label className="upload-button" htmlFor={id}>
+              Import CSV / text
+            </label>
+            <input
+              id={id}
+              type="file"
+              aria-label={`Import ${name} matrix`}
+              accept=".csv,.txt"
+              hidden
+              disabled={disabled}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                setError(undefined);
+                if (file)
+                  void importMatrix(file).catch((error) =>
+                    setError((error as Error).message),
+                  );
+                event.target.value = "";
+              }}
+            />
+          </>
+        )}
       </div>
       {error && <Notice error>{error}</Notice>}
       <div className="table-scroll">

@@ -24,7 +24,7 @@ Browser journeys use real Axum/Rust services and disposable projects. `workspace
 | Project create/select/existing TOML/save | `ProjectService`, revision-checked `/config`, TOML parse/download | Project picker; settings upload/download; shared draft/save bar | Creation visually observed; `workspace` save/reload/stale revision; `parity` TOML upload, saved download, rename and retained references |
 | OPC UA/watchdog/all timing/read-write tests | Communication/watchdog; engineering `io_read`, `io_write`, `watchdog_test` | Results beside configuration tests: persistent red failures with reasons, running states, per-node readings and write confirmation | `hardware`: actual OPC UA plant read/write/watchdog and runtime; partial node failures, failed writes/watchdog, retained errors through edits/save/refresh/retry, independent results, request rejection and project isolation; communication 100 ms, I/O 200 ms, independent logic 150 ms |
 | Full MV/CV/DV and typed I/O/bounds/flags/external bands | `ProjectConfig` derivation, validation and normalization | Dense tables, Node IDs, typed initial values, catalog add/remove/rename | Dense 3 MV/3 CV/2 DV visual audit; `parity` rename; `workspace` optional offsets/external edges; Rust bool, band fallback and active static-I/O tests |
-| Model dimensions/order/A/B/C/D/import/preview | Saved continuous model normalization/validation | Matrix editors, CSV/text upload, signal order and equations | `parity` resize, invalid import, valid import/save/reload; 3-state/5-input desktop/tablet visual audit; Rust shape/order tests |
+| Model dimensions/order/A/B/C/D/import/preview | `model_csv`, project-scoped template/import APIs; saved continuous model normalization/validation | One CSV for A/B/C/D, downloadable labeled placeholders from draft signals, matrix editors, signal order and equations | `model` template/download, MV/CV/DV draft order, atomic errors/import/save/reload, stale edits/project isolation; `parity` resize/import; Rust CSV shape/order/finite-value and draft-only API tests |
 | P/MPC/custom and manual L1/L2 | `logic`, `linear_mpc`, engineering compatibility catalog | Strategy selector, P pair table, numeric/boolean inputs | `workspace` P/custom/MPC real simulation and boolean online changes; Rust strict I/O compatibility, L1/L2 and observer continuity tests |
 | Custom templates/source/build/schema/history/logs | Shared `strategy_service`, revision-checked source routes, build job | Project-owned source editor, external editor path, save/build output/source download; regeneration backups | `workspace` real Cargo build, f64/bool schema, source across navigation/projects, input history/user logs, regeneration and compiler failure; Rust external-editor conflict and backup/symlink tests |
 | Simulation speed/initial values/disturbances/noise/live A/B | `RuntimeManager`, existing `SimulationCore`, scoped live config | Simulation settings, speed and scaling matrices; live apply | `workspace` lifecycle/close/reconnect/parameters; `parity` live speed/noise/A/B apply and persistence; Rust initial-state/offset/band/RK4 tests |
@@ -75,6 +75,16 @@ plots actions become the normal served application and embedded charts.
   live controller received test writes. Original user edits are preserved.
 
 ## Operating and platform limits
+
+Model CSV workflow verified on 2026-10-10: `cargo fmt`, default/native
+`cargo check --offline` and `cargo test --offline` passed (116/130 tests), plus
+frontend typecheck/build and four Vitest tests with Node 24. Both `model` and all
+five `parity` browser journeys passed against isolated Rust/OPC UA processes.
+The new journeys verify templates before model creation, unsaved MV names,
+multiple CV/MV/DV dimensions, placeholders, atomic rejection of incomplete or
+stale files, all four matrices after save/reload, and delayed responses during
+edits/project switching. The combined upload/template controls and two-state
+signal labels were visually checked in the in-app browser at desktop width.
 
 Hardware feedback was verified again on 2026-10-09: formatting, default Rust
 check and 105 tests, frontend typecheck/build and four Vitest tests passed. All

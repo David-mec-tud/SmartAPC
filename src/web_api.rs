@@ -4,8 +4,11 @@ use crate::{
         EngineeringService, JobRequest, JobSnapshot, config_revision, content_revision,
         engineering_catalog, project_readiness,
     },
+    model_csv::ModelCsvLayout,
     parameter_optimization::apply_optimized_parameters,
-    project_config::{LogicParamValue, SimulationConfig, from_toml_str, to_toml_string},
+    project_config::{
+        LogicParamValue, ModelConfig, SimulationConfig, from_toml_str, to_toml_string,
+    },
     storage::SqliteStorage,
     strategy_service,
     web::{AppError, AppState},
@@ -42,6 +45,11 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/api/projects/{name}/config/download", get(download_config))
         .route("/api/projects/{name}/config/parse", post(parse_config))
+        .route(
+            "/api/projects/{name}/model/template",
+            post(model_csv_template),
+        )
+        .route("/api/projects/{name}/model/import", post(import_model_csv))
         .route("/api/projects/{name}/jobs", get(list_jobs).post(start_job))
         .route("/api/projects/{name}/jobs/{id}", get(get_job))
         .route("/api/projects/{name}/jobs/{id}/cancel", post(cancel_job))
@@ -152,6 +160,41 @@ async fn parse_config(
     cfg.name = name;
     // Parsing stages an editable draft; saving remains a separate revision-checked action.
     Ok(Json(serde_json::to_value(cfg)?))
+}
+
+async fn model_csv_template(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(layout): Json<ModelCsvLayout>,
+) -> Result<Json<Value>, AppError> {
+    state.project_service.load_config(&name)?;
+    // The submitted layout includes unsaved I/O edits from the previous step.
+    let csv = layout
+        .template()
+        .map_err(|error| AppError::status(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(json!({ "csv": csv })))
+}
+
+#[derive(Deserialize)]
+struct ImportModelCsv {
+    #[serde(flatten)]
+    layout: ModelCsvLayout,
+    csv: String,
+}
+
+async fn import_model_csv(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<ImportModelCsv>,
+) -> Result<Json<ModelConfig>, AppError> {
+    state.project_service.load_config(&name)?;
+    let model = request
+        .layout
+        .import(&request.csv)
+        .map_err(|error| AppError::status(StatusCode::BAD_REQUEST, error.to_string()))?;
+    // Like TOML import, this returns a draft. Existing save revisions and locks
+    // still govern persistence; reading a file never changes the saved project.
+    Ok(Json(ModelConfig::LinearStateSpace { model }))
 }
 
 async fn list_jobs(
@@ -672,4 +715,64 @@ async fn save_online_config(
     Ok(Json(
         json!({"config": state.project_service.load_config(&name)?.online_optimization, "revision": config_revision(&state.project_service, &name)?}),
     ))
+}
+
+#[cfg(test)]
+mod model_csv_tests {
+    use super::*;
+    use crate::{project::ProjectService, runtime::RuntimeManager, web::build_router};
+    use axum_test::TestServer;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn model_csv_routes_use_draft_layout_without_persisting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = ProjectService::new(root.path());
+        projects.create_project("csv_model").unwrap();
+        let original = config_revision(&projects, "csv_model").unwrap();
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: std::path::PathBuf::from("smartapc"),
+        }))
+        .unwrap();
+        let layout = json!({ "state_count": 1, "variables": { "mvs": ["valve"], "cvs": ["temperature"], "dvs": ["feed"] } });
+        let template = server
+            .post("/api/projects/csv_model/model/template")
+            .json(&layout)
+            .await;
+        template.assert_status_ok();
+        let csv = template.json::<Value>()["csv"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(csv.contains("B,valve,feed\nx1,b11,b12"));
+        let mut upload = layout.clone();
+        upload["csv"] = json!(csv);
+        server
+            .post("/api/projects/csv_model/model/import")
+            .json(&upload)
+            .await
+            .assert_status_bad_request();
+        upload["csv"] = json!(
+            "A,x1\nx1,-1\nB,valve,feed\nx1,2,3\nC,x1\ntemperature,1\nD,valve,feed\ntemperature,0,0\n"
+        );
+        let response = server
+            .post("/api/projects/csv_model/model/import")
+            .json(&upload)
+            .await;
+        response.assert_status_ok();
+        let model = response.json::<Value>();
+        assert_eq!(model["kind"], "linear_state_space");
+        assert_eq!(model["u_order"], json!(["valve", "feed"]));
+        assert_eq!(model["b"], json!([[2.0, 3.0]]));
+        assert_eq!(config_revision(&projects, "csv_model").unwrap(), original);
+        let mut invalid_layout = layout;
+        invalid_layout["state_count"] = json!(0);
+        server
+            .post("/api/projects/csv_model/model/template")
+            .json(&invalid_layout)
+            .await
+            .assert_status_bad_request();
+    }
 }

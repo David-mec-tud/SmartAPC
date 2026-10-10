@@ -25,6 +25,16 @@ and offers explicit runtime start and verification in shadow mode. Simulation an
 optional. Windows Service Control Manager integration is **not implemented or
 verified**; Windows service commands are reference generation only.
 
+## Import a plant model
+
+In **Configuration → Plant model**, download one CSV template for all four model
+matrices (A/B/C/D), generated from the current MV/CV/DV draft and state dimensions.
+Replace the `a11`, `a12`, `b11`, etc. placeholders with numeric coefficients and
+upload the completed file with **Import model CSV**. Keep the matrix headings and
+signal labels in order. The entire import is validated before updating the draft;
+use **Save configuration** to persist it. Manual matrix editing remains available.
+See the [CSV layout and example](docs/web-application.md#model-csv-import).
+
 ## Controller deployment handshake
 
 In **Deployment → Controller OPC UA handshake**, save optional Boolean Node IDs:

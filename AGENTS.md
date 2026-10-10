@@ -24,6 +24,9 @@
 4. Run required gates.
 5. Summarize impact, risks, and follow-up actions.
 - Rule: avoid unrelated edits; preserve existing behavior unless explicitly requested.
+- Browser plant-model import uses one labeled A/B/C/D CSV and a template generated
+  from draft MV/CV/DV names and state dimensions. Validate the complete file in Rust
+  before replacing the draft; persistence uses the existing configuration save gates.
 
 ## 4. Must Gates Before Commit
 - Default required gates (unless docs-only task):

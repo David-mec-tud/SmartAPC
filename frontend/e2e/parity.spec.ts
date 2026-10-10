@@ -43,16 +43,18 @@ test("TOML drafts, variable references, matrix import errors and saved downloads
   expect(renamed.simulation.mv_initials).toHaveProperty("actuator");
   await page.getByRole("link", { name: "Plant model", exact: true }).click();
   await page.getByLabel("State dimensions").fill("2");
-  await page.getByLabel("Import A matrix").setInputFiles({
+  await page.getByLabel("Import model CSV", { exact: true }).setInputFiles({
     name: "invalid.csv",
     mimeType: "text/csv",
     buffer: Buffer.from("1,2,3\n"),
   });
-  await expect(page.getByText("Expected 2 × 2 finite values")).toBeVisible();
-  await page.getByLabel("Import A matrix").setInputFiles({
-    name: "a.csv",
+  await expect(page.getByRole("alert")).toContainText("A header must match");
+  await page.getByLabel("Import model CSV", { exact: true }).setInputFiles({
+    name: "model.csv",
     mimeType: "text/csv",
-    buffer: Buffer.from("-1,0\n0,-2\n"),
+    buffer: Buffer.from(
+      "A,x1,x2\nx1,-1,0\nx2,0,-2\nB,actuator\nx1,1\nx2,0\nC,x1,x2\ny1,1,0\nD,actuator\ny1,0\n",
+    ),
   });
   await expect(page.getByLabel("A row 2 column 2")).toHaveValue("-2");
   await save(page);
