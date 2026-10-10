@@ -70,6 +70,59 @@ feedback page at `http://127.0.0.1:8081/virtual-hardware`. Override HTTP with
 feedback. The browser page charts a bounded live history and applies manual
 MV/target/limit values on plant ticks, independently of open tabs.
 
+## I/O CSV import
+
+In **Configuration → Variables & I/O**, **Download I/O CSV example** downloads a
+UTF-8, comma-separated file with one row per variable. **Import I/O CSV** validates
+the complete file in Rust and replaces the MV, CV, DV and custom sections in the
+editable draft. Invalid files preserve the draft. Imports do not save automatically;
+use **Save configuration**, then configure or rebuild the strategy for the new I/O
+contract. Existing models are normalized to the imported MV/CV/DV names on save.
+
+| Column | Meaning |
+| --- | --- |
+| `group`, `name` | Required columns; group is `mv`, `cv`, `dv`, or `custom`; names are unique across groups |
+| `signal_type` | `f64` (default) or `bool`; Boolean values are supported for custom variables |
+| `read_node` | MV feedback, CV process value, DV measurement, or custom input Node ID |
+| `write_node` | MV command or custom output Node ID |
+| `setpoint_node` | CV setpoint input Node ID |
+| `ll`, `hl` | MV initial limits or CV absolute online optimization safety boundaries |
+| `ll_node`, `hl_node` | MV external limit input Node IDs |
+| `enable_node` | Optional MV/CV/DV Boolean enable input Node ID |
+| `band_low`, `band_high` | CV initial offsets relative to the setpoint |
+| `band_low_node`, `band_high_node` | CV external band input Node IDs, which own that edge |
+| `deadband`, `deadband_node` | CV legacy deadband value/input Node ID |
+
+Only `group` and `name` columns are required; omitted optional columns and empty
+cells stay unset. Populated fields must apply to their group. Numeric values must
+be finite and provided Node IDs must be valid. Quote cells containing commas as in
+standard CSV. A minimal example is:
+
+```csv
+group,name,signal_type,read_node,write_node,setpoint_node
+mv,valve,f64,ns=2;s=ValveActual,ns=2;s=ValveCommand,
+cv,temperature,f64,ns=2;s=Temperature,,ns=2;s=TemperatureTarget
+dv,feed,f64,ns=2;s=Feed,,
+custom,interlock,bool,ns=2;s=Interlock,,
+custom,indicator,bool,,ns=2;s=Indicator,
+custom,auxiliary,f64,ns=2;s=Auxiliary,ns=2;s=Auxiliary,
+```
+
+The **Custom variables** table offers manual editing of type and both addresses.
+At least one address is required. `custom.<name>.read` and
+`custom.<name>.write` are separate strategy signals even when their addresses are
+identical. Custom variables do not change plant model dimensions or become tuning
+parameters. Read tests include custom inputs; explicit write tests accept numeric
+or Boolean custom outputs. Runtime custom writes use the same shadow/enable,
+readiness and fault gates as other actuator outputs. P and MPC controllers do not
+generate custom output values; a custom strategy must produce them.
+
+Draft-only APIs: `GET /api/projects/{name}/io/example` returns `{ "csv": "..." }`;
+`POST /api/projects/{name}/io/import` accepts `{ "csv": "..." }` and returns
+`{ "variables": {...}, "io_definition": {...} }`. Both require an existing project.
+Late responses are discarded after intervening edits, project switches, or locks;
+the normal configuration revision and execution/job locks govern persistence.
+
 ## Model CSV import
 
 In **Configuration → Plant model**, choose the state dimensions and download the

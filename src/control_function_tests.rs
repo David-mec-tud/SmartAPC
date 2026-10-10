@@ -854,6 +854,7 @@ mod tests {
             dvs: Vec::new(),
         };
         cfg.io_definition = IoDefinitionConfig {
+            custom: Vec::new(),
             mvs: vec![MvIoDefinition {
                 name: "u1".to_string(),
                 mv_write: "ns=2;s=u1_write".to_string(),

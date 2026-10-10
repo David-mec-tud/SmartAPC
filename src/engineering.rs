@@ -500,7 +500,7 @@ async fn test_io_read(cfg: &ProjectConfig) -> Result<Value> {
 
 async fn test_io_write(cfg: &ProjectConfig, values: HashMap<String, SignalValue>) -> Result<Value> {
     // Validate the entire request before sending any value. Test writes are limited
-    // to configured MV writes and CV setpoints, never arbitrary browser Node IDs.
+    // to configured MV writes, CV setpoints and custom outputs.
     let mut writes = Vec::new();
     for (signal, value) in values {
         let point = cfg
@@ -511,7 +511,10 @@ async fn test_io_write(cfg: &ProjectConfig, values: HashMap<String, SignalValue>
             .find(|point| point.name == signal)
             .context("unknown I/O test signal")?;
         if !(signal.starts_with("mv.") && signal.ends_with(".write")
-            || signal.starts_with("cv.") && signal.ends_with(".setpoint"))
+            || signal.starts_with("cv.") && signal.ends_with(".setpoint")
+            || signal.starts_with("custom.")
+                && signal.ends_with(".write")
+                && cfg.io.outputs.iter().any(|output| output.name == signal))
         {
             bail!("this signal cannot be written in an I/O test");
         }

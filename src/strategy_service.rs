@@ -106,7 +106,7 @@ pub fn generate_template(
     )?;
     fs::write(
         strategy_root.join("src/lib.rs"),
-        render_custom_template(&inputs, &outputs),
+        render_custom_template(&inputs, &cfg.io.outputs),
     )?;
     fs::write(
         strategy_root.join("src/generated_dispatch.rs"),
@@ -369,12 +369,29 @@ serde_json = "1.0"
 
 pub(crate) fn render_custom_template(
     required_inputs: &[String],
-    required_outputs: &[String],
+    required_outputs: &[crate::project_config::SignalPoint],
 ) -> String {
-    let required_inputs_json =
-        serde_json::to_string_pretty(required_inputs).unwrap_or_else(|_| "[]".to_string());
-    let required_outputs_json =
-        serde_json::to_string_pretty(required_outputs).unwrap_or_else(|_| "[]".to_string());
+    let required_inputs_literal = format!("{required_inputs:#?}");
+    let required_outputs_literal = format!(
+        "{:#?}",
+        required_outputs
+            .iter()
+            .map(|point| &point.name)
+            .collect::<Vec<_>>()
+    );
+    // Generate typed, explicit assignments. Rust debug escaping keeps quotes,
+    // backslashes and control characters safe in user-defined signal names.
+    let output_defaults = required_outputs
+        .iter()
+        .map(|point| {
+            let name = format!("{:?}", point.name);
+            match point.signal_type {
+                crate::types::SignalType::F64 => format!("    out.set_f64({name}, 0.0);"),
+                crate::types::SignalType::Bool => format!("    out.set_bool({name}, false);"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     format!(
         r#"use std::collections::HashMap;
@@ -538,8 +555,8 @@ struct CallResponse {{
     logs: Vec<UserLogEntry>,
 }}
 
-const REQUIRED_INPUTS: &[&str] = &{required_inputs_json};
-const REQUIRED_OUTPUTS: &[&str] = &{required_outputs_json};
+const REQUIRED_INPUTS: &[&str] = &{required_inputs_literal};
+const REQUIRED_OUTPUTS: &[&str] = &{required_outputs_literal};
 
 pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     // -----------------------------------------------------------------------------------------
@@ -549,7 +566,7 @@ pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     // 3) Additional parameters can be added as function arguments:
     //    for example `pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs, gain: f64)`.
     //    These are automatically managed as online parameters.
-    // 4) All required `mv.*.write` outputs must be set.
+    // 4) Set every required output, including custom.<name>.write, using its configured type.
     // 5) Custom logs can be generated with out.log(...), out.log_value(...), out.log_values(...).
     // 6) To add optional future plots, log F64 values using these keys:
     //    - future_pred_without_control.cv.<cv>.k01
@@ -559,10 +576,8 @@ pub fn control(ctx: &SmartApcContext, out: &mut SmartApcOutputs) {{
     //    Then call out.log_future_prediction_values(values).
     // -----------------------------------------------------------------------------------------
     let _ = ctx;
-    // Template default: set every required MV.write output.
-    for output_name in REQUIRED_OUTPUTS {{
-        out.set_f64(output_name, 0.0);
-    }}
+    // Template defaults: numeric outputs start at zero; Boolean outputs start false.
+{output_defaults}
 }}
 
 #[unsafe(no_mangle)]

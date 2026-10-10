@@ -4,6 +4,7 @@ pub mod deployment;
 #[cfg(feature = "legacy-native")]
 pub mod desktop;
 pub mod engineering;
+mod io_csv;
 pub mod kalman_tuning;
 pub mod linear_mpc;
 pub mod logic;

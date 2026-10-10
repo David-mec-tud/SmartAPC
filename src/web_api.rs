@@ -4,6 +4,7 @@ use crate::{
         EngineeringService, JobRequest, JobSnapshot, config_revision, content_revision,
         engineering_catalog, project_readiness,
     },
+    io_csv::{IoCsvDraft, example_io_csv, import_io_csv},
     model_csv::ModelCsvLayout,
     parameter_optimization::apply_optimized_parameters,
     project_config::{
@@ -50,6 +51,11 @@ pub(crate) fn router() -> Router<AppState> {
             post(model_csv_template),
         )
         .route("/api/projects/{name}/model/import", post(import_model_csv))
+        .route("/api/projects/{name}/io/example", get(io_csv_example))
+        .route(
+            "/api/projects/{name}/io/import",
+            post(import_io_definitions),
+        )
         .route("/api/projects/{name}/jobs", get(list_jobs).post(start_job))
         .route("/api/projects/{name}/jobs/{id}", get(get_job))
         .route("/api/projects/{name}/jobs/{id}/cancel", post(cancel_job))
@@ -195,6 +201,30 @@ async fn import_model_csv(
     // Like TOML import, this returns a draft. Existing save revisions and locks
     // still govern persistence; reading a file never changes the saved project.
     Ok(Json(ModelConfig::LinearStateSpace { model }))
+}
+
+async fn io_csv_example(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    state.project_service.load_config(&name)?;
+    Ok(Json(json!({ "csv": example_io_csv()? })))
+}
+
+#[derive(Deserialize)]
+struct ImportIoCsv {
+    csv: String,
+}
+
+async fn import_io_definitions(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<ImportIoCsv>,
+) -> Result<Json<IoCsvDraft>, AppError> {
+    state.project_service.load_config(&name)?;
+    let draft = import_io_csv(&request.csv)
+        .map_err(|error| AppError::status(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+    Ok(Json(draft))
 }
 
 async fn list_jobs(
@@ -723,6 +753,67 @@ mod model_csv_tests {
     use crate::{project::ProjectService, runtime::RuntimeManager, web::build_router};
     use axum_test::TestServer;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn io_csv_import_stages_then_saves_a_typed_directional_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = ProjectService::new(root.path());
+        projects.create_project("csv_io").unwrap();
+        let revision = config_revision(&projects, "csv_io").unwrap();
+        let server = TestServer::new(build_router(AppState {
+            project_service: projects.clone(),
+            runtime: Arc::new(RuntimeManager::new()),
+            executable_path: std::path::PathBuf::from("smartapc"),
+        }))
+        .unwrap();
+        let response = server.get("/api/projects/csv_io/io/example").await;
+        response.assert_status_ok();
+        let example = response.json::<Value>();
+        let response = server
+            .post("/api/projects/csv_io/io/import")
+            .json(&example)
+            .await;
+        response.assert_status_ok();
+        let draft = response.json::<Value>();
+        assert_eq!(
+            draft["io_definition"]["custom"].as_array().unwrap().len(),
+            3
+        );
+        server.post("/api/projects/csv_io/io/import")
+            .json(&json!({"csv": "group,name,read_node\ncustom,first,ns=2;s=first\ncustom,broken,invalid\n"}))
+            .await.assert_status_bad_request();
+        assert_eq!(config_revision(&projects, "csv_io").unwrap(), revision);
+        let mut cfg = serde_json::to_value(projects.load_config("csv_io").unwrap()).unwrap();
+        cfg["variables"] = draft["variables"].clone();
+        cfg["io_definition"] = draft["io_definition"].clone();
+        server
+            .put("/api/projects/csv_io/config")
+            .add_header(header::IF_MATCH, revision.clone())
+            .json(&cfg)
+            .await
+            .assert_status_ok();
+        let saved = projects.load_config("csv_io").unwrap();
+        assert!(
+            saved
+                .io
+                .inputs
+                .iter()
+                .any(|point| point.name == "custom.interlock.read")
+        );
+        assert!(
+            saved
+                .io
+                .outputs
+                .iter()
+                .any(|point| point.name == "custom.indicator.write")
+        );
+        server
+            .put("/api/projects/csv_io/config")
+            .add_header(header::IF_MATCH, revision)
+            .json(&cfg)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+    }
 
     #[tokio::test]
     async fn model_csv_routes_use_draft_layout_without_persisting_it() {

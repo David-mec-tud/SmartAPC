@@ -25,6 +25,19 @@ and offers explicit runtime start and verification in shadow mode. Simulation an
 optional. Windows Service Control Manager integration is **not implemented or
 verified**; Windows service commands are reference generation only.
 
+## Custom variables and I/O CSV
+
+In **Configuration → Variables & I/O**, use **Custom variables** for additional
+numeric (`f64`) or Boolean OPC UA signals. Fill the read Node ID, write Node ID,
+or both. Custom strategies use `custom.<name>.read` inputs and
+`custom.<name>.write` outputs; writes follow the controller enable and fault gates.
+
+**Download I/O CSV example** provides the format for MV/CV/DV and custom variables.
+Replace the example names and addresses, then choose **Import I/O CSV**. The entire
+file is validated before replacing all four sections in the draft. Use **Save
+configuration** to persist it and configure/rebuild your strategy for the resulting
+contract. See the [CSV fields and example](docs/web-application.md#io-csv-import).
+
 ## Import a plant model
 
 In **Configuration → Plant model**, download one CSV template for all four model

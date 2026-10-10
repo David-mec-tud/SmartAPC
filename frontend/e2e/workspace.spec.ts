@@ -219,6 +219,24 @@ test("custom source drafts follow their project; build, schema, simulation and u
   test.setTimeout(120_000);
   const name = await seed(request);
   const other = await seed(request);
+  const savedIo = await request.get(`/api/projects/${name}/config`);
+  const typedIo = await savedIo.json();
+  typedIo.io_definition.custom = [
+    {
+      name: "lamp",
+      signal_type: "bool",
+      read: "ns=2;s=LampRead",
+      write: "ns=2;s=LampWrite",
+    },
+  ];
+  expect(
+    (
+      await request.put(`/api/projects/${name}/config`, {
+        data: typedIo,
+        headers: { "If-Match": savedIo.headers().etag },
+      })
+    ).ok(),
+  ).toBeTruthy();
   await page.goto("/configuration/strategy");
   await page.getByLabel("Editing project", { exact: true }).selectOption(name);
   await page
@@ -233,6 +251,9 @@ test("custom source drafts follow their project; build, schema, simulation and u
     .not.toBe("");
   const editor = page.getByLabel("Custom Rust source");
   await expect(editor).toContainText("pub fn control");
+  await expect(editor).toContainText(
+    'out.set_bool("custom.lamp.write", false);',
+  );
   const source =
     (await editor.inputValue())
       .replace(
@@ -244,8 +265,8 @@ test("custom source drafts follow their project; build, schema, simulation and u
         'let _ = enabled;\n    out.log_value("web_custom", "custom.gain", SignalValue::F64(gain));\n    out.log_value("web_custom", "custom.history", SignalValue::F64(ctx.input_history.len() as f64));',
       )
       .replace(
-        "out.set_f64(output_name, 0.0);",
-        "out.set_f64(output_name, gain);",
+        'out.set_f64("mv.u1.write", 0.0);',
+        'out.set_f64("mv.u1.write", gain);',
       ) + "\n// Draft owned by first project\n";
   await editor.fill(source);
   await page
@@ -309,6 +330,10 @@ test("custom source drafts follow their project; build, schema, simulation and u
           .last_outputs["mv.u1.write"]?.value,
     )
     .toBe(1.25);
+  await expect.poll(async () =>
+    (await (await request.get("/api/execution/state")).json()).snapshot
+      .last_outputs["custom.lamp.write"],
+  ).toEqual({ kind: "bool", value: false });
   await expect
     .poll(async () =>
       (

@@ -5,11 +5,30 @@ import type { ProjectConfig } from "./api";
  * a renamed I/O contract must fail compatibility until its source is rebuilt. */
 export function renameVariable(
   config: ProjectConfig,
-  group: "mvs" | "cvs" | "dvs",
+  group: "mvs" | "cvs" | "dvs" | "custom",
   index: number,
   nextName: string,
 ) {
   const previous = config.io_definition[group][index].name;
+  if (group === "custom") {
+    config.io_definition.custom[index].name = nextName;
+    const signal = (key: string) => {
+      for (const suffix of ["read", "write"])
+        if (key === `custom.${previous}.${suffix}`)
+          return `custom.${nextName}.${suffix}`;
+      return key;
+    };
+    config.logic.initial_values = Object.fromEntries(
+      Object.entries(config.logic.initial_values).map(([key, value]) => [
+        signal(key),
+        value,
+      ]),
+    );
+    for (const plot of config.plots.custom_plots)
+      for (const trace of plot.traces) trace.signal = signal(trace.signal);
+    // Compiled metadata stays unchanged so a renamed contract needs a rebuild.
+    return;
+  }
   const kind = group.slice(0, -1);
   config.io_definition[group][index].name = nextName;
   config.variables[group] = config.variables[group].map((name) =>

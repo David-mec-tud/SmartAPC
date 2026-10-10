@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   type Cv,
+  type CustomVariable,
   type Dv,
   type Model,
   type Mv,
@@ -9,6 +10,7 @@ import {
   projectPath,
   request,
   type ProjectConfig,
+  type SignalValue,
 } from "../api";
 import { useWorkspace } from "../workspace";
 import {
@@ -21,6 +23,7 @@ import {
 } from "../components/ui";
 import { MatrixEditor, resizeMatrix } from "../components/MatrixEditor";
 import { ModelCsv } from "../components/ModelCsv";
+import { IoCsv } from "../components/IoCsv";
 import { renameVariable } from "../configuration-drafts";
 import {
   HardwareTestResults,
@@ -199,9 +202,10 @@ function Communication() {
     </>
   );
 }
-type IoRow = Mv | Cv | Dv;
+type IoRow = Mv | Cv | Dv | CustomVariable;
+type IoGroup = "mvs" | "cvs" | "dvs" | "custom";
 const columns: Record<
-  "mvs" | "cvs" | "dvs",
+  IoGroup,
   { key: string; label: string; numeric?: boolean }[]
 > = {
   mvs: [
@@ -230,13 +234,20 @@ const columns: Record<
     { key: "read", label: "Read Node ID" },
     { key: "enable", label: "Enable Node ID" },
   ],
+  custom: [
+    { key: "signal_type", label: "Type" },
+    { key: "read", label: "Read Node ID" },
+    { key: "write", label: "Write Node ID" },
+  ],
 };
 function Io() {
-  const { config: cfg, edit, locked, dirty } = useWorkspace();
+  const { config: cfg, edit, locked, dirty, project } = useWorkspace();
   const test = useHardwareTest();
-  const [group, setGroup] = useState<"mvs" | "cvs" | "dvs">("mvs");
+  const [group, setGroup] = useState<IoGroup>("mvs");
   const [newName, setNewName] = useState("");
-  const [writeValues, setWriteValues] = useState<Record<string, number>>({});
+  const [writeValues, setWriteValues] = useState<Record<string, SignalValue>>(
+    {},
+  );
   if (!cfg) return null;
   function update(index: number, key: string, value: string | number | null) {
     edit((next) => {
@@ -251,32 +262,46 @@ function Io() {
     if (!newName.trim()) return;
     edit((next) => {
       const name = newName.trim();
-      next.variables[group].push(name);
+      if (group !== "custom") next.variables[group].push(name);
       const row =
         group === "mvs"
           ? { name, mv_write: "", mv_read: "" }
           : group === "cvs"
             ? { name, setpoint: "", process_value: "" }
-            : { name, read: "" };
+            : group === "dvs"
+              ? { name, read: "" }
+              : { name, signal_type: "f64" as const, read: "", write: "" };
       (next.io_definition[group] as IoRow[]).push(row);
     });
     setNewName("");
   }
   return (
     <>
+      <IoCsv
+        project={project}
+        config={cfg}
+        disabled={locked}
+        onChange={(draft) =>
+          edit((next) => {
+            next.variables = draft.variables;
+            next.io_definition = draft.io_definition;
+          })
+        }
+      />
       <Notice>
         CV bands are offsets from the setpoint. External band Node IDs own that
         edge. CV safety LL/HL apply only to online optimization.
       </Notice>
       <div className="toolbar">
         <div className="tabs">
-          {(["mvs", "cvs", "dvs"] as const).map((key) => (
+          {(["mvs", "cvs", "dvs", "custom"] as const).map((key) => (
             <Button
               key={key}
               variant={group === key ? "default" : "ghost"}
               onClick={() => setGroup(key)}
             >
-              {key.toUpperCase()} <span>{cfg.variables[key].length}</span>
+              {key === "custom" ? "Custom variables" : key.toUpperCase()}{" "}
+              <span>{cfg.io_definition[key].length}</span>
             </Button>
           ))}
         </div>
@@ -298,6 +323,14 @@ function Io() {
           </Button>
         </div>
       </div>
+      {group === "custom" && (
+        <p className="muted">
+          Fill a read Node ID, a write Node ID, or both. Numeric (f64) and
+          Boolean values are supported. Strategies use custom.&lt;name&gt;.read
+          and custom.&lt;name&gt;.write; writes follow controller enable and
+          fault gates.
+        </p>
+      )}
       <div className="panel table-scroll io-table">
         <table>
           <thead>
@@ -329,7 +362,18 @@ function Io() {
                   )[column.key];
                   return (
                     <td key={column.key}>
-                      {column.numeric ? (
+                      {column.key === "signal_type" ? (
+                        <Select
+                          aria-label={`${row.name} Type`}
+                          value={value ?? "f64"}
+                          onChange={(event) =>
+                            update(index, column.key, event.target.value)
+                          }
+                        >
+                          <option value="f64">Number (f64)</option>
+                          <option value="bool">Boolean</option>
+                        </Select>
+                      ) : column.numeric ? (
                         <NumberInput
                           aria-label={`${row.name} ${column.label}`}
                           optional
@@ -357,9 +401,10 @@ function Io() {
                     variant="ghost"
                     onClick={() =>
                       edit((next) => {
-                        next.variables[group] = next.variables[group].filter(
-                          (name) => name !== row.name,
-                        );
+                        if (group !== "custom")
+                          next.variables[group] = next.variables[group].filter(
+                            (name) => name !== row.name,
+                          );
                         (next.io_definition[group] as IoRow[]).splice(index, 1);
                       })
                     }
@@ -371,7 +416,7 @@ function Io() {
             ))}
           </tbody>
         </table>
-        {!cfg.variables[group].length && (
+        {!cfg.io_definition[group].length && (
           <p className="empty">Add variables to define this signal group.</p>
         )}
       </div>
@@ -383,22 +428,65 @@ function Io() {
         </p>
         <div className="form-grid">
           {[
-            ...cfg.variables.mvs.map((name) => `mv.${name}.write`),
-            ...cfg.variables.cvs.map((name) => `cv.${name}.setpoint`),
-          ].map((name) => (
+            ...cfg.variables.mvs.map((name) => ({
+              name: `mv.${name}.write`,
+              signal_type: "f64",
+            })),
+            ...cfg.variables.cvs.map((name) => ({
+              name: `cv.${name}.setpoint`,
+              signal_type: "f64",
+            })),
+            ...cfg.io_definition.custom
+              .filter((row) => row.write?.trim())
+              .map((row) => ({
+                name: `custom.${row.name}.write`,
+                signal_type: row.signal_type,
+              })),
+          ].map(({ name, signal_type }) => (
             <Field key={name} label={name}>
-              <NumberInput
-                optional
-                value={writeValues[name]}
-                onChange={(value) =>
-                  setWriteValues((previous) => {
-                    const next = { ...previous };
-                    if (value === null) delete next[name];
-                    else next[name] = value;
-                    return next;
-                  })
-                }
-              />
+              {signal_type === "bool" ? (
+                <Select
+                  aria-label={`${name} test value`}
+                  value={
+                    writeValues[name]?.kind === "bool"
+                      ? String(writeValues[name].value)
+                      : ""
+                  }
+                  onChange={(event) =>
+                    setWriteValues((previous) => {
+                      const next = { ...previous };
+                      if (!event.target.value) delete next[name];
+                      else
+                        next[name] = {
+                          kind: "bool",
+                          value: event.target.value === "true",
+                        };
+                      return next;
+                    })
+                  }
+                >
+                  <option value="">No test value</option>
+                  <option value="true">True</option>
+                  <option value="false">False</option>
+                </Select>
+              ) : (
+                <NumberInput
+                  optional
+                  value={
+                    writeValues[name]?.kind === "f64"
+                      ? Number(writeValues[name].value)
+                      : null
+                  }
+                  onChange={(value) =>
+                    setWriteValues((previous) => {
+                      const next = { ...previous };
+                      if (value === null) delete next[name];
+                      else next[name] = { kind: "f64", value };
+                      return next;
+                    })
+                  }
+                />
+              )}
             </Field>
           ))}
         </div>
@@ -421,12 +509,7 @@ function Io() {
             onClick={() =>
               test.mutate({
                 kind: "io_write",
-                values: Object.fromEntries(
-                  Object.entries(writeValues).map(([name, value]) => [
-                    name,
-                    { kind: "f64", value },
-                  ]),
-                ),
+                values: writeValues,
               })
             }
           >

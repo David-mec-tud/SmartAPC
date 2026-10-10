@@ -24,6 +24,11 @@
 4. Run required gates.
 5. Summarize impact, risks, and follow-up actions.
 - Rule: avoid unrelated edits; preserve existing behavior unless explicitly requested.
+- Browser I/O CSV import replaces MV/CV/DV/custom definitions only after complete
+  Rust validation; persistence uses the existing configuration save gates. Custom
+  variables are typed f64/bool, require read/write Node IDs (one or both), and use
+  `custom.<name>.read/write` in strategy contracts without changing model dimensions.
+  Generated strategy output defaults must preserve each configured signal type.
 - Browser plant-model import uses one labeled A/B/C/D CSV and a template generated
   from draft MV/CV/DV names and state dimensions. Validate the complete file in Rust
   before replacing the draft; persistence uses the existing configuration save gates.

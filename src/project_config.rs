@@ -941,6 +941,9 @@ pub struct IoDefinitionConfig {
     pub cvs: Vec<CvIoDefinition>,
     #[serde(default)]
     pub dvs: Vec<DvIoDefinition>,
+    /// Additional signals belong to I/O only; they do not change plant model dimensions.
+    #[serde(default)]
+    pub custom: Vec<CustomIoDefinition>,
 }
 
 impl IoDefinitionConfig {
@@ -948,6 +951,17 @@ impl IoDefinitionConfig {
         validate_named_entries("mv", &self.mvs, |row| &row.name, |name| vars.has_mv(name))?;
         validate_named_entries("cv", &self.cvs, |row| &row.name, |name| vars.has_cv(name))?;
         validate_named_entries("dv", &self.dvs, |row| &row.name, |name| vars.has_dv(name))?;
+        let mut names: HashSet<String> = vars
+            .mvs
+            .iter()
+            .chain(&vars.cvs)
+            .chain(&vars.dvs)
+            .map(|name| name.trim().to_string())
+            .collect();
+        for row in &self.custom {
+            validate_variable_group("custom", std::slice::from_ref(&row.name), &mut names)?;
+            row.validate()?;
+        }
 
         for row in &self.mvs {
             if let (Some(ll), Some(hl)) = (row.ll, row.hl) {
@@ -978,6 +992,9 @@ impl IoDefinitionConfig {
     }
 
     pub fn is_complete_for(&self, vars: &VariableCatalogConfig) -> bool {
+        if self.custom.iter().any(|row| row.validate().is_err()) {
+            return false;
+        }
         for name in &vars.mvs {
             let Some(row) = self.mvs.iter().find(|row| row.name == *name) else {
                 return false;
@@ -1013,6 +1030,7 @@ impl IoDefinitionConfig {
         &self,
         vars: &VariableCatalogConfig,
     ) -> Result<(IoConfig, LimitsConfig)> {
+        self.validate(vars)?;
         if !self.is_complete_for(vars) {
             bail!("I/O definition is incomplete for the configured variables");
         }
@@ -1165,6 +1183,24 @@ impl IoDefinitionConfig {
             }
         }
 
+        // Distinct directional names preserve the globally unique signal contract,
+        // including when a variable reads and writes the same OPC UA node.
+        for row in &self.custom {
+            for (suffix, node, points) in [
+                ("read", &row.read, &mut inputs),
+                ("write", &row.write, &mut outputs),
+            ] {
+                if let Some(address) = optional_trimmed(node.as_deref().unwrap_or("")) {
+                    points.push(SignalPoint {
+                        name: format!("custom.{}.{suffix}", row.name),
+                        signal_type: row.signal_type,
+                        address,
+                        opc_tag: None,
+                    });
+                }
+            }
+        }
+
         Ok((
             IoConfig {
                 inputs,
@@ -1277,6 +1313,42 @@ pub struct DvIoDefinition {
     pub read: String,
     #[serde(default)]
     pub enable: Option<String>,
+}
+
+/// Populate read, write, or both. Writes use the same controller ownership and
+/// fault suppression gates as MV outputs; custom strategies produce their values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomIoDefinition {
+    pub name: String,
+    pub signal_type: SignalType,
+    #[serde(default)]
+    pub read: Option<String>,
+    #[serde(default)]
+    pub write: Option<String>,
+}
+
+impl CustomIoDefinition {
+    fn validate(&self) -> Result<()> {
+        let nodes: Vec<_> = [&self.read, &self.write]
+            .into_iter()
+            .filter_map(|node| optional_trimmed(node.as_deref().unwrap_or("")))
+            .collect();
+        if nodes.is_empty() {
+            bail!(
+                "Custom variable '{}' requires a read or write Node ID",
+                self.name
+            );
+        }
+        for node in nodes {
+            if node.parse::<async_opcua::types::NodeId>().is_err() {
+                bail!(
+                    "Custom variable '{}' has an invalid OPC UA Node ID: {node}",
+                    self.name
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

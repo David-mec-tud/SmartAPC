@@ -50,6 +50,12 @@ export interface Dv {
   read: string;
   enable?: string | null;
 }
+export interface CustomVariable {
+  name: string;
+  signal_type: "f64" | "bool";
+  read?: string | null;
+  write?: string | null;
+}
 export interface Model {
   kind: "linear_state_space";
   state_count: number;
@@ -130,7 +136,7 @@ export interface ProjectConfig {
         stale_timeout_ms: number;
       };
   variables: Variables;
-  io_definition: { mvs: Mv[]; cvs: Cv[]; dvs: Dv[] };
+  io_definition: { mvs: Mv[]; cvs: Cv[]; dvs: Dv[]; custom: CustomVariable[] };
   io: {
     cycle_ms: number;
     inputs: {

@@ -7513,7 +7513,10 @@ fn save_io_definition_task(
 
             let vars = build_variable_catalog(&mv_name_rows, &cv_name_rows, &dv_name_rows)?;
             cfg.variables = vars.clone();
+            let custom_variables = cfg.io_definition.custom.clone();
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
+            // The native compatibility editor has no custom rows; retain browser-defined signals.
+            cfg.io_definition.custom = custom_variables;
             cfg.rebuild_runtime_io_from_definition()
                 .map_err(|err| format!("I/O derivation failed: {err}"))?;
             cfg.io.cycle_ms = io_cycle_ms
@@ -8500,7 +8503,12 @@ fn build_io_definition(
         });
     }
 
-    let io_definition = crate::project_config::IoDefinitionConfig { mvs, cvs, dvs };
+    let io_definition = crate::project_config::IoDefinitionConfig {
+        mvs,
+        cvs,
+        dvs,
+        custom: Vec::new(),
+    };
     io_definition
         .validate(vars)
         .map_err(|err| format!("Invalid I/O definition: {err}"))?;
