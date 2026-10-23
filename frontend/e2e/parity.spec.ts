@@ -207,7 +207,12 @@ test("selected sweeps download full reports; deployment copies and downloads com
     (await (await request.get(`/api/projects/${name}/jobs`)).json())[0].result,
   ).toBeNull();
   await page.getByRole("link", { name: "Validate & run", exact: true }).click();
-  await expect(page.getByText("Ready to start", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Ready for shadow mode", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByText("Start from a terminal instead", { exact: true })
+    .click();
   await page
     .getByRole("button", { name: "Copy local run command", exact: true })
     .click();

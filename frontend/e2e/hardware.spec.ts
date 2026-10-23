@@ -164,9 +164,11 @@ test("real OPC UA read/write/watchdog tests and saved runtime operate against th
     page.getByRole("region", { name: "Watchdog test result" }),
   ).toContainText("read and mirrored successfully");
   await page.getByRole("link", { name: "Validate & run", exact: true }).click();
-  await expect(page.getByText("Ready to start", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Ready for shadow mode", { exact: true }),
+  ).toBeVisible();
   await page
-    .getByRole("button", { name: "Start saved runtime", exact: true })
+    .getByRole("button", { name: "Start in shadow mode", exact: true })
     .click();
   await expect
     .poll(
@@ -439,7 +441,7 @@ test("deployment handshake tests preserve shadow startup and clear flags on stop
     await (await request.get(`${plantUrl}/api/virtual-hardware`)).json();
   await expect.poll(async () => (await plant()).latest.sample.u).toBe(0.5);
   await page
-    .getByRole("button", { name: "Start saved runtime", exact: true })
+    .getByRole("button", { name: "Start in shadow mode", exact: true })
     .click();
   const execution = async () =>
     await (await request.get("/api/execution/state")).json();
@@ -449,7 +451,11 @@ test("deployment handshake tests preserve shadow startup and clear flags on stop
   expect((await execution()).snapshot.controller.enabled).toBe(false);
   expect((await plant()).latest.sample.u).toBe(0.5);
   expect((await plant()).controller_signals.ControllerHasControl).toBe(false);
-  await expect(page.getByText("Shadow mode", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Verify before enabling control" })
+      .getByText("Shadow mode", { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Turn controller on", exact: true })
     .click();
@@ -511,6 +517,9 @@ test("external enable is tested read only, disables the UI, and owns runtime on/
     .toBe(true);
   await page.goto("/deployment");
   await page.getByLabel("Editing project", { exact: true }).selectOption(name);
+  await expect(
+    page.getByText(/Keep this external signal false to remain in shadow mode/),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Test saved controller signals", exact: true })
     .click();
@@ -529,7 +538,7 @@ test("external enable is tested read only, disables the UI, and owns runtime on/
     )
     .toBe(false);
   await page
-    .getByRole("button", { name: "Start saved runtime", exact: true })
+    .getByRole("button", { name: "Start in shadow mode", exact: true })
     .click();
   await expect(
     page.getByRole("button", {

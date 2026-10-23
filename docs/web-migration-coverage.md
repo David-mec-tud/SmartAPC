@@ -36,7 +36,7 @@ Browser journeys use real Axum/Rust services and disposable projects. `workspace
 | Runtime lifecycle/metrics/health/active parameters | `RuntimeManager`, execution ID and expected-value guards, SSE/polling | Shared execution bar, parameters and diagnostics | `hardware` real runtime cycles/outputs/watchdog; `workspace` browser-independent simulation; `parity` concurrent value conflict retains draft; Rust previous-run/project/type/optimization locks and fault transitions |
 | Plotly live/history/custom/order/windows/futures | Bounded SQLite window, persisted `PlotConfig`, local Plotly asset | MV/CV/DV groups, order controls, multi-trace builder, windows/forecasts | `workspace` zoom retained after live updates; `parity` custom plot/window persistence; light/dark visual audit; Rust extrema/boolean/latest sampling test; TS forecast timestamp/step/anchor tests |
 | JSONL events/custom logs/diagnostics | Bounded JSONL tail and structured runtime/simulation logging | Log source/search/details; diagnostic snapshots | `workspace` custom history and user log through real custom simulation and log search; Rust structured logging/optimization/restoration tests; timed simulation buffer flush |
-| Deployment readiness/local run/Windows commands | Saved readiness, `deployment`, config download | Validate/run/verify, edit links, optional requirements, Copy/Download | `workspace` P readiness without optional model/tuning; `hardware` explicit start/status verification; `parity` clipboard and command download; Rust command generation tests |
+| Deployment readiness/local run/Windows commands | Saved readiness, `deployment`, config download | Remaining startup steps with resolve links, shadow-mode start, live verification, optional handshake and engineering, terminal/Windows commands | `deployment` missing requirements/refresh, draft and execution gates, blank status addresses and shadow startup; `workspace` optional model/tuning; `hardware` OPC UA start/status verification; `parity` command copy/download; Rust command generation tests |
 | Init-project/headless plant/browser feedback | CLI/shared PT1 plant; standalone `/api/virtual-hardware` | Local Plotly plant charts/manual values/node addresses | `hardware` manual apply and continued plant execution after tab close; in-app light/dark inspection; final package init-project and `--no-web` listener smoke |
 
 Native messages were audited beyond the goal's list: variable rename, custom
@@ -83,6 +83,26 @@ typecheck/build and four Vitest tests passed. The existing `workspace` control-t
 navigation and deployment-readiness journey passed against an isolated Rust backend.
 
 ## Operating and platform limits
+
+Deployment startup guidance verified on 2026-10-23: Validate & run now lists
+saved-configuration issues, unsaved drafts, pending saves/jobs and existing
+executions before offering **Start in shadow mode**. The same blockers disable
+Start. Observer convergence and controller readiness appear in post-start live
+verification, alongside connection health and advancing cycles. The optional
+handshake follows the startup flow, and both ControllerIsReady/ControllerHasControl
+addresses can remain blank while their state stays visible. External-enable
+guidance explains that its input must stay false to remain in shadow mode.
+
+Validation: `cargo fmt`, `cargo check --offline` and `cargo test --offline`
+(121 tests), frontend typecheck/build and four Vitest tests passed. All 20
+deployment/hardware/workspace/parity browser journeys passed across targeted runs;
+the handshake selector was scoped to the verification panel after its new shadow
+badge duplicated the header text. Tests cover refresh after another client saves,
+missing-contract links, draft and other-execution gates, blank status-node shadow
+startup, real OPC UA flags and external enable, and terminal/Windows downloads.
+In-app inspection confirmed desktop and 768×1024 layouts without horizontal
+overflow. Controller algorithms, backend contracts, serving and packaging were
+unchanged.
 
 Strategy preview and autosave verified on 2026-10-10: `cargo fmt`,
 `cargo check --offline`, and `cargo test --offline` passed (121 tests), plus

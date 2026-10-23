@@ -145,9 +145,11 @@ test("control-test job completes across navigation and deployment requires no op
     .getByRole("button", { name: "Run control tests", exact: true })
     .click();
   await page.getByRole("link", { name: "Validate & run", exact: true }).click();
-  await expect(page.getByText("Ready to start", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Start saved runtime" }),
+    page.getByText("Ready for shadow mode", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Start in shadow mode" }),
   ).toBeEnabled();
   await page.getByRole("link", { name: "Control tests", exact: true }).click();
   await expect(page.getByText("succeeded", { exact: true })).toBeVisible();

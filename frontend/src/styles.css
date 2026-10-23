@@ -608,6 +608,21 @@ pre {
   flex-shrink: 0;
   color: var(--accent);
 }
+.startup-blocker span {
+  flex: 1;
+}
+.startup-blocker a {
+  flex-shrink: 0;
+}
+.startup-blocker svg {
+  color: var(--danger);
+}
+.local-command {
+  margin-top: 18px;
+}
+.local-command summary {
+  margin-bottom: 12px;
+}
 .step-number {
   display: inline-grid;
   place-items: center;

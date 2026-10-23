@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { CheckCircle2, CircleAlert, Clipboard, Download } from "lucide-react";
 import { type Readiness, download, projectPath, request } from "../api";
@@ -16,6 +16,10 @@ export function Deployment() {
     config,
     edit,
     locked,
+    jobs,
+    workspace,
+    strategyPending,
+    save,
     act,
     setNotification,
   } = useWorkspace();
@@ -34,6 +38,50 @@ export function Deployment() {
     enabled: !!project,
   });
   const active = execution?.snapshot.project_name === project;
+  const runningJob = jobs.data?.find((job) => job.phase === "running");
+  const start = useMutation({
+    mutationFn: () =>
+      act("/api/execution/command", {
+        action: "start",
+        mode: "runtime",
+        project_name: project,
+      }),
+  });
+  // Rust owns saved configuration validity. Add only browser draft and backend
+  // availability blockers here, and use the same list to explain the Start gate.
+  const blockers: { message: string; page?: string }[] = [
+    ...(readiness.data?.issues ?? []),
+  ];
+  if (dirty)
+    blockers.push({
+      message: "Save configuration in the bottom bar, or discard your draft.",
+    });
+  if (strategyPending || save.isPending)
+    blockers.push({
+      message: "Wait for configuration changes to finish saving.",
+    });
+  if (execution)
+    blockers.push({
+      message: `${execution.snapshot.project_name} is already executing in ${execution.mode} mode. Stop it in the top bar before starting a new runtime.`,
+    });
+  if (runningJob)
+    blockers.push({
+      message: `Wait for the ${runningJob.kind.replaceAll("_", " ")} job to finish.`,
+    });
+  else if (locked && !execution)
+    blockers.push({
+      message: "Wait for saved configuration to refresh after the job.",
+    });
+  if (readiness.isFetching || workspace.isPending || jobs.isPending)
+    blockers.push({
+      message: "Checking saved configuration and execution availability…",
+    });
+  if (readiness.error || workspace.error || jobs.error)
+    blockers.push({
+      message:
+        "Restore the backend connection and refresh validation before starting.",
+    });
+  const canStart = !!readiness.data?.ready && blockers.length === 0;
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -48,10 +96,10 @@ export function Deployment() {
     <>
       <div className="page-title">
         <div className="eyebrow">Deployment · Local / self-hosted</div>
-        <h1>Validate, run, verify</h1>
+        <h1>Validate &amp; run</h1>
         <p>
-          Readiness follows the selected controller’s requirements. Engineering
-          tasks remain optional.
+          Resolve the startup requirements, start in shadow mode, then verify
+          live operation before enabling actuator writes.
         </p>
       </div>
       {dirty && (
@@ -61,15 +109,230 @@ export function Deployment() {
         </Notice>
       )}
       {readiness.error && <Notice error>{readiness.error.message}</Notice>}
-      {config && (
-        <section className="panel">
-          <h2>
-            <span className="step-number">1</span> Controller OPC UA handshake
+      <section className="panel" aria-labelledby="startup-requirements">
+        <div className="section-title">
+          <h2 id="startup-requirements">
+            <span className="step-number">1</span> Prepare for shadow mode
+          </h2>
+          <Badge tone={canStart ? "good" : "warning"}>
+            {canStart
+              ? "Ready for shadow mode"
+              : active && execution.mode === "runtime"
+                ? "Runtime active"
+                : `${blockers.length} ${blockers.length === 1 ? "step" : "steps"} remaining`}
+          </Badge>
+        </div>
+        <p className="muted">
+          Required: saved configuration, a compatible strategy and I/O contract,
+          and no other execution or running job for this project. The backend
+          must be able to reach your OPC UA endpoint.
+        </p>
+        {blockers.length > 0 && (
+          <div aria-label="Remaining startup steps">
+            {blockers.map((blocker, index) => (
+              <div key={index} className="readiness-row startup-blocker">
+                <CircleAlert size={18} aria-hidden="true" />
+                <span>{blocker.message}</span>
+                {blocker.page && <Link to={blocker.page}>Resolve →</Link>}
+              </div>
+            ))}
+          </div>
+        )}
+        {readiness.data?.ready && (
+          <div className="readiness-row">
+            <CheckCircle2 size={18} aria-hidden="true" />
+            <span>
+              Saved configuration and strategy/I/O compatibility checks passed.
+            </span>
+            <Badge tone="good">Passed</Badge>
+          </div>
+        )}
+        {readiness.data && (
+          <div className="readiness-row">
+            <span>
+              Plant model
+              {readiness.data.model_requirement === "required"
+                ? " · required by the selected strategy"
+                : " · optional for the selected strategy"}
+            </span>
+            <Link to="/configuration/model">Review model →</Link>
+          </div>
+        )}
+        <p className="muted">
+          Configuration checks do not verify hardware reachability. You can test
+          the <Link to="/configuration/io">saved I/O</Link> and{" "}
+          <Link to="/configuration/communication">connection/watchdog</Link>{" "}
+          before starting; successful test jobs are not a startup requirement.
+        </p>
+        <Button
+          variant="outline"
+          disabled={readiness.isFetching}
+          onClick={() => {
+            void readiness.refetch();
+            void workspace.refetch();
+            void jobs.refetch();
+          }}
+        >
+          Refresh validation
+        </Button>
+      </section>
+      {readiness.data && (
+        <section className="panel" aria-labelledby="start-shadow-mode">
+          <h2 id="start-shadow-mode">
+            <span className="step-number">2</span> Start and verify shadow mode
           </h2>
           <p className="muted">
-            Configure Boolean Node IDs. Status outputs are written by SmartAPC.
-            ExternalControllerEnable is optional and read only; when configured
-            it owns on/off control.
+            Start runs the observer and controller suggestions with actuator
+            writes disabled. Observer convergence and ControllerIsReady are
+            checked after startup; they do not block starting in shadow mode.
+            Watchdog exchanges and any configured status outputs remain active.
+          </p>
+          {config?.deployment.external_controller_enable?.trim() && (
+            <Notice>
+              ExternalControllerEnable is configured. A true value can enable
+              actuator writes automatically once the controller is ready. Keep
+              this external signal false to remain in shadow mode.
+            </Notice>
+          )}
+          <div className="inline">
+            <Button
+              disabled={!canStart || start.isPending}
+              onClick={() => start.mutate()}
+            >
+              {start.isPending ? "Starting runtime…" : "Start in shadow mode"}
+            </Button>
+            <Button asChild variant="outline">
+              <a href={`${projectPath(project)}/config/download`}>
+                <Download size={16} /> Saved project TOML
+              </a>
+            </Button>
+          </div>
+          {!canStart && !active && (
+            <p className="muted">
+              Complete the remaining startup steps above to start.
+            </p>
+          )}
+          {start.error && <Notice error>{start.error.message}</Notice>}
+          <details className="local-command">
+            <summary>Start from a terminal instead</summary>
+            <p className="muted">
+              Use this command when the browser backend is not already running.
+              It starts a backend and the saved project on a host with OPC UA
+              access.
+            </p>
+            <div className="command">
+              <code>{readiness.data.local_command}</code>
+              <Button
+                variant="ghost"
+                aria-label="Copy local run command"
+                onClick={() => void copy(readiness.data!.local_command)}
+              >
+                <Clipboard size={16} />
+              </Button>
+            </div>
+          </details>
+        </section>
+      )}
+      <section className="panel" aria-labelledby="verify-runtime">
+        <h2 id="verify-runtime">
+          <span className="step-number">3</span> Verify before enabling control
+        </h2>
+        <p className="muted">
+          Check connection health, advancing cycles, current inputs and
+          controller suggestions in live diagnostics. Wait for observer
+          convergence and a successful suggestion before enabling control.
+          Without an external enable signal, use Turn controller on in the top
+          bar when ready. ControllerHasControl stays false while actuator writes
+          are disabled. Both status values remain visible here even without OPC
+          UA addresses.
+        </p>
+        {active && execution.mode === "runtime" ? (
+          <>
+            <div className="readiness-row">
+              <Badge tone="good">{execution.snapshot.state}</Badge>
+              <Badge>
+                {execution.snapshot.controller?.enabled
+                  ? "Control enabled"
+                  : "Shadow mode"}
+              </Badge>
+              <span>
+                {execution.snapshot.metrics.total_cycles.toLocaleString()}{" "}
+                controller cycles
+              </span>
+            </div>
+            <div className="readiness-row">
+              <span>OPC UA connection</span>
+              <Badge
+                tone={
+                  execution.snapshot.connection_health === "healthy"
+                    ? "good"
+                    : "warning"
+                }
+              >
+                {execution.snapshot.connection_health ?? "Unknown"}
+              </Badge>
+            </div>
+            <div className="readiness-row">
+              <span>Observer converged</span>
+              <Badge
+                tone={
+                  execution.snapshot.controller?.observer_converged
+                    ? "good"
+                    : "warning"
+                }
+              >
+                {String(
+                  execution.snapshot.controller?.observer_converged ?? false,
+                )}
+              </Badge>
+            </div>
+            <div className="readiness-row">
+              <span>ControllerIsReady</span>
+              <Badge
+                tone={
+                  execution.snapshot.controller?.is_ready ? "good" : "warning"
+                }
+              >
+                {String(execution.snapshot.controller?.is_ready ?? false)}
+              </Badge>
+            </div>
+            <div className="readiness-row">
+              <span>ControllerHasControl</span>
+              <Badge
+                tone={
+                  execution.snapshot.controller?.has_control
+                    ? "good"
+                    : "neutral"
+                }
+              >
+                {String(execution.snapshot.controller?.has_control ?? false)}
+              </Badge>
+            </div>
+            <p>{execution.snapshot.controller?.reason}</p>
+            <p>
+              Watchdog: {JSON.stringify(execution.snapshot.watchdog_status)}
+            </p>
+            <Link to="/operation/diagnostics">Open live diagnostics →</Link>
+          </>
+        ) : (
+          <Notice>
+            {execution
+              ? `${execution.snapshot.project_name} is executing in ${execution.mode} mode.`
+              : "Not started. Start in shadow mode above to verify live hardware and controller readiness."}
+          </Notice>
+        )}
+      </section>
+      {config && (
+        <section className="panel">
+          <div className="section-title">
+            <h2>Controller OPC UA handshake</h2>
+            <Badge>Optional</Badge>
+          </div>
+          <p className="muted">
+            All three Boolean Node IDs are optional. Leave ControllerIsReady and
+            ControllerHasControl blank to keep their status in the UI without
+            publishing it to OPC UA. ExternalControllerEnable is read only; when
+            configured it owns on/off control. None is required to start.
           </p>
           <fieldset disabled={locked}>
             <div className="form-grid">
@@ -78,12 +341,12 @@ export function Deployment() {
                   [
                     "controller_is_ready",
                     "ControllerIsReady",
-                    "Write · observer converged and a suggestion succeeded",
+                    "Optional write · observer converged and a suggestion succeeded",
                   ],
                   [
                     "controller_has_control",
                     "ControllerHasControl",
-                    "Write · enabled, ready, and actuator writes succeeded",
+                    "Optional write · enabled, ready, and actuator writes succeeded",
                   ],
                   [
                     "external_controller_enable",
@@ -92,11 +355,15 @@ export function Deployment() {
                   ],
                 ] as const
               ).map(([key, label, help]) => (
-                <Field key={key} label={`${label} Node ID`} hint={help}>
+                <Field
+                  key={key}
+                  label={`${label} Node ID (optional)`}
+                  hint={help}
+                >
                   <Input
                     aria-label={`${label} Node ID`}
                     value={config.deployment[key] ?? ""}
-                    placeholder="ns=2;s=..."
+                    placeholder="Optional · ns=2;s=..."
                     onChange={(event) =>
                       edit((next) => {
                         next.deployment[key] =
@@ -139,135 +406,18 @@ export function Deployment() {
       )}
       {readiness.data && (
         <>
-          <section className="panel">
-            <div className="section-title">
-              <h2>
-                <span className="step-number">2</span> Validate saved
-                configuration
-              </h2>
-              <Badge tone={readiness.data.ready ? "good" : "danger"}>
-                {readiness.data.ready
-                  ? "Ready to start"
-                  : "Configuration needs attention"}
-              </Badge>
-            </div>
-            {readiness.data.issues.map((issue, index) => (
-              <Link key={index} to={issue.page} className="readiness-row">
-                <CircleAlert size={18} />
-                <span>{issue.message}</span>
-                <span>Edit →</span>
-              </Link>
-            ))}
-            {readiness.data.ready && (
-              <div className="readiness-row">
-                <CheckCircle2 size={18} />
-                <span>Strategy and I/O contract are compatible.</span>
-              </div>
-            )}
-            <div className="readiness-row">
-              <span>Plant model</span>
-              <Badge>{readiness.data.model_requirement}</Badge>
-            </div>
+          <details className="panel">
+            <summary>Optional engineering</summary>
+            <p className="muted">
+              These tasks do not block shadow-mode startup.
+            </p>
             {readiness.data.optional.map((item) => (
               <div key={item} className="readiness-row">
                 <span>{item}</span>
                 <Badge>Optional</Badge>
               </div>
             ))}
-          </section>
-          <section className="panel">
-            <h2>
-              <span className="step-number">3</span> Run the saved project
-            </h2>
-            <p className="muted">
-              The backend must run on a host that can reach the configured OPC
-              UA endpoint. Startup always enters shadow mode: suggestions and
-              the observer run without actuator writes. Use Turn controller on
-              after startup, or the optional ExternalControllerEnable signal.
-            </p>
-            <div className="command">
-              <code>{readiness.data.local_command}</code>
-              <Button
-                variant="ghost"
-                aria-label="Copy local run command"
-                onClick={() => void copy(readiness.data!.local_command)}
-              >
-                <Clipboard size={16} />
-              </Button>
-            </div>
-            <div className="inline">
-              <Button
-                disabled={!!execution || !readiness.data.ready || dirty}
-                onClick={() =>
-                  void act("/api/execution/command", {
-                    action: "start",
-                    mode: "runtime",
-                    project_name: project,
-                  }).catch(() => {})
-                }
-              >
-                Start saved runtime
-              </Button>
-              <Button asChild variant="outline">
-                <a href={`${projectPath(project)}/config/download`}>
-                  <Download size={16} /> Saved project TOML
-                </a>
-              </Button>
-            </div>
-          </section>
-          <section className="panel">
-            <h2>
-              <span className="step-number">4</span> Verify execution
-            </h2>
-            {active && execution.mode === "runtime" ? (
-              <>
-                <div className="readiness-row">
-                  <Badge tone="good">{execution.snapshot.state}</Badge>
-                  <span>
-                    {execution.snapshot.metrics.total_cycles.toLocaleString()}{" "}
-                    controller cycles
-                  </span>
-                </div>
-                <div className="readiness-row">
-                  <span>ControllerIsReady</span>
-                  <Badge
-                    tone={
-                      execution.snapshot.controller?.is_ready
-                        ? "good"
-                        : "warning"
-                    }
-                  >
-                    {String(execution.snapshot.controller?.is_ready ?? false)}
-                  </Badge>
-                </div>
-                <div className="readiness-row">
-                  <span>ControllerHasControl</span>
-                  <Badge
-                    tone={
-                      execution.snapshot.controller?.has_control
-                        ? "good"
-                        : "neutral"
-                    }
-                  >
-                    {String(
-                      execution.snapshot.controller?.has_control ?? false,
-                    )}
-                  </Badge>
-                </div>
-                <p>{execution.snapshot.controller?.reason}</p>
-                <p>
-                  Watchdog: {JSON.stringify(execution.snapshot.watchdog_status)}
-                </p>
-                <Link to="/operation/diagnostics">Open live diagnostics →</Link>
-              </>
-            ) : (
-              <Notice>
-                {execution
-                  ? `${execution.snapshot.project_name} is executing in ${execution.mode} mode.`
-                  : "No runtime is executing. Hardware reachability has not been verified."}
-              </Notice>
-            )}
-          </section>
+          </details>
           <details className="panel">
             <summary>Windows service command reference</summary>
             <p className="muted">{readiness.data.windows_service_support}</p>

@@ -82,7 +82,10 @@
   or the optional read-only `deployment.external_controller_enable` Boolean node.
   Its presence locks manual enable in the UI and backend. Never persist enable.
 - Deployment Boolean outputs `ControllerIsReady` and `ControllerHasControl` use
-  dedicated Node IDs. Readiness requires observer convergence and a valid successful
+  optional dedicated Node IDs; blank addresses must not block shadow-mode startup.
+  Deployment lists saved-configuration and execution blockers before optional handshake
+  setup. Observer convergence and controller readiness are verified after startup.
+  Readiness requires observer convergence and a valid successful
   suggestion; ownership additionally requires enabled, successful actuator writes.
   Faults, missed suggestion deadlines, and stop clear both; watchdog/status writes
   remain active when actuator writes are suppressed. Deployment tests write false

@@ -50,6 +50,13 @@ See the [CSV layout and example](docs/web-application.md#model-csv-import).
 
 ## Controller deployment handshake
 
+In **Deployment → Validate & run**, resolve the listed startup steps, then select
+**Start in shadow mode**. The list includes incompatible strategy/I/O contracts,
+unsaved drafts, running jobs and existing executions. Saved configuration checks
+do not contact hardware; I/O/watchdog tests and simulation/tuning are optional.
+After starting, verify connection health, advancing cycles, observer convergence
+and successful suggestions before enabling actuator writes.
+
 In **Deployment → Controller OPC UA handshake**, save optional Boolean Node IDs:
 
 - `ControllerIsReady`: SmartAPC writes true after the observer converges and a
@@ -61,8 +68,10 @@ In **Deployment → Controller OPC UA handshake**, save optional Boolean Node ID
 
 **Test saved controller signals** checks Boolean types, writes false to the two
 status outputs, and confirms readback. It only reads the external enable. Node IDs
-must be distinct from each other, I/O, and watchdog nodes. Blank status addresses
-support existing local-only projects; their state remains visible in the UI.
+must be distinct from each other, I/O, and watchdog nodes. Both status addresses
+may be left blank for any project; they are not startup requirements and their
+state remains visible in the UI. A configured external enable must stay false
+to remain in shadow mode; true can enable actuator writes once readiness is met.
 
 Every runtime start, including `serve --project`, resets to shadow mode. The
 observer and suggestions run while actuator writes wait for **Turn controller on**
