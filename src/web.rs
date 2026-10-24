@@ -2320,6 +2320,7 @@ mod tests {
                         }],
                     },
                 ],
+                ..PlotConfig::default()
             })
             .await;
         resp.assert_status_ok();

@@ -224,8 +224,6 @@ const columns: Record<
   cvs: [
     { key: "setpoint", label: "Setpoint Node ID" },
     { key: "process_value", label: "Process value Node ID" },
-    { key: "ll", label: "Safety LL", numeric: true },
-    { key: "hl", label: "Safety HL", numeric: true },
     { key: "band_low_value", label: "Band low offset", numeric: true },
     { key: "band_high_value", label: "Band high offset", numeric: true },
     { key: "band_low_opc", label: "Band low Node ID" },
@@ -248,6 +246,11 @@ function Io() {
   const { config: cfg, edit, locked, dirty, project } = useWorkspace();
   const test = useHardwareTest();
   const [group, setGroup] = useState<IoGroup>("mvs");
+  const visibleColumns = columns[group].filter(
+    (column) =>
+      cfg?.logic.kind !== "linear_mpc" || !column.key.startsWith("deadband"),
+  );
+
   const [newName, setNewName] = useState("");
   const [writeValues, setWriteValues] = useState<Record<string, SignalValue>>(
     {},
@@ -294,7 +297,8 @@ function Io() {
       />
       <Notice>
         CV bands are offsets from the setpoint. External band Node IDs own that
-        edge. CV safety LL/HL apply only to online optimization.
+        edge. Absolute optimization safety boundaries are configured separately
+        below.
       </Notice>
       <div className="toolbar">
         <div className="tabs">
@@ -340,7 +344,7 @@ function Io() {
           <thead>
             <tr>
               <th>Variable</th>
-              {columns[group].map((column) => (
+              {visibleColumns.map((column) => (
                 <th key={column.key}>{column.label}</th>
               ))}
               <th>Remove</th>
@@ -360,7 +364,7 @@ function Io() {
                     }
                   />
                 </th>
-                {columns[group].map((column) => {
+                {visibleColumns.map((column) => {
                   const value = (
                     row as unknown as Record<string, string | number | null>
                   )[column.key];
@@ -523,6 +527,46 @@ function Io() {
         <HardwareTestResults kinds={["io_read", "io_write"]} test={test} />
       </section>
       <InitialValues />
+      {group === "cvs" && (
+        <section className="panel">
+          <h2>Optimization safety boundaries</h2>
+          <p className="muted">
+            Absolute process values used to stop online optimization. These are
+            independent of the setpoint-relative controller bands.
+          </p>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>CV</th>
+                  <th>optimization_mode_LL</th>
+                  <th>optimization_mode_HL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cfg.io_definition.cvs.map((row, index) => (
+                  <tr key={row.name}>
+                    <th>{row.name}</th>
+                    {(
+                      ["optimization_mode_LL", "optimization_mode_HL"] as const
+                    ).map((key) => (
+                      <td key={key}>
+                        <NumberInput
+                          optional
+                          disabled={locked}
+                          aria-label={`${row.name} ${key}`}
+                          value={row[key]}
+                          onChange={(value) => update(index, key, value)}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </>
   );
 }

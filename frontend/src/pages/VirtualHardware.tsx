@@ -7,7 +7,15 @@ import { Badge, Button, Field, Notice, NumberInput } from "../components/ui";
 import { Plot } from "../components/Plot";
 interface PlantSample {
   t_s: number;
-  sample: { y: number; u: number; target: number; hl: number; ll: number };
+  sample: {
+    y: number;
+    u: number;
+    target: number;
+    hl: number;
+    ll: number;
+    band_low: number;
+    band_high: number;
+  };
 }
 interface PlantSnapshot {
   endpoint: string;
@@ -33,8 +41,8 @@ export function VirtualHardware() {
   const [manual, setManual] = useState({
     u_write: 0,
     target: 0,
-    hl: 1,
-    ll: -1,
+    band_high: 0.5,
+    band_low: -0.5,
   });
   const apply = useMutation({
     mutationFn: () => request("/api/virtual-hardware", manual, "POST"),
@@ -47,12 +55,19 @@ export function VirtualHardware() {
     color: string,
   ): Data => ({
     x: rows.map((row) => row.t_s),
-    y: rows.map((row) => row.sample[key]),
+    y: rows.map((row) =>
+      key === "band_low" || key === "band_high"
+        ? row.sample.target + row.sample[key]
+        : row.sample[key],
+    ),
     name: title,
     uid: key,
     type: "scatter",
     mode: "lines",
-    line: { color },
+    line: {
+      color,
+      dash: key === "band_low" || key === "band_high" ? "dot" : "solid",
+    },
   });
   return (
     <div className="plant-workspace">
@@ -121,13 +136,13 @@ export function VirtualHardware() {
             </div>
             <div className="chart-grid">
               <Plot
-                title="CV · process, target and displayed boundaries"
+                title="CV · process, setpoint and target band"
                 revision="plant-cv"
                 data={[
                   trace("y", "y1_value", "#2c8a7a"),
                   trace("target", "y1_target", "#527ad4"),
-                  trace("hl", "y1_HL", "#aa6458"),
-                  trace("ll", "y1_LL", "#b17a34"),
+                  trace("band_high", "Band high", "#b17a34"),
+                  trace("band_low", "Band low", "#b17a34"),
                 ]}
               />
               <Plot
@@ -139,33 +154,36 @@ export function VirtualHardware() {
             <section className="panel">
               <h2>Manual plant inputs</h2>
               <p className="muted">
-                Applying queues these values in the test plant. An active
-                controller can subsequently replace the MV write.
+                Band offsets are relative to y1_target. Applying queues these
+                values in the test plant. An active controller can subsequently
+                replace the MV write.
               </p>
               <div className="form-grid">
-                {(["u_write", "target", "hl", "ll"] as const).map((key) => (
-                  <Field
-                    key={key}
-                    label={
-                      {
-                        u_write: "u1_write",
-                        target: "y1_target",
-                        hl: "y1_HL",
-                        ll: "y1_LL",
-                      }[key]
-                    }
-                  >
-                    <NumberInput
-                      value={manual[key]}
-                      onChange={(value) =>
-                        setManual((previous) => ({
-                          ...previous,
-                          [key]: value ?? 0,
-                        }))
+                {(["u_write", "target", "band_high", "band_low"] as const).map(
+                  (key) => (
+                    <Field
+                      key={key}
+                      label={
+                        {
+                          u_write: "u1_write",
+                          target: "y1_target",
+                          band_high: "Band high offset",
+                          band_low: "Band low offset",
+                        }[key]
                       }
-                    />
-                  </Field>
-                ))}
+                    >
+                      <NumberInput
+                        value={manual[key]}
+                        onChange={(value) =>
+                          setManual((previous) => ({
+                            ...previous,
+                            [key]: value ?? 0,
+                          }))
+                        }
+                      />
+                    </Field>
+                  ),
+                )}
               </div>
               <Button disabled={apply.isPending} onClick={() => apply.mutate()}>
                 Apply manual values

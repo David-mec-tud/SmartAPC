@@ -32,6 +32,9 @@ const Y_VALUE: &str = "y1_value";
 const Y_TARGET: &str = "y1_target";
 const Y_HL: &str = "y1_HL";
 const Y_LL: &str = "y1_LL";
+// Explicit offsets coexist with the legacy absolute display nodes without aliasing semantics.
+const Y_BAND_LOW: &str = "y1_band_low";
+const Y_BAND_HIGH: &str = "y1_band_high";
 const U_WRITE: &str = "u1_write";
 const U_READ: &str = "u1_read";
 const WD_COUNTER: &str = "wd_counter_read";
@@ -62,6 +65,8 @@ struct Sample {
     target: f64,
     hl: f64,
     ll: f64,
+    band_low: f64,
+    band_high: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -96,6 +101,8 @@ struct PendingManualWrites {
     target: Option<f64>,
     hl: Option<f64>,
     ll: Option<f64>,
+    band_low: Option<f64>,
+    band_high: Option<f64>,
 }
 
 /// Run the OPC UA test plant without a native window or a browser connection.
@@ -137,8 +144,14 @@ struct ManualValues {
     external_controller_enable: Option<bool>,
     u_write: f64,
     target: f64,
-    hl: f64,
-    ll: f64,
+    #[serde(default)]
+    hl: Option<f64>,
+    #[serde(default)]
+    ll: Option<f64>,
+    #[serde(default)]
+    band_low: Option<f64>,
+    #[serde(default)]
+    band_high: Option<f64>,
 }
 
 async fn plant_snapshot(State(state): State<PlantState>) -> Json<serde_json::Value> {
@@ -151,7 +164,16 @@ async fn plant_snapshot(State(state): State<PlantState>) -> Json<serde_json::Val
         .map(|(_, row)| *row)
         .collect::<Vec<_>>();
     let nodes = [
-        Y_VALUE, Y_TARGET, Y_HL, Y_LL, U_WRITE, U_READ, WD_COUNTER, WD_MIRROR,
+        Y_VALUE,
+        Y_TARGET,
+        Y_BAND_LOW,
+        Y_BAND_HIGH,
+        Y_HL,
+        Y_LL,
+        U_WRITE,
+        U_READ,
+        WD_COUNTER,
+        WD_MIRROR,
     ]
     .map(|node| format!("ns={};s={node}", state.namespace));
     let address_space = state.node_manager.address_space().read();
@@ -191,13 +213,27 @@ async fn plant_manual(
     State(state): State<PlantState>,
     Json(values): Json<ManualValues>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    if ![values.u_write, values.target, values.hl, values.ll]
-        .iter()
-        .all(|value| value.is_finite())
+    if ![
+        Some(values.u_write),
+        Some(values.target),
+        values.hl,
+        values.ll,
+        values.band_low,
+        values.band_high,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|value| value.is_finite())
     {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "manual values must be finite numbers"})),
+        ));
+    }
+    if matches!((values.band_low, values.band_high), (Some(low), Some(high)) if low > high) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "band low must not exceed band high"})),
         ));
     }
     // One atomic queue update; the existing plant loop writes all requested nodes
@@ -206,8 +242,10 @@ async fn plant_manual(
         external_controller_enable: values.external_controller_enable,
         u_write: Some(values.u_write),
         target: Some(values.target),
-        hl: Some(values.hl),
-        ll: Some(values.ll),
+        hl: values.hl,
+        ll: values.ll,
+        band_low: values.band_low,
+        band_high: values.band_high,
     };
     Ok(Json(serde_json::json!({"queued": true})))
 }
@@ -301,6 +339,8 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
                 rw_f64_var(&y_target_id, Y_TARGET, 0.0),
                 rw_f64_var(&y_hl_id, Y_HL, 1.0),
                 rw_f64_var(&y_ll_id, Y_LL, -1.0),
+                rw_f64_var(&NodeId::new(ns, Y_BAND_LOW), Y_BAND_LOW, -0.5),
+                rw_f64_var(&NodeId::new(ns, Y_BAND_HIGH), Y_BAND_HIGH, 0.5),
                 rw_f64_var(&u_write_id, U_WRITE, 0.0),
                 ro_f64_var(&u_read_id, U_READ, 0.0),
                 ro_f64_var(&wd_counter_id, WD_COUNTER, 0.0),
@@ -355,6 +395,8 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
             target: 0.0,
             hl: 1.0,
             ll: -1.0,
+            band_low: -0.5,
+            band_high: 0.5,
         };
         let mut wd_counter = 0.0f64;
         let mut tick = tokio::time::interval(Duration::from_millis(config.dt_ms));
@@ -409,6 +451,26 @@ async fn run_with_feedback(config: VirtualHardwareConfig, feedback: Feedback) ->
                 );
             }
 
+            for (node, value) in [
+                (Y_BAND_LOW, pending.band_low),
+                (Y_BAND_HIGH, pending.band_high),
+            ] {
+                if let Some(value) = value {
+                    let _ = sim_node_manager.set_value(
+                        subscriptions.as_ref(),
+                        &NodeId::new(ns, node),
+                        None,
+                        DataValue::new_now(value),
+                    );
+                }
+            }
+            {
+                let address_space = sim_node_manager.address_space().read();
+                state.band_low = read_node_f64(&address_space, &NodeId::new(ns, Y_BAND_LOW))
+                    .unwrap_or(state.band_low);
+                state.band_high = read_node_f64(&address_space, &NodeId::new(ns, Y_BAND_HIGH))
+                    .unwrap_or(state.band_high);
+            }
             let external = read_external_inputs_from_nodes(
                 &sim_node_manager,
                 &y_target_id,
@@ -660,8 +722,8 @@ impl PlotWindowApp {
             pending_manual_writes,
             u_write_input: "0.0".to_string(),
             target_input: "0.0".to_string(),
-            hl_input: "1.0".to_string(),
-            ll_input: "-1.0".to_string(),
+            hl_input: "0.5".to_string(),
+            ll_input: "-0.5".to_string(),
             feedback: None,
         }
     }
@@ -681,14 +743,14 @@ impl PlotWindowApp {
                 return;
             }
         };
-        let hl = match parse_manual_input(&self.hl_input, Y_HL) {
+        let hl = match parse_manual_input(&self.hl_input, Y_BAND_HIGH) {
             Ok(value) => value,
             Err(error) => {
                 self.feedback = Some((true, error));
                 return;
             }
         };
-        let ll = match parse_manual_input(&self.ll_input, Y_LL) {
+        let ll = match parse_manual_input(&self.ll_input, Y_BAND_LOW) {
             Ok(value) => value,
             Err(error) => {
                 self.feedback = Some((true, error));
@@ -700,8 +762,9 @@ impl PlotWindowApp {
             external_controller_enable: None,
             u_write: Some(u_write),
             target: Some(target),
-            hl: Some(hl),
-            ll: Some(ll),
+            band_high: Some(hl),
+            band_low: Some(ll),
+            ..PendingManualWrites::default()
         };
         self.feedback = Some((
             false,
@@ -740,21 +803,29 @@ impl eframe::App for PlotWindowApp {
             target: 0.0,
             hl: 1.0,
             ll: -1.0,
+            band_low: -0.5,
+            band_high: 0.5,
         });
 
         let y_points: PlotPoints<'_> = visible.iter().map(|s| [s.t_s, s.sample.y]).collect();
         let target_points: PlotPoints<'_> =
             visible.iter().map(|s| [s.t_s, s.sample.target]).collect();
-        let hl_points: PlotPoints<'_> = visible.iter().map(|s| [s.t_s, s.sample.hl]).collect();
-        let ll_points: PlotPoints<'_> = visible.iter().map(|s| [s.t_s, s.sample.ll]).collect();
+        let hl_points: PlotPoints<'_> = visible
+            .iter()
+            .map(|s| [s.t_s, s.sample.target + s.sample.band_high])
+            .collect();
+        let ll_points: PlotPoints<'_> = visible
+            .iter()
+            .map(|s| [s.t_s, s.sample.target + s.sample.band_low])
+            .collect();
         let u_points: PlotPoints<'_> = visible.iter().map(|s| [s.t_s, s.sample.u]).collect();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("SmartAPC Virtual Hardware PT1");
             ui.label(format!("Endpoint: {}", self.endpoint));
             ui.label(format!(
-                "Current values | y1_value={:.4}  u1={:.4}  y1_target={:.4}  y1_HL={:.4}  y1_LL={:.4}",
-                current.y, current.u, current.target, current.hl, current.ll
+                "Current values | y1_value={:.4}  u1={:.4}  y1_target={:.4}  band_high={:.4}  band_low={:.4}",
+                current.y, current.u, current.target, current.band_high, current.band_low
             ));
             ui.separator();
             ui.label("Manual setpoints (text input):");
@@ -765,9 +836,9 @@ impl eframe::App for PlotWindowApp {
                 ui.text_edit_singleline(&mut self.target_input);
             });
             ui.horizontal(|ui| {
-                ui.label(format!("{Y_HL}:"));
+                ui.label(format!("{Y_BAND_HIGH}:"));
                 ui.text_edit_singleline(&mut self.hl_input);
-                ui.label(format!("{Y_LL}:"));
+                ui.label(format!("{Y_BAND_LOW}:"));
                 ui.text_edit_singleline(&mut self.ll_input);
             });
             if ui.button("Apply Manual Values").clicked() {
@@ -801,10 +872,10 @@ impl eframe::App for PlotWindowApp {
                             .color(egui::Color32::from_rgb(255, 200, 0)),
                     );
                     plot_ui.line(
-                        Line::new("y1_HL", hl_points).color(egui::Color32::from_rgb(220, 90, 90)),
+                        Line::new("Band high", hl_points).color(egui::Color32::from_rgb(220, 90, 90)),
                     );
                     plot_ui.line(
-                        Line::new("y1_LL", ll_points).color(egui::Color32::from_rgb(220, 90, 90)),
+                        Line::new("Band low", ll_points).color(egui::Color32::from_rgb(220, 90, 90)),
                     );
                 });
 
@@ -902,6 +973,8 @@ mod tests {
             target: Some(2.5),
             hl: Some(3.75),
             ll: Some(-0.5),
+            band_low: Some(-0.5),
+            band_high: Some(0.5),
         });
 
         let first = take_pending_manual_writes(&pending);
@@ -909,11 +982,15 @@ mod tests {
         assert_eq!(first.target, Some(2.5));
         assert_eq!(first.hl, Some(3.75));
         assert_eq!(first.ll, Some(-0.5));
+        assert_eq!(first.band_low, Some(-0.5));
+        assert_eq!(first.band_high, Some(0.5));
 
         let second = take_pending_manual_writes(&pending);
         assert_eq!(second.u_write, None);
         assert_eq!(second.target, None);
         assert_eq!(second.hl, None);
         assert_eq!(second.ll, None);
+        assert_eq!(second.band_low, None);
+        assert_eq!(second.band_high, None);
     }
 }

@@ -903,6 +903,56 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn clean_demo_tracks_band_with_valid_suggestions_and_converged_observer() {
+        let temp = tempdir().unwrap();
+        let mut cfg =
+            crate::project_config::from_toml_str(include_str!("../examples/demo_project.toml"))
+                .unwrap();
+        let mut tuned: Vec<_> = cfg
+            .optimization
+            .parameters
+            .iter()
+            .filter(|row| !row.fixed)
+            .map(|row| row.key.as_str())
+            .collect();
+        tuned.sort();
+        assert_eq!(tuned, vec!["mpc.cv.y1.q", "mpc.mv.u1.r"]);
+        for row in &cfg.optimization.parameters {
+            if row.key.starts_with("mpc.kalman.") {
+                assert!(row.fixed && row.min > 0.0);
+            }
+        }
+        cfg.sync_active_online_params();
+        let (io, limits) = cfg.build_simulation_io_and_limits().unwrap();
+        let logic = build_logic(&cfg, &io, temp.path()).unwrap();
+        let storage = SqliteStorage::new(temp.path().join("demo.sqlite")).unwrap();
+        let log = File::create(temp.path().join("demo.jsonl")).unwrap();
+        let mut core = SimulationCore::new(cfg, io, limits, logic, storage, log).unwrap();
+        let mut previous_mv = 0.0;
+        for cycle in 0..120 {
+            core.tick_once(None).unwrap();
+            let mv = core.applied_mv["u1"];
+            let cv = core.current_cv["y1"];
+            assert!(mv.is_finite() && cv.is_finite());
+            assert!((-100.0..=100.0).contains(&mv));
+            assert!(
+                (mv - previous_mv).abs() <= 1.001,
+                "move exceeded limit at {cycle}: {mv} from {previous_mv}"
+            );
+            assert!(core.logic.suggestion_succeeded(), "MPC fallback at {cycle}");
+            if cycle >= 90 {
+                assert!(
+                    (9.49..=10.51).contains(&cv),
+                    "CV outside band at {cycle}: {cv}"
+                );
+            }
+            previous_mv = mv;
+        }
+        assert!(core.logic.observer_converged());
+        assert_eq!(core.simulation_time_s, 120.0);
+    }
+
+    #[test]
     fn wall_cycle_duration_scales_expected_direction() {
         let realtime = wall_cycle_duration(SimulationSpeedMode::RealTime, 1_000).unwrap();
         let faster = wall_cycle_duration(SimulationSpeedMode::X10, 1_000).unwrap();

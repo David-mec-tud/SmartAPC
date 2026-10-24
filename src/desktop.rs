@@ -1320,7 +1320,8 @@ impl OnlineOptimizationEditorState {
             .filter_map(|(key, value)| {
                 (matches!(value, LogicParamValue::F64(_))
                     && !(key.starts_with("io.cv.")
-                        && (key.ends_with(".ll") || key.ends_with(".hl"))))
+                        && (key.ends_with(".optimization_mode_LL")
+                            || key.ends_with(".optimization_mode_HL"))))
                 .then_some(key.clone())
                 .filter(|key| !selected.contains(key.as_str()))
             })
@@ -3693,23 +3694,23 @@ impl DesktopApp {
                             Some(format!("CV '{name}' is missing from the I/O definition"));
                         return Task::none();
                     };
-                    let live_low =
-                        self.logic_params
-                            .get(&format!("io.cv.{name}.ll"))
-                            .and_then(|value| match value {
-                                LogicParamValue::F64(value) => Some(*value),
-                                LogicParamValue::Bool(_) => None,
-                            });
-                    let live_high =
-                        self.logic_params
-                            .get(&format!("io.cv.{name}.hl"))
-                            .and_then(|value| match value {
-                                LogicParamValue::F64(value) => Some(*value),
-                                LogicParamValue::Bool(_) => None,
-                            });
-                    let low_value = live_low
-                        .map(|value| Ok(Some(value)))
-                        .unwrap_or_else(|| parse_optional_f64("predefined CV LL", &io_row.ll));
+                    let live_low = self
+                        .logic_params
+                        .get(&format!("io.cv.{name}.optimization_mode_LL"))
+                        .and_then(|value| match value {
+                            LogicParamValue::F64(value) => Some(*value),
+                            LogicParamValue::Bool(_) => None,
+                        });
+                    let live_high = self
+                        .logic_params
+                        .get(&format!("io.cv.{name}.optimization_mode_HL"))
+                        .and_then(|value| match value {
+                            LogicParamValue::F64(value) => Some(*value),
+                            LogicParamValue::Bool(_) => None,
+                        });
+                    let low_value = live_low.map(|value| Ok(Some(value))).unwrap_or_else(|| {
+                        parse_optional_f64("predefined CV optimization_mode_LL", &io_row.ll)
+                    });
                     let low = match low_value {
                         Ok(Some(value)) => value,
                         _ => {
@@ -3719,9 +3720,9 @@ impl DesktopApp {
                             return Task::none();
                         }
                     };
-                    let high_value = live_high
-                        .map(|value| Ok(Some(value)))
-                        .unwrap_or_else(|| parse_optional_f64("predefined CV HL", &io_row.hl));
+                    let high_value = live_high.map(|value| Ok(Some(value))).unwrap_or_else(|| {
+                        parse_optional_f64("predefined CV optimization_mode_HL", &io_row.hl)
+                    });
                     let high = match high_value {
                         Ok(Some(value)) if value > low => value,
                         _ => {
@@ -5876,7 +5877,7 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("CV: configure SETPOINT, PROCESS VALUE, DEADBAND, CV Band Low/High, and Enable. CV LL/HL are absolute safety limits for online optimization only. Online optimization limits must stay inside these boundaries.")
+                text("CV: configure SETPOINT, PROCESS VALUE, DEADBAND, CV Band Low/High, and Enable. optimization_mode_LL/HL are absolute safety boundaries for online optimization only. Online optimization limits must stay inside these boundaries.")
                     .size(13),
             );
             content = content.push(
@@ -5901,7 +5902,7 @@ impl DesktopApp {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("CV LL (Safety Limit Low)").width(Length::FillPortion(2)),
+                            text("optimization_mode_LL").width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(3)),
                             text_input("online optimization only", &row_data.ll)
                                 .on_input(move |value| Message::CvLlChanged(index, value))
@@ -5912,7 +5913,7 @@ impl DesktopApp {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("CV HL (Safety Limit High)").width(Length::FillPortion(2)),
+                            text("optimization_mode_HL").width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(3)),
                             text_input("online optimization only", &row_data.hl)
                                 .on_input(move |value| Message::CvHlChanged(index, value))
@@ -5934,22 +5935,30 @@ impl DesktopApp {
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
-                        row![
-                            text("Deadband").width(Length::FillPortion(2)),
-                            text_input("Node ID", &row_data.deadband_opc)
-                                .on_input(move |value| Message::CvDeadbandOpcChanged(index, value))
-                                .width(Length::FillPortion(3)),
-                            text_input("init", &row_data.deadband_value)
-                                .on_input(move |value| Message::CvDeadbandValueChanged(
-                                    index, value
-                                ))
-                                .width(Length::FillPortion(2)),
-                            text_input("read", &row_data.read_deadband)
-                                .width(Length::FillPortion(2)),
-                            text_input("write", "").width(Length::FillPortion(2)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
+                        if self.logic_editor.selected_kind != LogicKindChoice::LinearMpc {
+                            Element::from(
+                                row![
+                                    text("Deadband").width(Length::FillPortion(2)),
+                                    text_input("Node ID", &row_data.deadband_opc)
+                                        .on_input(move |value| Message::CvDeadbandOpcChanged(
+                                            index, value
+                                        ))
+                                        .width(Length::FillPortion(3)),
+                                    text_input("init", &row_data.deadband_value)
+                                        .on_input(move |value| Message::CvDeadbandValueChanged(
+                                            index, value
+                                        ))
+                                        .width(Length::FillPortion(2)),
+                                    text_input("read", &row_data.read_deadband)
+                                        .width(Length::FillPortion(2)),
+                                    text_input("write", "").width(Length::FillPortion(2)),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::Alignment::Center),
+                            )
+                        } else {
+                            Element::from(Space::new())
+                        },
                         row![
                             text("CV Band Low").width(Length::FillPortion(2)),
                             text_input("Node ID (optional)", &row_data.band_low_opc)
@@ -8587,13 +8596,19 @@ fn build_io_definition(
 
         let setpoint = row.setpoint.trim().to_string();
         let process_value = row.process_value.trim().to_string();
-        let hl = parse_optional_f64(&format!("CV '{}' HL", name), &row.hl)?;
-        let ll = parse_optional_f64(&format!("CV '{}' LL", name), &row.ll)?;
+        let hl = parse_optional_f64(&format!("CV '{}' optimization_mode_HL", name), &row.hl)?;
+        let ll = parse_optional_f64(&format!("CV '{}' optimization_mode_LL", name), &row.ll)?;
         if matches!((ll, hl), (Some(_), None) | (None, Some(_))) {
-            return Err(format!("CV '{}' requires both LL and HL", name));
+            return Err(format!(
+                "CV '{}' requires both optimization_mode_LL and optimization_mode_HL",
+                name
+            ));
         }
         if matches!((ll, hl), (Some(ll), Some(hl)) if ll >= hl) {
-            return Err(format!("CV '{}' requires LL smaller than HL", name));
+            return Err(format!(
+                "CV '{}' requires optimization_mode_LL smaller than optimization_mode_HL",
+                name
+            ));
         }
 
         let deadband_value = if row.deadband_value.trim().is_empty() {
@@ -9837,11 +9852,11 @@ mod tests {
             Some(&LogicParamValue::F64(0.5))
         );
         assert_eq!(
-            cfg.logic.params.get("io.cv.y1.hl"),
+            cfg.logic.params.get("io.cv.y1.optimization_mode_HL"),
             Some(&LogicParamValue::F64(100.0))
         );
         assert_eq!(
-            cfg.logic.params.get("io.cv.y1.ll"),
+            cfg.logic.params.get("io.cv.y1.optimization_mode_LL"),
             Some(&LogicParamValue::F64(-100.0))
         );
     }

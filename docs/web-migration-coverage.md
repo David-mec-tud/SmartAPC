@@ -34,7 +34,7 @@ Browser journeys use real Axum/Rust services and disposable projects. `workspace
 | Offline optimization/progress/curves/apply/cancel | Existing optimization algorithm, cancellable persisted jobs, revision-checked apply | Range/objective/scenario editors, expandable progress/curves, apply/download | `tuning` actual optimization curves and saved best values; `parity` cancellation/unlock/no partial apply; Rust scoring and fixed-value tests |
 | Online optimization/objectives/safety/restore/edit locks | `online_optimization`, `RuntimeManager`, scoped objective/command APIs | Numeric/CV/MV selection, safety bounds, window/search, start/stop/save best | `tuning` manual stop restores originals and unlocks; `parity` rejects wider limits, saves tightened objectives, normal completion applies/persists best; Rust safety/execution/manual restoration before next calculation |
 | Runtime lifecycle/metrics/health/active parameters | `RuntimeManager`, execution ID and expected-value guards, SSE/polling | Shared execution bar, parameters and diagnostics | `hardware` real runtime cycles/outputs/watchdog; `workspace` browser-independent simulation; `parity` concurrent value conflict retains draft; Rust previous-run/project/type/optimization locks and fault transitions |
-| Plotly live/history/custom/order/windows/futures | Bounded SQLite window, persisted `PlotConfig`, local Plotly asset | MV/CV/DV groups, order controls, multi-trace builder, windows/forecasts | `workspace` zoom retained after live updates; `parity` custom plot/window persistence; light/dark visual audit; Rust extrema/boolean/latest sampling test; TS forecast timestamp/step/anchor tests |
+| Plotly live/history/custom/order/windows/futures | Bounded SQLite window, persisted `PlotConfig`, local Plotly asset | Mixed dashboard, fixed grid pages, add/edit/reorder controls, searchable multi-trace builder, windows/forecasts | `workspace` zoom retained after live updates; `parity` custom plot/window persistence; light/dark visual audit; Rust extrema/boolean/latest sampling test; TS forecast timestamp/step/anchor tests |
 | JSONL events/custom logs/diagnostics | Bounded JSONL tail and structured runtime/simulation logging | Log source/search/details; diagnostic snapshots | `workspace` custom history and user log through real custom simulation and log search; Rust structured logging/optimization/restoration tests; timed simulation buffer flush |
 | Deployment readiness/local run/Windows commands | Saved readiness, `deployment`, config download | Remaining startup steps with resolve links, shadow-mode start, live verification, optional handshake and engineering, terminal/Windows commands | `deployment` missing requirements/refresh, draft and execution gates, blank status addresses and shadow startup; `workspace` optional model/tuning; `hardware` OPC UA start/status verification; `parity` command copy/download; Rust command generation tests |
 | Init-project/headless plant/browser feedback | CLI/shared PT1 plant; standalone `/api/virtual-hardware` | Local Plotly plant charts/manual values/node addresses | `hardware` manual apply and continued plant execution after tab close; in-app light/dark inspection; final package init-project and `--no-web` listener smoke |
@@ -180,3 +180,28 @@ Validation: `cargo fmt`, default/native `cargo check --offline` and `cargo test
 passed with Node 24. All 18 browser journeys passed, including both handshake
 journeys against real OPC UA. The separate package-only production test is skipped
 in this development suite; serving and packaging were unchanged by this task.
+
+## Dashboard and MPC baseline follow-up (2026-10-24)
+
+- `dashboard.spec.ts`: mixed-panel migration, layout capacity and pagination,
+  add/edit/reorder/remove/save/reload, grouped case-insensitive parameter search,
+  numeric draft retention, Boolean apply, and project isolation.
+- `charts.test.ts`: more than six distinct signals, stable extended color allocation,
+  shared dotted boundary pairs, old safety history, and forecast alignment.
+- Rust configuration/CSV tests cover canonical CV optimization safety names,
+  legacy aliases and precedence, explicit empty dashboards, stable IDs and round trips.
+- `clean_demo_tracks_band_with_valid_suggestions_and_converged_observer` runs the
+  tracked demo for 120 simulated seconds, checking finite successful suggestions,
+  MV and movement bounds, observer convergence and sustained target-band tracking.
+- The OPC UA hardware journey exercises external band offsets, changed setpoints,
+  shadow readiness, explicit enable, and actual plant tracking on disposable ports.
+
+Validation for this follow-up: `cargo fmt`, `cargo check`, and all 125 standard
+Rust tests pass; native compatibility check and all 139 native-feature tests pass.
+Frontend typecheck, production build, and all 10 unit tests pass on Node 24.
+The complete isolated browser suite passes 30 workflows; its separately enabled
+portable-package asset test passes as well. The final package also passes dashboard
+and parameter journeys from a launch directory outside the repository. Desktop and
+820 px tablet layouts, both themes, effective band traces, and automatic parameter
+search expansion were visually inspected in Chrome. All test executions use
+separate temporary project roots; the local demo's previous logs remain untouched.

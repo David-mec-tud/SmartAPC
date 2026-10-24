@@ -1,80 +1,247 @@
-name = "rd_needs_demo"
+# Clean MPC baseline for `smartapc virtual-hardware` (tau=5 s, gain=1).
+# Copy this file to projects/demo/project.toml, then serve that project root.
+# Runtime starts in shadow mode. Set the plant target to 10 before enabling writes.
+name = "demo"
 
 [communication]
 protocol = "opc_ua"
 endpoint_url = "opc.tcp://127.0.0.1:4855/"
-io_cycle_ms = 1000
+cycle_ms = 500
 
 [watchdog]
 kind = "counter_mirror"
-read_node = "ns=2;s=WD.Counter"
-write_node = "ns=2;s=WD.Mirror"
-mirror_cycle_ms = 1000
-stale_timeout_ms = 3000
+read_node = "ns=2;s=wd_counter_read"
+write_node = "ns=2;s=wd_counter_mirror"
+stale_timeout_ms = 5000
 
+[variables]
+mvs = ["u1"]
+cvs = ["y1"]
+dvs = []
+
+[[io_definition.mvs]]
+name = "u1"
+mv_write = "ns=2;s=u1_write"
+mv_read = "ns=2;s=u1_read"
+ll = -100.0
+hl = 100.0
+
+[[io_definition.cvs]]
+name = "y1"
+setpoint = "ns=2;s=y1_target"
+process_value = "ns=2;s=y1_value"
+# Controller target offsets; leave Node IDs blank for locally editable bands.
+band_low_value = -0.5
+band_high_value = 0.5
+# Absolute online optimization stop boundaries, independent of the target band.
+optimization_mode_LL = -20.0
+optimization_mode_HL = 20.0
+
+[io]
+cycle_ms = 500
 [[io.inputs]]
-name = "pv"
+name = "mv.u1.read"
 signal_type = "f64"
-address = "ns=2;s=PV"
-opc_tag = "PLC.PV"
-
+address = "ns=2;s=u1_read"
 [[io.inputs]]
-name = "pump_on_feedback"
-signal_type = "bool"
-address = "ns=2;s=PumpOn"
-opc_tag = "PLC.PumpOn"
-
-[[io.outputs]]
-name = "mv"
+name = "cv.y1.setpoint"
 signal_type = "f64"
-address = "ns=2;s=MV"
-opc_tag = "PLC.MV"
-
+address = "ns=2;s=y1_target"
+[[io.inputs]]
+name = "cv.y1.process_value"
+signal_type = "f64"
+address = "ns=2;s=y1_value"
 [[io.outputs]]
-name = "pump_on_cmd"
-signal_type = "bool"
-address = "ns=2;s=PumpCmd"
-opc_tag = "PLC.PumpCmd"
+name = "mv.u1.write"
+signal_type = "f64"
+address = "ns=2;s=u1_write"
 
-[limits.values.mv]
-min = 0.0
+[limits.values."mv.u1.write"]
+min = -100.0
 max = 100.0
-opc_tag = "PLC.MV.Limits"
-
-[limits.values.pump_on_cmd]
-min = 0.0
-max = 1.0
 
 [logic]
-kind = "mapping"
-mapping_rules = [
-  { input = "pv", output = "mv", gain = 1.0, offset = 0.0, invert_bool = false },
-  { input = "pump_on_feedback", output = "pump_on_cmd", gain = 1.0, offset = 0.0, invert_bool = false },
-]
-
+kind = "linear_mpc"
+cycle_ms = 1000
 [logic.params]
-"mv.gain" = 1.25
-"mv.offset" = 2.0
+"mpc.prediction_horizon" = 20.0
+"mpc.control_horizon" = 5.0
+"mpc.cv.y1.q" = 1.0
+"mpc.cv.y1.band_low" = -0.5
+"mpc.cv.y1.band_high" = 0.5
+"mpc.mv.u1.r" = 0.1
+"mpc.mv.u1.max_delta_u" = 1.0
+"mpc.mv.u1.use_l1" = false
+"mpc.kalman.initial_p" = 1.0
+"mpc.kalman.state.1.q" = 0.0001
+"mpc.kalman.cv.y1.r" = 0.01
+"mpc.kalman.cv.y1.bias_q" = 0.001
 
-[logic.initial_values]
-mv = { kind = "f64", value = 0.0 }
-pump_on_cmd = { kind = "bool", value = false }
-
+# Continuous model: x_dot = -0.2*x + 0.2*u, y=x.
 [model]
-kind = "noop"
+kind = "linear_state_space"
+state_count = 1
+u_order = ["u1"]
+y_order = ["y1"]
+a = [[-0.2]]
+b = [[0.2]]
+c = [[1.0]]
+d = [[0.0]]
 
-[model.config]
-note = "placeholder for future model settings"
+[simulation]
+speed = "real_time"
+a_scale_pct = [[100.0]]
+b_scale_pct = [[100.0]]
+[simulation.cv_setpoints]
+y1 = 10.0
+[simulation.cv_initials]
+y1 = 0.0
+[simulation.mv_initials]
+u1 = 0.0
+[simulation.cv_noise_std]
+y1 = 0.0
+[simulation.mv_noise_std]
+u1 = 0.0
+[simulation.cv_offsets]
+y1 = 0.0
+
+# Tune only meaningful positive cost weights; horizons/observer/bands remain fixed.
+[optimization]
+a_scale_min_pct = 100.0
+a_scale_max_pct = 100.0
+b_scale_min_pct = 100.0
+b_scale_max_pct = 100.0
+scenario_count = 1
+max_iterations = 20
+initial_samples = 4
+convergence_patience = 6
+plot_interval = 1
+simulation_duration_s = 120.0
+[[optimization.parameters]]
+key = "mpc.cv.y1.q"
+start = 1.0
+min = 0.1
+max = 10.0
+[[optimization.parameters]]
+key = "mpc.mv.u1.r"
+start = 0.1
+min = 0.01
+max = 1.0
+
+# Normalization lists every numeric controller parameter; explicitly fix all others.
+[[optimization.parameters]]
+key = "mpc.prediction_horizon"
+fixed = true
+start = 20.0
+min = 20.0
+max = 20.0
+[[optimization.parameters]]
+key = "mpc.control_horizon"
+fixed = true
+start = 5.0
+min = 5.0
+max = 5.0
+[[optimization.parameters]]
+key = "mpc.cv.y1.band_low"
+fixed = true
+start = -0.5
+min = -0.5
+max = -0.5
+[[optimization.parameters]]
+key = "mpc.cv.y1.band_high"
+fixed = true
+start = 0.5
+min = 0.5
+max = 0.5
+[[optimization.parameters]]
+key = "mpc.mv.u1.max_delta_u"
+fixed = true
+start = 1.0
+min = 1.0
+max = 1.0
+[[optimization.parameters]]
+key = "mpc.kalman.initial_p"
+fixed = true
+start = 1.0
+min = 1.0
+max = 1.0
+[[optimization.parameters]]
+key = "mpc.kalman.state.1.q"
+fixed = true
+start = 0.0001
+min = 0.0001
+max = 0.0001
+[[optimization.parameters]]
+key = "mpc.kalman.cv.y1.r"
+fixed = true
+start = 0.01
+min = 0.01
+max = 0.01
+[[optimization.parameters]]
+key = "mpc.kalman.cv.y1.bias_q"
+fixed = true
+start = 0.001
+min = 0.001
+max = 0.001
+[optimization.cv_target_steps]
+y1 = 10.0
+[optimization.cv_weights]
+y1 = 1.0
+[optimization.cv_noise_std]
+y1 = 0.0
+[optimization.mv_noise_std]
+u1 = 0.0
+[optimization.metric_weights]
+iae = 1.0
+ise = 0.0
+itae = 0.0
+overshoot = 0.0
+actuator = 0.01
+
+[online_optimization]
+duration_s = 60
+max_iterations = 8
+initial_samples = 4
+convergence_patience = 4
+[[online_optimization.parameters]]
+key = "mpc.cv.y1.q"
+min = 0.5
+max = 2.0
+[[online_optimization.parameters]]
+key = "mpc.mv.u1.r"
+min = 0.05
+max = 0.5
+[[online_optimization.cvs]]
+name = "y1"
+weight = 1.0
+low = -20.0
+high = 20.0
 
 [runtime]
-cycle_ms = 1000
 execution_time_test = true
-
 [alarms]
 alarm_timeout_ms = 5000
 off_timeout_ms = 10000
-
 [deployment]
-service_name = "smartapc_rd_needs_demo"
-display_name = "SmartAPC RD Needs Demo"
-description = "SmartAPC controller runtime"
+service_name = "smartapc_demo"
+display_name = "SmartAPC demo"
+description = "Clean MPC baseline against the default local virtual plant"
+
+[plots]
+window_sec = 180
+future_window_sec = 20
+mv_order = ["u1"]
+cv_order = ["y1"]
+[plots.dashboard]
+columns = 2
+rows = 2
+[[plots.dashboard.panels]]
+id = "cv-y1"
+kind = "cv"
+name = "y1"
+title = "y1"
+[[plots.dashboard.panels]]
+id = "mv-u1"
+kind = "mv"
+name = "u1"
+title = "u1"

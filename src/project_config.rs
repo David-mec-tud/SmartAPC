@@ -151,6 +151,56 @@ impl ProjectConfig {
             next_custom.push(CustomPlotConfig { title, traces });
         }
         self.plots.custom_plots = next_custom;
+        // An absent dashboard is a legacy project; an explicitly empty one stays empty.
+        if self.plots.dashboard.is_none()
+            && (self.variables.has_any() || !self.plots.custom_plots.is_empty())
+        {
+            let mut panels = Vec::new();
+            for (kind, names) in [
+                ("cv", &self.plots.cv_order),
+                ("mv", &self.plots.mv_order),
+                ("dv", &self.plots.dv_order),
+            ] {
+                for name in names {
+                    panels.push(DashboardPanel {
+                        id: format!("{kind}-{name}"),
+                        kind: kind.into(),
+                        name: name.clone(),
+                        title: name.clone(),
+                        traces: Vec::new(),
+                    });
+                }
+            }
+            for (index, plot) in self.plots.custom_plots.iter().enumerate() {
+                panels.push(DashboardPanel {
+                    id: format!("custom-{index}"),
+                    kind: "custom".into(),
+                    name: String::new(),
+                    title: plot.title.clone(),
+                    traces: plot.traces.clone(),
+                });
+            }
+            self.plots.dashboard = Some(DashboardConfig {
+                panels,
+                ..DashboardConfig::default()
+            });
+        }
+        if let Some(dashboard) = &mut self.plots.dashboard {
+            dashboard.columns = dashboard.columns.clamp(1, 6);
+            dashboard.rows = dashboard.rows.clamp(1, 10);
+            let mut ids = HashSet::new();
+            for (index, panel) in dashboard.panels.iter_mut().enumerate() {
+                if panel.id.trim().is_empty() || !ids.insert(panel.id.clone()) {
+                    panel.id = format!("panel-{index}-{}", uuid::Uuid::new_v4());
+                    ids.insert(panel.id.clone());
+                }
+                panel.title = panel.title.trim().to_string();
+                panel.traces = normalize_custom_traces(&panel.traces);
+                for trace in &mut panel.traces {
+                    trace.signal = canonical_cv_safety_key(&trace.signal);
+                }
+            }
+        }
     }
 
     pub fn normalize_model_config(&mut self) {
@@ -412,6 +462,7 @@ impl ProjectConfig {
     }
 
     pub fn sync_active_online_params(&mut self) {
+        self.migrate_cv_safety_params();
         let defaults = self.active_online_param_defaults();
         let mut next = HashMap::new();
 
@@ -489,12 +540,20 @@ impl ProjectConfig {
 
         for cv in &self.io_definition.cvs {
             if let Some(value) = cv.hl {
-                defaults.insert(format!("io.cv.{}.hl", cv.name), LogicParamValue::F64(value));
+                defaults.insert(
+                    format!("io.cv.{}.optimization_mode_HL", cv.name),
+                    LogicParamValue::F64(value),
+                );
             }
             if let Some(value) = cv.ll {
-                defaults.insert(format!("io.cv.{}.ll", cv.name), LogicParamValue::F64(value));
+                defaults.insert(
+                    format!("io.cv.{}.optimization_mode_LL", cv.name),
+                    LogicParamValue::F64(value),
+                );
             }
-            if cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
+            if self.logic.kind != LogicKind::LinearMpc
+                && cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty()
+            {
                 if let Some(value) = cv.deadband_value {
                     defaults.insert(
                         format!("io.cv.{}.deadband", cv.name),
@@ -507,6 +566,22 @@ impl ProjectConfig {
         defaults
     }
 
+    /// Promote saved scalar keys before filtering active parameters; canonical values win.
+    fn migrate_cv_safety_params(&mut self) {
+        let old = std::mem::take(&mut self.logic.params);
+        self.logic.params = old
+            .iter()
+            .filter(|(key, _)| canonical_cv_safety_key(key) == **key)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        for (key, value) in old {
+            self.logic
+                .params
+                .entry(canonical_cv_safety_key(&key))
+                .or_insert(value);
+        }
+    }
+
     pub fn predefined_cv_limits(&self) -> HashMap<String, NumericLimit> {
         self.io_definition
             .cvs
@@ -515,7 +590,7 @@ impl ProjectConfig {
                 let low = self
                     .logic
                     .params
-                    .get(&format!("io.cv.{}.ll", cv.name))
+                    .get(&format!("io.cv.{}.optimization_mode_LL", cv.name))
                     .and_then(|value| match value {
                         LogicParamValue::F64(value) => Some(*value),
                         LogicParamValue::Bool(_) => None,
@@ -524,7 +599,7 @@ impl ProjectConfig {
                 let high = self
                     .logic
                     .params
-                    .get(&format!("io.cv.{}.hl", cv.name))
+                    .get(&format!("io.cv.{}.optimization_mode_HL", cv.name))
                     .and_then(|value| match value {
                         LogicParamValue::F64(value) => Some(*value),
                         LogicParamValue::Bool(_) => None,
@@ -587,7 +662,9 @@ impl ProjectConfig {
         self.active_f64_online_param_defaults()
             .into_iter()
             .filter(|(key, _)| {
-                !(key.starts_with("io.cv.") && (key.ends_with(".ll") || key.ends_with(".hl")))
+                !(key.starts_with("io.cv.")
+                    && (key.ends_with(".optimization_mode_LL")
+                        || key.ends_with(".optimization_mode_HL")))
             })
             .collect()
     }
@@ -792,6 +869,11 @@ pub struct PlotConfig {
     pub dv_order: Vec<String>,
     #[serde(default)]
     pub custom_plots: Vec<CustomPlotConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardConfig>,
+    /// Canonical trace identity -> CSS color. Persist allocation across refreshes and additions.
+    #[serde(default)]
+    pub trace_colors: HashMap<String, String>,
 }
 
 impl Default for PlotConfig {
@@ -803,14 +885,54 @@ impl Default for PlotConfig {
             cv_order: Vec::new(),
             dv_order: Vec::new(),
             custom_plots: Vec::new(),
+            dashboard: None,
+            trace_colors: HashMap::new(),
         }
     }
 }
 
 impl PlotConfig {
     fn validate(&self) -> Result<()> {
+        if let Some(dashboard) = &self.dashboard {
+            if !(1..=6).contains(&dashboard.columns) || !(1..=10).contains(&dashboard.rows) {
+                bail!("dashboard requires 1–6 columns and 1–10 rows");
+            }
+            for panel in &dashboard.panels {
+                if !["mv", "cv", "dv", "custom"].contains(&panel.kind.as_str()) {
+                    bail!("unknown dashboard panel kind '{}'", panel.kind);
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// A fixed-size page grid. Panel order spans pages, so shrinking never drops a plot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    pub columns: u32,
+    pub rows: u32,
+    pub panels: Vec<DashboardPanel>,
+}
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            columns: 2,
+            rows: 2,
+            panels: Vec::new(),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardPanel {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    pub title: String,
+    #[serde(default)]
+    pub traces: Vec<CustomPlotTraceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1040,12 +1162,15 @@ impl IoDefinitionConfig {
             match (row.ll, row.hl) {
                 (Some(ll), Some(hl)) if ll >= hl => {
                     bail!(
-                        "CV '{}' requires a lower limit smaller than its upper limit",
+                        "CV '{}' optimization_mode_LL must be smaller than optimization_mode_HL",
                         row.name
                     );
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    bail!("CV '{}' requires both lower and upper limits", row.name);
+                    bail!(
+                        "CV '{}' requires both optimization_mode_LL and optimization_mode_HL",
+                        row.name
+                    );
                 }
                 _ => {}
             }
@@ -1368,15 +1493,16 @@ pub struct MvIoDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "CvIoDefinitionWire")]
 pub struct CvIoDefinition {
     pub name: String,
     #[serde(default)]
     pub setpoint: String,
     #[serde(default)]
     pub process_value: String,
-    #[serde(default)]
+    #[serde(default, rename = "optimization_mode_HL", alias = "hl")]
     pub hl: Option<f64>,
-    #[serde(default)]
+    #[serde(default, rename = "optimization_mode_LL", alias = "ll")]
     pub ll: Option<f64>,
     /// MPC target offsets from the live setpoint. A Node ID takes precedence over local tuning.
     #[serde(default)]
@@ -1393,6 +1519,58 @@ pub struct CvIoDefinition {
     pub deadband_value: Option<f64>,
     #[serde(default)]
     pub enable: Option<String>,
+}
+
+// Read compatibility is isolated here; serialization always uses explicit safety names.
+#[derive(Deserialize)]
+struct CvIoDefinitionWire {
+    name: String,
+    #[serde(default)]
+    setpoint: String,
+    #[serde(default)]
+    process_value: String,
+    #[serde(default)]
+    hl: Option<f64>,
+    #[serde(default, rename = "optimization_mode_HL")]
+    canonical_hl: Option<f64>,
+    #[serde(default)]
+    ll: Option<f64>,
+    #[serde(default, rename = "optimization_mode_LL")]
+    canonical_ll: Option<f64>,
+    /// MPC target offsets from the live setpoint. A Node ID takes precedence over local tuning.
+    #[serde(default)]
+    band_low_opc: Option<String>,
+    #[serde(default)]
+    band_high_opc: Option<String>,
+    #[serde(default)]
+    band_low_value: Option<f64>,
+    #[serde(default)]
+    band_high_value: Option<f64>,
+    #[serde(default)]
+    deadband_opc: Option<String>,
+    #[serde(default)]
+    deadband_value: Option<f64>,
+    #[serde(default)]
+    enable: Option<String>,
+}
+
+impl From<CvIoDefinitionWire> for CvIoDefinition {
+    fn from(wire: CvIoDefinitionWire) -> Self {
+        Self {
+            name: wire.name,
+            setpoint: wire.setpoint,
+            process_value: wire.process_value,
+            band_low_opc: wire.band_low_opc,
+            band_high_opc: wire.band_high_opc,
+            band_low_value: wire.band_low_value,
+            band_high_value: wire.band_high_value,
+            deadband_opc: wire.deadband_opc,
+            deadband_value: wire.deadband_value,
+            enable: wire.enable,
+            hl: wire.canonical_hl.or(wire.hl),
+            ll: wire.canonical_ll.or(wire.ll),
+        }
+    }
 }
 
 impl CvIoDefinition {
@@ -2315,7 +2493,7 @@ impl OnlineOptimizationConfig {
             }
             let predefined = predefined_cv_limits.get(&row.name).ok_or_else(|| {
                 anyhow!(
-                    "online optimization CV '{}' requires predefined I/O lower and upper limits",
+                    "online optimization CV '{}' requires predefined optimization_mode_LL and optimization_mode_HL",
                     row.name
                 )
             })?;
@@ -3027,7 +3205,26 @@ impl DeploymentConfig {
 pub fn from_toml_str(input: &str) -> Result<ProjectConfig> {
     let mut value: toml::Value = toml::from_str(input).context("failed to parse project TOML")?;
     migrate_legacy_timing(&mut value);
+    // TOML can contain both generations during a manual migration. Prefer explicit names.
+    if let Some(rows) = value
+        .get_mut("io_definition")
+        .and_then(|io| io.get_mut("cvs"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        for row in rows {
+            for (old, new) in [
+                ("ll", "optimization_mode_LL"),
+                ("hl", "optimization_mode_HL"),
+            ] {
+                if row.get(new).is_some() {
+                    row.as_table_mut().unwrap().remove(old);
+                }
+            }
+        }
+    }
     let mut cfg: ProjectConfig = value.try_into().context("failed to decode project TOML")?;
+    cfg.migrate_cv_safety_params();
+    cfg.normalize_plot_config();
     cfg.normalize_model_config();
     cfg.normalize_simulation_config();
     cfg.normalize_optimization_config();
@@ -3177,6 +3374,81 @@ mod tests {
             deadband_value: None,
             enable: None,
         });
+    }
+
+    #[test]
+    fn cv_safety_migration_prefers_canonical_fields_and_params() {
+        let mut cfg = from_toml_str(include_str!("../examples/demo_project.toml")).unwrap();
+        let legacy = to_toml_string(&cfg)
+            .unwrap()
+            .replace("optimization_mode_LL", "ll")
+            .replace("optimization_mode_HL", "hl");
+        cfg = from_toml_str(&legacy).unwrap();
+        cfg.logic
+            .params
+            .insert("io.cv.y1.ll".into(), LogicParamValue::F64(-15.0));
+        cfg.logic.params.insert(
+            "io.cv.y1.optimization_mode_LL".into(),
+            LogicParamValue::F64(-10.0),
+        );
+        cfg.sync_active_online_params();
+        assert_eq!(cfg.predefined_cv_limits()["y1"].min, -10.0);
+        assert!(!cfg.logic.params.contains_key("io.cv.y1.ll"));
+        assert!(!cfg.logic.params.contains_key("io.cv.y1.deadband"));
+        assert!(
+            !cfg.online_optimization_param_defaults()
+                .contains_key("io.cv.y1.optimization_mode_LL")
+        );
+        let row: CvIoDefinition = serde_json::from_value(serde_json::json!({"name":"y1", "ll":-100, "hl":100, "optimization_mode_LL":-20, "optimization_mode_HL":20})).unwrap();
+        assert_eq!(row.ll, Some(-20.0));
+        let value = serde_json::to_value(row).unwrap();
+        assert!(value.get("ll").is_none());
+        assert_eq!(value["optimization_mode_HL"], 20.0);
+        cfg.normalize_online_optimization_config();
+        let encoded = to_toml_string(&cfg).unwrap();
+        assert!(!encoded.contains("io.cv.y1.ll"));
+        from_toml_str(&encoded).unwrap();
+    }
+
+    #[test]
+    fn legacy_plots_seed_dashboard_once_and_layout_never_discards_panels() {
+        let mut cfg = from_toml_str(include_str!("../examples/demo_project.toml")).unwrap();
+        cfg.plots.dashboard = None;
+        cfg.plots.custom_plots.push(CustomPlotConfig {
+            title: "Combined".into(),
+            traces: vec![CustomPlotTraceConfig {
+                direction: "input".into(),
+                signal: "cv.y1.process_value".into(),
+            }],
+        });
+        cfg.normalize_plot_config();
+        let dashboard = cfg.plots.dashboard.as_mut().unwrap();
+        assert_eq!(
+            (dashboard.columns, dashboard.rows, dashboard.panels.len()),
+            (2, 2, 3)
+        );
+        let ids: Vec<_> = dashboard
+            .panels
+            .iter()
+            .map(|panel| panel.id.clone())
+            .collect();
+        dashboard.columns = 1;
+        dashboard.rows = 1;
+        let loaded = from_toml_str(&to_toml_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            loaded
+                .plots
+                .dashboard
+                .unwrap()
+                .panels
+                .iter()
+                .map(|panel| panel.id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        cfg.plots.dashboard.as_mut().unwrap().panels.clear();
+        cfg.normalize_plot_config();
+        assert!(cfg.plots.dashboard.as_ref().unwrap().panels.is_empty());
     }
 
     #[test]
@@ -4277,4 +4549,17 @@ description = "SmartAPC controller runtime"
         assert_eq!(cfg.plots.custom_plots[0].title, "Custom Plot 1");
         assert_eq!(cfg.plots.custom_plots[0].traces.len(), 1);
     }
+}
+
+/// Only CV scalar safety keys are renamed; MV actuator limits keep their contract.
+pub fn canonical_cv_safety_key(key: &str) -> String {
+    if key.starts_with("io.cv.") {
+        if let Some(prefix) = key.strip_suffix(".ll") {
+            return format!("{prefix}.optimization_mode_LL");
+        }
+        if let Some(prefix) = key.strip_suffix(".hl") {
+            return format!("{prefix}.optimization_mode_HL");
+        }
+    }
+    key.to_string()
 }

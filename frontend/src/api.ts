@@ -35,8 +35,8 @@ export interface Cv {
   name: string;
   setpoint: string;
   process_value: string;
-  hl?: number | null;
-  ll?: number | null;
+  optimization_mode_HL?: number | null;
+  optimization_mode_LL?: number | null;
   band_low_opc?: string | null;
   band_high_opc?: string | null;
   band_low_value?: number | null;
@@ -113,7 +113,21 @@ export interface OnlineOptimization {
   initial_samples: number;
   convergence_patience: number;
 }
+export interface DashboardPanel {
+  id: string;
+  kind: "mv" | "cv" | "dv" | "custom";
+  name: string;
+  title: string;
+  traces: { direction: string; signal: string }[];
+}
+export interface DashboardConfig {
+  columns: number;
+  rows: number;
+  panels: DashboardPanel[];
+}
 export interface PlotConfig {
+  dashboard?: DashboardConfig | null;
+  trace_colors?: Record<string, string>;
   window_sec: number;
   future_window_sec: number;
   mv_order: string[];

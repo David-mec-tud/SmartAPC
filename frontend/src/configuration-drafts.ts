@@ -26,6 +26,14 @@ export function renameVariable(
     );
     for (const plot of config.plots.custom_plots)
       for (const trace of plot.traces) trace.signal = signal(trace.signal);
+    for (const panel of config.plots.dashboard?.panels ?? [])
+      for (const trace of panel.traces) trace.signal = signal(trace.signal);
+    config.plots.trace_colors = Object.fromEntries(
+      Object.entries(config.plots.trace_colors ?? {}).map(([key, value]) => [
+        signal(key),
+        value,
+      ]),
+    );
     // Compiled metadata stays unchanged so a renamed contract needs a rebuild.
     return;
   }
@@ -102,4 +110,17 @@ export function renameVariable(
   );
   for (const plot of config.plots.custom_plots)
     for (const trace of plot.traces) trace.signal = signal(trace.signal);
+  for (const panel of config.plots.dashboard?.panels ?? []) {
+    if (panel.kind === kind && panel.name === previous) {
+      panel.name = nextName;
+      if (panel.title === previous) panel.title = nextName;
+    }
+    for (const trace of panel.traces) trace.signal = signal(trace.signal);
+  }
+  config.plots.trace_colors = Object.fromEntries(
+    Object.entries(config.plots.trace_colors ?? {}).map(([key, value]) => [
+      signal(key),
+      value,
+    ]),
+  );
 }

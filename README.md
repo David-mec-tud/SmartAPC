@@ -191,8 +191,10 @@ Virtual hardware OPC UA Node IDs:
 
 - `ns=2;s=y1_value`
 - `ns=2;s=y1_target`
-- `ns=2;s=y1_HL`
-- `ns=2;s=y1_LL`
+- `ns=2;s=y1_band_high` (offset from target)
+- `ns=2;s=y1_band_low` (offset from target)
+- `ns=2;s=y1_HL` (legacy absolute display value)
+- `ns=2;s=y1_LL` (legacy absolute display value)
 - `ns=2;s=u1_write`
 - `ns=2;s=u1_read`
 - `ns=2;s=wd_counter_read`
@@ -267,10 +269,34 @@ initial offsets for external bands; they do not read OPC UA. If a live band inpu
 or non-finite, MPC resolves that edge using its configured initial/default offset; communication
 failures still follow the existing runtime fault handling.
 
-`CV LL (Safety Limit Low)` and `CV HL (Safety Limit High)` in I/O Definition are absolute
+`optimization_mode_LL` and `optimization_mode_HL` in **Optimization safety boundaries** are absolute
 boundaries used only for online optimization safety. Online optimization may use tighter CV
 limits inside them. Touching an optimization limit stops tuning and restores the original
 parameters; these fields do not constrain MPC predictions or stop ordinary controller execution.
+
+Online parameters group controller settings, CVs, MVs, observer, static I/O,
+optimization safety, and custom values into collapsible sections. Search matches
+labels and complete keys without case sensitivity; matching groups open automatically.
+MPC hides unused legacy deadband controls, retaining their fallback when loading old files.
+
+In **Operation → Trends**, combine variable and custom multi-trace plots in one
+project dashboard. Layouts use **columns × rows** (default 2×2, also 2×5), with
+additional pages for overflow. Add/edit/remove/reorder panels, then choose **Save
+dashboard** to persist the layout, history/forecast windows, panels and stable trace
+colors. Layout changes preserve every panel. Boundary pairs are dotted and may share
+a color; other traces have distinct colors, including future predictions. Standard CV
+panels show effective target bands rather than absolute optimization boundaries.
+
+The tracked `examples/demo_project.toml` is a clean MPC baseline for default
+virtual hardware (`tau=5 s`, `gain=1`). It uses a 1 s controller cycle, 20/5 horizons,
+a target of 10, band offsets -0.5/+0.5, zero noise, and 100% model scaling. Copy it
+into `projects/demo/project.toml` to reproduce the baseline. Start virtual hardware,
+set `y1_target` to **10**, start runtime in shadow mode, wait for readiness, then
+manually turn the controller on. Offline simulation already uses target 10.
+The plant page edits **Band low/high offsets** using `ns=2;s=y1_band_low/high`;
+its plotted edges equal the target plus each offset. The demo uses local MPC bands;
+configure these Node IDs explicitly to try external ownership. Legacy `y1_LL/HL`
+nodes remain available with their original meaning.
 
 Runtime and simulation logs expose plot-ready
 MPC diagnostics such as `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`,

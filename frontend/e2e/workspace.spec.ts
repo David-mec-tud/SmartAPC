@@ -68,7 +68,7 @@ test("simulation runs without a browser; typed parameters apply and Plotly rende
     )
     .toBe(2.5);
   await page.getByRole("link", { name: "Trends", exact: true }).click();
-  await expect(page.locator(".js-plotly-plot")).toBeVisible();
+  await expect(page.locator(".js-plotly-plot").first()).toBeVisible();
   // Live updates must retain operator zoom and legend state.
   await page.evaluate(async () => {
     const plot = document.querySelector(".js-plotly-plot") as HTMLElement;
@@ -85,6 +85,7 @@ test("simulation runs without a browser; typed parameters apply and Plotly rende
   });
   const plottedBefore = await page
     .locator(".js-plotly-plot")
+    .first()
     .evaluate(
       (element) =>
         (element as unknown as { data: { x: number[] }[] }).data[0].x.at(-1) ??
@@ -94,6 +95,7 @@ test("simulation runs without a browser; typed parameters apply and Plotly rende
     .poll(async () =>
       page
         .locator(".js-plotly-plot")
+        .first()
         .evaluate(
           (element) =>
             (element as unknown as { data: { x: number[] }[] }).data[0].x.at(
@@ -106,6 +108,7 @@ test("simulation runs without a browser; typed parameters apply and Plotly rende
     .poll(async () =>
       page
         .locator(".js-plotly-plot")
+        .first()
         .evaluate(
           (element) =>
             (element as unknown as { layout: { xaxis: { range: number[] } } })
@@ -182,6 +185,7 @@ test("MPC movement cost stays boolean and external CV edges stay out of editing 
   await page
     .getByRole("link", { name: "Online parameters", exact: true })
     .click();
+  await page.getByLabel("Search parameters", { exact: true }).fill("use_l1");
   await page
     .getByLabel("mpc.mv.u1.use_l1", { exact: true })
     .selectOption("true");

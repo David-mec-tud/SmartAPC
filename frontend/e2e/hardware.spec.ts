@@ -186,7 +186,7 @@ test("real OPC UA read/write/watchdog tests and saved runtime operate against th
     )
     .toBeGreaterThan(2);
   await page.getByRole("link", { name: "Trends", exact: true }).click();
-  await expect(page.locator(".js-plotly-plot")).toBeVisible();
+  await expect(page.locator(".js-plotly-plot").first()).toBeVisible();
   await page.getByRole("button", { name: "Stop runtime", exact: true }).click();
   await expect
     .poll(async () => await (await request.get("/api/execution/state")).json())
@@ -571,4 +571,104 @@ test("external enable is tested read only, disables the UI, and owns runtime on/
   await expect
     .poll(async () => (await plant()).controller_signals.ControllerIsReady)
     .toBe(false);
+});
+
+test("MPC reads real external band offsets in shadow mode and tracks changed target bands", async ({
+  request,
+}) => {
+  test.setTimeout(90_000);
+  const name = await createHardwareProject(request);
+  const response = await request.get(`/api/projects/${name}/config`);
+  const config = await response.json();
+  config.logic.kind = "linear_mpc";
+  config.logic.cycle_ms = 100;
+  config.io.cycle_ms = 100;
+  config.model = {
+    kind: "linear_state_space",
+    state_count: 1,
+    u_order: ["u1"],
+    y_order: ["y1"],
+    a: [[-1]],
+    b: [[1]],
+    c: [[1]],
+    d: [[0]],
+  };
+  Object.assign(config.io_definition.cvs[0], {
+    band_low_opc: "ns=2;s=y1_band_low",
+    band_high_opc: "ns=2;s=y1_band_high",
+    band_low_value: -0.5,
+    band_high_value: 0.5,
+  });
+  expect(
+    (
+      await request.put(`/api/projects/${name}/config`, {
+        data: config,
+        headers: { "If-Match": response.headers().etag },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (
+      await request.post(`${plantUrl}/api/virtual-hardware`, {
+        data: { u_write: 0, target: 2, band_low: -0.25, band_high: 0.75 },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (
+      await request.post("/api/runtime/start", {
+        data: { project_name: name, mode: "runtime" },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  const state = async () =>
+    await (await request.get("/api/execution/state")).json();
+  await expect
+    .poll(async () => (await state())?.snapshot.controller?.is_ready, {
+      timeout: 40_000,
+    })
+    .toBe(true);
+  const shadow = await state();
+  expect(shadow.snapshot.controller.enabled).toBe(false);
+  expect(shadow.snapshot.controller.has_control).toBe(false);
+  expect(shadow.snapshot.last_inputs["cv.y1.band_low"].value).toBe(-0.25);
+  expect(shadow.snapshot.last_inputs["cv.y1.band_high"].value).toBe(0.75);
+  const identity = {
+    project_name: name,
+    mode: "runtime",
+    execution_id: shadow.snapshot.execution_id,
+  };
+  expect(
+    (
+      await request.post("/api/execution/command", {
+        data: { ...identity, action: "enable_control" },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  await expect
+    .poll(async () => (await state())?.snapshot.controller?.has_control)
+    .toBe(true);
+  expect(
+    (
+      await request.post(`${plantUrl}/api/virtual-hardware`, {
+        data: { u_write: 0, target: 3, band_low: -0.5, band_high: 0.5 },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  await expect
+    .poll(
+      async () =>
+        (await state())?.snapshot.last_inputs["cv.y1.setpoint"]?.value,
+    )
+    .toBe(3);
+  await expect
+    .poll(
+      async () => {
+        const pv = (await state())?.snapshot.last_inputs["cv.y1.process_value"]
+          ?.value;
+        return typeof pv === "number" && pv >= 2.45 && pv <= 3.55;
+      },
+      { timeout: 25_000 },
+    )
+    .toBe(true);
 });

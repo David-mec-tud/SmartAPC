@@ -2,16 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import type { Data } from "plotly.js";
-import {
-  type Mode,
-  type Parameters,
-  type PlotConfig,
-  type Sample,
-  type HistoryWindow,
-  type Series,
-  projectPath,
-  request,
-} from "../api";
+import { type Mode, type Parameters, projectPath, request } from "../api";
 import { useWorkspace } from "../workspace";
 import {
   Button,
@@ -23,8 +14,10 @@ import {
   Select,
 } from "../components/ui";
 import { Plot } from "../components/Plot";
+import { TrendDashboard as Trends } from "../components/TrendDashboard";
+export { Trends };
+import { groupParameters, parameterLabel } from "../parameters";
 import { RangeTable } from "./Engineering";
-import { makeTraces, futureTraces } from "../charts";
 
 export function Operation() {
   const { section = "trends" } = useParams();
@@ -64,324 +57,6 @@ export function Operation() {
   );
 }
 
-export function Trends({ compact = false }: { compact?: boolean }) {
-  const { project, saved, execution, act, setNotification } = useWorkspace();
-  const [mode, setMode] = useState<Mode>("runtime");
-  const [group, setGroup] = useState<"mv" | "cv" | "dv" | "custom">("cv");
-  const [plotConfig, setPlotConfig] = useState<PlotConfig>();
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [customTitle, setCustomTitle] = useState("");
-  const [customSeries, setCustomSeries] = useState<string[]>([]);
-  const active = execution?.snapshot.project_name === project;
-  useEffect(() => {
-    if (active && execution) setMode(execution.mode);
-  }, [active, execution?.mode]);
-  useEffect(() => {
-    setPlotConfig(saved.data?.config.plots);
-    setSelected({});
-    setCustomSeries([]);
-  }, [project, saved.data?.config.plots]);
-  const history = useQuery({
-    queryKey: [
-      "history",
-      project,
-      mode,
-      plotConfig?.window_sec,
-      active ? execution?.snapshot.execution_id : "saved",
-    ],
-    queryFn: () =>
-      request<HistoryWindow>(
-        `${projectPath(project)}/history?mode=${mode}&window_ms=${(plotConfig?.window_sec ?? 180) * 1000}`,
-      ),
-    enabled: !!project,
-    refetchInterval: active ? 1500 : false,
-  });
-  const catalog = useQuery({
-    queryKey: [
-      "series",
-      project,
-      mode,
-      active ? execution?.snapshot.execution_id : "saved",
-    ],
-    queryFn: () =>
-      request<Series[]>(`${projectPath(project)}/history/catalog?mode=${mode}`),
-    enabled: !!project,
-    refetchInterval: active ? 5000 : false,
-  });
-  const samples = history.data?.samples ?? [];
-  const rows = catalog.data ?? [];
-  const orders = plotConfig
-    ? {
-        mv: plotConfig.mv_order,
-        cv: plotConfig.cv_order,
-        dv: plotConfig.dv_order,
-      }
-    : { mv: [], cv: [], dv: [] };
-  async function persist(next: PlotConfig) {
-    setPlotConfig(next);
-    try {
-      await act(`${projectPath(project)}/plots/config`, next, "PUT");
-    } catch {
-      /* Keep entered settings visible after an error. */
-    }
-  }
-  if (!plotConfig) return null;
-  function move(kind: "mv" | "cv" | "dv", name: string, direction: number) {
-    const next = structuredClone(plotConfig!);
-    const key = `${kind}_order` as const;
-    const values = next[key];
-    const index = values.indexOf(name);
-    const target = index + direction;
-    if (target < 0 || target >= values.length) return;
-    [values[index], values[target]] = [values[target], values[index]];
-    void persist(next);
-  }
-  return (
-    <>
-      <div className="toolbar">
-        <div className="inline">
-          <Field label="History source">
-            <Select
-              value={mode}
-              onChange={(event) => setMode(event.target.value as Mode)}
-            >
-              <option value="runtime">Runtime</option>
-              <option value="simulation">Simulation · seconds</option>
-            </Select>
-          </Field>
-          <Field label="Sliding history (s)">
-            <NumberInput
-              value={plotConfig.window_sec}
-              onChange={(value) =>
-                setPlotConfig({ ...plotConfig, window_sec: value ?? 180 })
-              }
-              onBlur={() => void persist(plotConfig)}
-            />
-          </Field>
-          <Field label="Future horizon (s)">
-            <NumberInput
-              value={plotConfig.future_window_sec}
-              onChange={(value) =>
-                setPlotConfig({ ...plotConfig, future_window_sec: value ?? 0 })
-              }
-              onBlur={() => void persist(plotConfig)}
-            />
-          </Field>
-        </div>
-        <Badge tone={active ? "good" : "neutral"}>
-          {active ? "Following active execution" : "Saved project history"}
-        </Badge>
-      </div>
-      {history.error && <Notice error>{history.error.message}</Notice>}
-      {history.data?.downsampled && (
-        <p className="muted">
-          Displaying a bounded history window with first/last points and
-          extrema. {history.data.samples.length.toLocaleString()} of{" "}
-          {history.data.original_count.toLocaleString()} stored samples.
-        </p>
-      )}
-      <div className="tabs">
-        {(["mv", "cv", "dv", "custom"] as const).map((kind) => (
-          <Button
-            key={kind}
-            variant={group === kind ? "default" : "ghost"}
-            onClick={() => setGroup(kind)}
-          >
-            {kind === "custom" ? "Custom plots" : kind.toUpperCase()}
-          </Button>
-        ))}
-      </div>
-      <div className="chart-grid">
-        {group !== "custom" &&
-          orders[group]
-            .filter((name) => selected[name] !== false)
-            .slice(0, compact ? 1 : undefined)
-            .map((name) => {
-              const series = rows.filter(
-                (row) =>
-                  row.signal.startsWith(`${group}.${name}.`) ||
-                  row.signal.startsWith(`io.${group}.${name}.`) ||
-                  (group === "cv" &&
-                    row.signal.startsWith(`mpc.target.cv.${name}.`)),
-              );
-              // Absolute CV LL/HL describe optimization safety. Keeping them out
-              // of ordinary trends also avoids flattening the measured CV scale.
-              const visibleSeries =
-                group === "cv"
-                  ? series.filter(
-                      (row) =>
-                        !/^io\.cv\..*\.(ll|hl)$/.test(row.signal) &&
-                        !/\.band_(low|high)$/.test(row.signal),
-                    )
-                  : series;
-              const data = [
-                ...makeTraces(samples, visibleSeries, mode),
-                ...(group === "cv" || group === "mv"
-                  ? futureTraces(
-                      samples,
-                      group,
-                      name,
-                      mode,
-                      saved.data?.config.logic.cycle_ms ?? 1000,
-                      plotConfig.future_window_sec,
-                    )
-                  : []),
-              ];
-              return (
-                <section className="panel chart-panel" key={name}>
-                  <div className="section-title">
-                    <strong>
-                      {group.toUpperCase()} · {name}
-                    </strong>
-                    {!compact && (
-                      <div className="inline">
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label={`Move ${name} earlier`}
-                          onClick={() => move(group, name, -1)}
-                        >
-                          ↑
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label={`Move ${name} later`}
-                          onClick={() => move(group, name, 1)}
-                        >
-                          ↓
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                  <Plot
-                    data={data}
-                    title={name}
-                    revision={`${project}:${mode}:${name}`}
-                    height={compact ? 260 : 330}
-                  />
-                </section>
-              );
-            })}
-        {group === "custom" &&
-          plotConfig.custom_plots.map((plot, index) => (
-            <section className="panel chart-panel" key={index}>
-              <div className="section-title">
-                <strong>{plot.title}</strong>
-                <Button
-                  variant="ghost"
-                  size="small"
-                  onClick={() => {
-                    const next = structuredClone(plotConfig);
-                    next.custom_plots.splice(index, 1);
-                    void persist(next);
-                  }}
-                >
-                  Remove plot
-                </Button>
-              </div>
-              <Plot
-                title={plot.title}
-                revision={`${project}:${mode}:custom:${plot.title}`}
-                data={makeTraces(
-                  samples,
-                  plot.traces.map((trace) => ({
-                    ...trace,
-                    value_kind:
-                      rows.find(
-                        (row) =>
-                          row.direction === trace.direction &&
-                          row.signal === trace.signal,
-                      )?.value_kind ?? "f64",
-                  })),
-                  mode,
-                )}
-              />
-            </section>
-          ))}
-      </div>
-      {!samples.length && (
-        <Notice>
-          No recorded samples for this source. Start execution or select another
-          history source.
-        </Notice>
-      )}
-      {!compact && group !== "custom" && (
-        <section className="panel">
-          <h2>Visible {group.toUpperCase()} signals</h2>
-          <div className="inline">
-            {orders[group].map((name) => (
-              <label key={name} className="check-label">
-                <input
-                  type="checkbox"
-                  checked={selected[name] !== false}
-                  onChange={(event) =>
-                    setSelected((previous) => ({
-                      ...previous,
-                      [name]: event.target.checked,
-                    }))
-                  }
-                />
-                {name}
-              </label>
-            ))}
-          </div>
-        </section>
-      )}
-      {group === "custom" && (
-        <section className="panel">
-          <h2>Create multi-trace plot</h2>
-          <Field label="Plot title">
-            <Input
-              value={customTitle}
-              onChange={(event) => setCustomTitle(event.target.value)}
-            />
-          </Field>
-          <div className="series-picker">
-            {rows.map((row) => {
-              const key = `${row.direction}::${row.signal}`;
-              return (
-                <label key={key} className="check-label">
-                  <input
-                    type="checkbox"
-                    checked={customSeries.includes(key)}
-                    onChange={(event) =>
-                      setCustomSeries((previous) =>
-                        event.target.checked
-                          ? [...previous, key]
-                          : previous.filter((value) => value !== key),
-                      )
-                    }
-                  />
-                  {row.signal}
-                  <small>{row.direction}</small>
-                </label>
-              );
-            })}
-          </div>
-          <Button
-            disabled={!customTitle.trim() || !customSeries.length}
-            onClick={() => {
-              const next = structuredClone(plotConfig);
-              next.custom_plots.push({
-                title: customTitle,
-                traces: customSeries.map((key) => {
-                  const [direction, signal] = key.split("::");
-                  return { direction, signal };
-                }),
-              });
-              void persist(next);
-              setCustomTitle("");
-              setCustomSeries([]);
-            }}
-          >
-            Save custom plot
-          </Button>
-        </section>
-      )}
-    </>
-  );
-}
 function OnlineParameters() {
   const { project, execution, workspace, act } = useWorkspace();
   const active = execution?.snapshot.project_name === project;
@@ -400,11 +75,14 @@ function OnlineParameters() {
   const [expected, setExpected] = useState<Parameters>({});
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   useEffect(() => {
     setDraft({});
     setExpected({});
   }, [project, execution?.snapshot.execution_id]);
   const locked = workspace.data?.online_optimization?.phase === "running";
+  const groups = groupParameters(params.data ?? {}, search);
+  const matchCount = groups.reduce((count, [, rows]) => count + rows.length, 0);
   if (!active)
     return (
       <Notice>
@@ -428,150 +106,185 @@ function OnlineParameters() {
         onChange={(event) => setSearch(event.target.value)}
       />
       {params.error && <Notice error>{params.error.message}</Notice>}
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Parameter</th>
-              <th>Applied</th>
-              <th>Draft value</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(params.data ?? {})
-              .filter(([key]) => key.includes(search))
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([key, value]) => (
-                <tr key={key}>
-                  <th>{key}</th>
-                  <td>{String(value)}</td>
-                  <td>
-                    {typeof value === "boolean" ? (
-                      <Select
-                        aria-label={key}
-                        disabled={locked}
-                        value={String(draft[key] ?? value)}
-                        onChange={(event) => {
-                          setExpected((previous) => ({
-                            ...previous,
-                            [key]:
-                              draft[key] === undefined
-                                ? value
-                                : (previous[key] ?? value),
-                          }));
-                          setDraft((previous) => ({
-                            ...previous,
-                            [key]: event.target.value === "true",
-                          }));
-                        }}
-                      >
-                        <option value="false">
-                          {key.endsWith(".use_l1")
-                            ? "L2 · squared movement"
-                            : "False"}
-                        </option>
-                        <option value="true">
-                          {key.endsWith(".use_l1")
-                            ? "L1 · absolute movement"
-                            : "True"}
-                        </option>
-                      </Select>
-                    ) : (
-                      <NumberInput
-                        aria-label={key}
-                        disabled={locked}
-                        value={Number(draft[key] ?? value)}
-                        onChange={(next) => {
-                          setExpected((previous) => ({
-                            ...previous,
-                            [key]:
-                              draft[key] === undefined
-                                ? value
-                                : (previous[key] ?? value),
-                          }));
-                          setDraft((previous) => ({
-                            ...previous,
-                            [key]: next ?? 0,
-                          }));
-                        }}
-                      />
-                    )}
-                  </td>
-                  <td>
-                    <Button
-                      size="small"
-                      disabled={
-                        locked || applying[key] || draft[key] === undefined
-                      }
-                      onClick={() => {
-                        const submitted = draft[key];
-                        setApplying((previous) => ({
-                          ...previous,
-                          [key]: true,
-                        }));
-                        void act("/api/execution/parameters", {
-                          project_name: project,
-                          mode: execution.mode,
-                          execution_id: execution.snapshot.execution_id,
-                          params: { [key]: draft[key] },
-                          expected_params: { [key]: expected[key] },
-                        })
-                          .then(() => {
-                            setDraft((previous) => {
-                              const next = { ...previous };
-                              if (next[key] === submitted) delete next[key];
-                              return next;
-                            });
+      <p className="muted">
+        {matchCount} of {Object.keys(params.data ?? {}).length} parameters
+      </p>
+      {!matchCount && (
+        <Notice>
+          {search
+            ? "No parameters match your search."
+            : "No editable parameters are available."}
+        </Notice>
+      )}
+      {groups.map(([group, entries]) => (
+        <details
+          className="parameter-group"
+          key={group}
+          open={
+            search.trim()
+              ? true
+              : (expanded[group] ?? group === "Controller settings")
+          }
+          onToggle={(event) => {
+            if (!search.trim()) {
+              const open = event.currentTarget.open;
+              setExpanded((previous) =>
+                previous[group] === open
+                  ? previous
+                  : { ...previous, [group]: open },
+              );
+            }
+          }}
+        >
+          <summary>
+            {group} · {entries.length}
+          </summary>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Applied</th>
+                  <th>Draft value</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map(([key, value]) => (
+                  <tr key={key}>
+                    <th>
+                      {parameterLabel(key)}
+                      <small className="parameter-key">{key}</small>
+                    </th>
+                    <td>{String(value)}</td>
+                    <td>
+                      {typeof value === "boolean" ? (
+                        <Select
+                          aria-label={key}
+                          disabled={locked}
+                          value={String(draft[key] ?? value)}
+                          onChange={(event) => {
                             setExpected((previous) => ({
                               ...previous,
-                              [key]: submitted,
+                              [key]:
+                                draft[key] === undefined
+                                  ? value
+                                  : (previous[key] ?? value),
                             }));
-                            void params.refetch();
-                          })
-                          .catch(() => {})
-                          .finally(() =>
-                            setApplying((previous) => ({
+                            setDraft((previous) => ({
                               ...previous,
-                              [key]: false,
-                            })),
-                          );
-                      }}
-                    >
-                      Apply online
-                    </Button>
-                    {draft[key] !== undefined && expected[key] !== value && (
-                      <small>
-                        Applied value changed. Keep or reload your draft.
-                      </small>
-                    )}
-                    {draft[key] !== undefined && (
+                              [key]: event.target.value === "true",
+                            }));
+                          }}
+                        >
+                          <option value="false">
+                            {key.endsWith(".use_l1")
+                              ? "L2 · squared movement"
+                              : "False"}
+                          </option>
+                          <option value="true">
+                            {key.endsWith(".use_l1")
+                              ? "L1 · absolute movement"
+                              : "True"}
+                          </option>
+                        </Select>
+                      ) : (
+                        <NumberInput
+                          aria-label={key}
+                          disabled={locked}
+                          value={Number(draft[key] ?? value)}
+                          onChange={(next) => {
+                            setExpected((previous) => ({
+                              ...previous,
+                              [key]:
+                                draft[key] === undefined
+                                  ? value
+                                  : (previous[key] ?? value),
+                            }));
+                            setDraft((previous) => ({
+                              ...previous,
+                              [key]: next ?? 0,
+                            }));
+                          }}
+                        />
+                      )}
+                    </td>
+                    <td>
                       <Button
-                        variant="ghost"
                         size="small"
-                        aria-label={`Reload ${key} applied value`}
+                        disabled={
+                          locked || applying[key] || draft[key] === undefined
+                        }
                         onClick={() => {
-                          setDraft((previous) => {
-                            const next = { ...previous };
-                            delete next[key];
-                            return next;
-                          });
-                          setExpected((previous) => {
-                            const next = { ...previous };
-                            delete next[key];
-                            return next;
-                          });
+                          const submitted = draft[key];
+                          setApplying((previous) => ({
+                            ...previous,
+                            [key]: true,
+                          }));
+                          void act("/api/execution/parameters", {
+                            project_name: project,
+                            mode: execution.mode,
+                            execution_id: execution.snapshot.execution_id,
+                            params: { [key]: draft[key] },
+                            expected_params: { [key]: expected[key] },
+                          })
+                            .then(() => {
+                              setDraft((previous) => {
+                                const next = { ...previous };
+                                if (next[key] === submitted) delete next[key];
+                                return next;
+                              });
+                              setExpected((previous) => ({
+                                ...previous,
+                                [key]: submitted,
+                              }));
+                              void params.refetch();
+                            })
+                            .catch(() => {})
+                            .finally(() =>
+                              setApplying((previous) => ({
+                                ...previous,
+                                [key]: false,
+                              })),
+                            );
                         }}
                       >
-                        Reload applied value
+                        Apply online
                       </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
-      </div>
+                      {draft[key] !== undefined && expected[key] !== value && (
+                        <small>
+                          Applied value changed. Keep or reload your draft.
+                        </small>
+                      )}
+                      {draft[key] !== undefined && (
+                        <Button
+                          variant="ghost"
+                          size="small"
+                          aria-label={`Reload ${key} applied value`}
+                          onClick={() => {
+                            setDraft((previous) => {
+                              const next = { ...previous };
+                              delete next[key];
+                              return next;
+                            });
+                            setExpected((previous) => {
+                              const next = { ...previous };
+                              delete next[key];
+                              return next;
+                            });
+                          }}
+                        >
+                          Reload applied value
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      ))}
     </section>
   );
 }
@@ -598,7 +311,8 @@ function OnlineOptimization() {
       <Notice>
         Touching a CV safety edge or stopping manually restores the original
         parameters before the next calculation. Normal completion applies
-        best-known values. CV LL/HL are absolute safety boundaries.
+        best-known values. optimization_mode_LL/HL are absolute safety
+        boundaries.
       </Notice>
       <section className="panel">
         <div className="section-title">
@@ -806,8 +520,8 @@ function OnlineOptimization() {
                 <tr>
                   <th>CV</th>
                   <th>Weight</th>
-                  <th>Low</th>
-                  <th>High</th>
+                  <th>optimization_mode_LL</th>
+                  <th>optimization_mode_HL</th>
                 </tr>
               </thead>
               <tbody>

@@ -962,7 +962,15 @@ impl ControlLogic for LinearMpcLogic {
         let mut outputs = HashMap::new();
         let mut next_mv = current_mv.clone();
         for (index, mv) in self.vars.mvs.iter().enumerate() {
-            let du = solution.delta_u.get(index).copied().unwrap_or(0.0);
+            // QP feasibility has a numeric tolerance. Enforce the actual actuator's
+            // movement bound exactly before applying its absolute safety limits.
+            let max_move = self.max_delta_u(mv);
+            let du = solution
+                .delta_u
+                .get(index)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(-max_move, max_move);
             next_mv[index] = (current_mv[index] + du).clamp(limits[index].0, limits[index].1);
             outputs.insert(format!("mv.{mv}.write"), SignalValue::F64(next_mv[index]));
         }

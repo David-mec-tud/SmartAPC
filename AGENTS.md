@@ -75,7 +75,13 @@
   edges take precedence and must be excluded from local MPC tuning and parameter optimization.
   Keep generated strategy contracts compatible with these optional inputs. Offline execution
   uses configured initial band offsets, with legacy static deadband defaults for blank values.
-- I/O CV LL/HL are absolute online optimization safety boundaries, not controller constraints.
+- I/O CV `optimization_mode_LL/HL` are absolute online optimization safety boundaries,
+  not controller constraints. Load legacy CV `ll/hl` and scalar parameter keys with
+  canonical-name precedence; write canonical names and preserve historical records.
+- Browser dashboards persist fixed columns × rows, ordered stable panel IDs and trace
+  colors through the plots API. Shrinking a layout paginates without discarding panels.
+  Missing dashboard settings migrate legacy plots; explicitly empty dashboards stay empty.
+  Boundary pairs are dotted; other measured/forecast traces use distinct stable colors.
 - Linear MPC defaults to squared (L2) MV movement cost. Per-MV `mpc.mv.<name>.use_l1`
   is a boolean manual/online selection for absolute (L1) movement cost and must stay out of
   numeric parameter optimization. Offline/online tuning scores retain squared MV movement.

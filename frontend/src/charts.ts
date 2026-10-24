@@ -17,10 +17,12 @@ export function makeTraces(
   selected: Series[],
   mode: Mode,
 ): Data[] {
-  return selected.map((series) => {
+  const traces: Data[] = selected.map((series) => {
+    const identity = `${series.direction}::${canonicalSignal(series.signal)}`;
     const points = samples.filter(
       (row) =>
-        row.direction === series.direction && row.signal === series.signal,
+        row.direction === series.direction &&
+        canonicalSignal(row.signal) === canonicalSignal(series.signal),
     );
     // Bound display work independently of backend/control frequency.
     const step = Math.max(1, Math.ceil(points.length / 1800));
@@ -34,30 +36,101 @@ export function makeTraces(
           : new Date(row.timestamp_ms),
       ),
       y: displayed.map((row) => Number(row.value.value)),
-      name: `${series.signal} · ${series.direction}`,
+      name: /^mpc\.target\.cv\./.test(series.signal)
+        ? series.signal.replace(
+            /^mpc\.target\.cv\.(.*)\.(low|high)$/,
+            "$1 · Band $2",
+          )
+        : `${canonicalSignal(series.signal)} · ${series.direction}`,
+      meta: { trace_identity: identity },
       uid: traceId(`${series.direction}::${series.signal}`),
       type: "scatter",
       mode: "lines",
       line: {
         shape: series.value_kind === "bool" ? "hv" : "linear",
-        color: signalColor(`${series.direction}::${series.signal}`),
+        dash: isBoundary(series.signal) ? "dot" : "solid",
       },
     };
   });
+  return colorTraces(traces, allocateTraceColors(traces));
 }
-function signalColor(identity: string) {
-  let hash = 0;
-  for (const character of identity)
-    hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  const palette = [
-    "#2c8a7a",
-    "#527ad4",
-    "#b17a34",
-    "#b86d9b",
-    "#6d8a46",
-    "#aa6458",
-  ];
-  return palette[Math.abs(hash) % palette.length];
+/** Preserve old history on disk while presenting the current safety terminology. */
+export function canonicalSignal(signal: string): string {
+  return signal
+    .replace(/^(io\.cv\..*)\.ll$/, "$1.optimization_mode_LL")
+    .replace(/^(io\.cv\..*)\.hl$/, "$1.optimization_mode_HL");
+}
+function isBoundary(signal: string) {
+  return /\.(ll|hl|low|high|band_low|band_high|optimization_mode_LL|optimization_mode_HL)$/.test(
+    signal,
+  );
+}
+function colorIdentity(identity: string) {
+  // The two edges of one boundary family may share a color, but not another signal.
+  return identity
+    .replace(/\.(ll|hl)$/, ".limit_pair")
+    .replace(/\.(low|high)$/, ".edge_pair")
+    .replace(/\.band_(low|high)$/, ".band_pair")
+    .replace(/\.optimization_mode_(LL|HL)$/, ".optimization_pair");
+}
+export function traceIdentity(trace: Data): string {
+  const scatter = trace as {
+    meta?: { trace_identity?: string };
+    uid?: string;
+    name?: string;
+  };
+  return scatter.meta?.trace_identity ?? String(scatter.uid ?? scatter.name);
+}
+const palette = [
+  "#268574",
+  "#527ad4",
+  "#b17a34",
+  "#b65b99",
+  "#718f37",
+  "#b4574a",
+  "#805ec2",
+  "#218bb0",
+  "#c26b28",
+  "#717580",
+  "#b13e66",
+  "#168867",
+];
+/** Allocate across all dashboard panels, retaining saved assignments as panels change.
+ * Generated hues extend the palette instead of wrapping and reusing a trace color. */
+export function allocateTraceColors(
+  traces: Data[],
+  saved: Record<string, string> = {},
+) {
+  const colors = { ...saved };
+  const used = new Set(Object.values(colors));
+  for (const key of [
+    ...new Set(traces.map((trace) => colorIdentity(traceIdentity(trace)))),
+  ].sort()) {
+    if (colors[key]) continue;
+    let candidate = palette.find((color) => !used.has(color));
+    let index = 0;
+    while (!candidate || used.has(candidate)) {
+      candidate = `hsl(${((index++ * 137.508) % 360).toFixed(3)}, 62%, 43%)`;
+    }
+    colors[key] = candidate;
+    used.add(candidate);
+  }
+  return colors;
+}
+export function colorTraces(
+  traces: Data[],
+  colors: Record<string, string>,
+): Data[] {
+  return traces.map(
+    (trace) =>
+      ({
+        ...trace,
+        line: {
+          ...("line" in trace ? trace.line : {}),
+          color: colors[colorIdentity(traceIdentity(trace))],
+        },
+      }) as Data,
+  );
 }
 
 /** Use one prediction generation, its own cycle timestamp, and actual step
@@ -160,9 +233,95 @@ export function futureTraces(
         type: "scatter",
         mode: "lines",
         name: title,
+        meta: { trace_identity: `forecast::${kind}.${name}.${prefix}` },
         uid: traceId(`${kind}.${name}.${prefix}`),
         line: { dash: "dot", color },
       } as Data,
     ];
   });
+}
+
+/** Controllers that do not emit MPC diagnostics still get setpoint-relative bands.
+ * Prefer Rust's resolved target logs whenever present, especially for external edges. */
+export function cvBandTraces(
+  samples: Sample[],
+  cv: import("./api").Cv,
+  params: import("./api").Parameters,
+  mode: Mode,
+): Data[] {
+  const missing = (["low", "high"] as const).filter(
+    (edge) =>
+      !samples.some(
+        (sample) =>
+          sample.direction === "user_log" &&
+          sample.signal === `mpc.target.cv.${cv.name}.${edge}`,
+      ),
+  );
+  if (!missing.length) return [];
+  let setpoint: number | undefined;
+  const legacy = !cv.deadband_opc ? Math.abs(cv.deadband_value ?? 0) : 0;
+  const offsets = {
+    low: Number(
+      params[`mpc.cv.${cv.name}.band_low`] ?? cv.band_low_value ?? -legacy,
+    ),
+    high: Number(
+      params[`mpc.cv.${cv.name}.band_high`] ?? cv.band_high_value ?? legacy,
+    ),
+  };
+  const groups = new Map<number, Sample[]>();
+  for (const row of samples) {
+    if (
+      row.signal === `cv.${cv.name}.setpoint` ||
+      (/\.(band_low|band_high)$/.test(row.signal) &&
+        row.signal.includes(`.${cv.name}.`))
+    )
+      groups.set(row.timestamp_ms, [
+        ...(groups.get(row.timestamp_ms) ?? []),
+        row,
+      ]);
+  }
+  const synthetic: Sample[] = [];
+  for (const [timestamp_ms, rows] of [...groups.entries()].sort(
+    ([a], [b]) => a - b,
+  )) {
+    for (const row of rows) {
+      if (row.value.kind !== "f64") continue;
+      if (row.signal === `cv.${cv.name}.setpoint`) setpoint = row.value.value;
+      for (const edge of ["low", "high"] as const) {
+        const external = edge === "low" ? cv.band_low_opc : cv.band_high_opc;
+        if (
+          external
+            ? row.direction === "input" &&
+              row.signal === `cv.${cv.name}.band_${edge}`
+            : row.direction === "online_param" &&
+              row.signal === `mpc.cv.${cv.name}.band_${edge}`
+        )
+          offsets[edge] = row.value.value;
+      }
+    }
+    if (setpoint === undefined) continue;
+    for (const edge of missing)
+      synthetic.push({
+        timestamp_ms,
+        direction: "user_log",
+        signal: `mpc.target.cv.${cv.name}.${edge}`,
+        value: {
+          kind: "f64",
+          value:
+            setpoint +
+            (edge === "low"
+              ? Math.min(offsets.low, offsets.high)
+              : Math.max(offsets.low, offsets.high)),
+        },
+      });
+  }
+  return makeTraces(
+    synthetic,
+    missing.map((edge) => ({
+      direction: "user_log",
+      signal: `mpc.target.cv.${cv.name}.${edge}`,
+      value_kind: "f64",
+    })),
+    mode,
+  );
 }

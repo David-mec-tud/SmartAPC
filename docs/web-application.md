@@ -86,7 +86,8 @@ contract. Existing models are normalized to the imported MV/CV/DV names on save.
 | `read_node` | MV feedback, CV process value, DV measurement, or custom input Node ID |
 | `write_node` | MV command or custom output Node ID |
 | `setpoint_node` | CV setpoint input Node ID |
-| `ll`, `hl` | MV initial limits or CV absolute online optimization safety boundaries |
+| `ll`, `hl` | MV initial limits; accepted as legacy CV safety aliases on import |
+| `optimization_mode_LL`, `optimization_mode_HL` | CV absolute online optimization safety boundaries; take precedence over legacy CV aliases |
 | `ll_node`, `hl_node` | MV external limit input Node IDs |
 | `enable_node` | Optional MV/CV/DV Boolean enable input Node ID |
 | `band_low`, `band_high` | CV initial offsets relative to the setpoint |
@@ -300,3 +301,37 @@ across live updates. Forecasts use their generation time and controller step
 indices, anchored to the corresponding measured cycle. Simulation logs flush after
 64 records or one wall-clock second at the next cycle, so user logs become visible
 during real-time execution without redefining control timing.
+
+## Operational dashboard and parameter navigation
+
+**Operation → Trends** uses a mixed, paginated dashboard. The layout is columns ×
+rows, defaults to 2×2, and accepts 1–6 columns and 1–10 rows. Presets include 2×5.
+Add variable panels or searchable custom multi-trace panels, edit their content,
+reorder or remove them, then use **Save dashboard**. History source is a viewing
+choice; runtime and simulation share saved presentation settings. Narrow screens
+reflow the current page. Shrinking capacity creates more pages without losing panels.
+
+`GET/PUT /api/projects/{name}/plots/config` retains the existing fields and adds
+`dashboard: {columns, rows, panels}` and `trace_colors`. Each panel has stable `id`,
+`kind` (`mv`, `cv`, `dv`, `custom`), `name`, `title`, and `traces` (direction/signal
+pairs for custom panels). A missing dashboard migrates CV/MV/DV orders and custom
+plots; an explicitly empty dashboard stays empty. Persisted color identities include
+trace direction, separate forecasts, and shared identities for matching boundary pairs.
+Plot edits stay visible after failed saves; save responses cannot replace newer edits.
+
+CV I/O uses `optimization_mode_LL/HL`, and static online parameters use
+`io.cv.<name>.optimization_mode_LL/HL`. Old CV `ll/hl` and `io.cv.<name>.ll/hl`
+remain readable, with canonical values taking precedence. Saved TOML and API
+responses emit canonical names. Historical records remain untouched and charts
+translate their labels. Ordinary CV plots include process value, setpoint, effective
+band edges, and forecasts; safety boundaries require explicit custom selection.
+
+Online parameters have collapsible groups and case-insensitive key/label search,
+counts, and an empty state. Search reveals matching groups without discarding drafts.
+MPC exposes band low/high rather than unused legacy deadband parameters. Typed
+Boolean edits, expected-value guards, and optimization locks remain enforced by Rust.
+
+The virtual-plant API and OPC UA namespace add `band_low/high` and
+`y1_band_low/high`, respectively. These are offsets; charts show target plus offset.
+Legacy `hl/ll` payloads and `y1_HL/LL` nodes keep their absolute meaning. New manual
+band updates leave those legacy values untouched. See the clean MPC demo in README.

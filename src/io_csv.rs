@@ -23,6 +23,8 @@ const COLUMNS: &[&str] = &[
     "ll_node",
     "hl_node",
     "enable_node",
+    "optimization_mode_LL",
+    "optimization_mode_HL",
     "band_low",
     "band_high",
     "band_low_node",
@@ -47,6 +49,10 @@ struct Row {
     write_node: String,
     setpoint_node: String,
     ll: Option<f64>,
+    #[serde(rename = "optimization_mode_LL")]
+    optimization_mode_ll: Option<f64>,
+    #[serde(rename = "optimization_mode_HL")]
+    optimization_mode_hl: Option<f64>,
     hl: Option<f64>,
     ll_node: String,
     hl_node: String,
@@ -108,6 +114,8 @@ pub(crate) fn import_io_csv(content: &str) -> Result<IoCsvDraft> {
                 "read_node",
                 "setpoint_node",
                 "ll",
+                "optimization_mode_LL",
+                "optimization_mode_HL",
                 "hl",
                 "enable_node",
                 "band_low",
@@ -136,9 +144,17 @@ pub(crate) fn import_io_csv(content: &str) -> Result<IoCsvDraft> {
                 );
             }
         }
-        for value in [row.ll, row.hl, row.band_low, row.band_high, row.deadband]
-            .into_iter()
-            .flatten()
+        for value in [
+            row.ll,
+            row.hl,
+            row.optimization_mode_ll,
+            row.optimization_mode_hl,
+            row.band_low,
+            row.band_high,
+            row.deadband,
+        ]
+        .into_iter()
+        .flatten()
         {
             ensure!(
                 value.is_finite(),
@@ -174,8 +190,8 @@ pub(crate) fn import_io_csv(content: &str) -> Result<IoCsvDraft> {
                     name: row.name,
                     process_value: row.read_node,
                     setpoint: row.setpoint_node,
-                    ll: row.ll,
-                    hl: row.hl,
+                    ll: row.optimization_mode_ll.or(row.ll),
+                    hl: row.optimization_mode_hl.or(row.hl),
                     enable: optional(row.enable_node),
                     band_low_value: row.band_low,
                     band_high_value: row.band_high,
@@ -236,8 +252,8 @@ pub(crate) fn example_io_csv() -> Result<String> {
             signal_type: "f64".into(),
             read_node: "ns=2;s=Temperature".into(),
             setpoint_node: "ns=2;s=TemperatureTarget".into(),
-            ll: Some(0.0),
-            hl: Some(200.0),
+            optimization_mode_ll: Some(0.0),
+            optimization_mode_hl: Some(200.0),
             band_low: Some(-2.0),
             band_high: Some(2.0),
             ..Row::default()
@@ -280,6 +296,17 @@ pub(crate) fn example_io_csv() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cv_csv_accepts_legacy_limits_but_prefers_optimization_names() {
+        let draft = import_io_csv("group,name,ll,hl,optimization_mode_LL,optimization_mode_HL,band_low,band_high\ncv,y1,-100,100,-20,20,-0.5,0.5\n").unwrap();
+        assert_eq!(draft.io_definition.cvs[0].ll, Some(-20.0));
+        assert_eq!(draft.io_definition.cvs[0].hl, Some(20.0));
+        assert_eq!(draft.io_definition.cvs[0].band_offsets(), (-0.5, 0.5));
+        let legacy = import_io_csv("group,name,ll,hl\ncv,y1,-100,100\n").unwrap();
+        assert_eq!(legacy.io_definition.cvs[0].ll, Some(-100.0));
+        assert!(example_io_csv().unwrap().contains("optimization_mode_LL"));
+    }
 
     #[test]
     fn example_preserves_directions_types_and_strict_strategy_contract() {

@@ -148,7 +148,8 @@ test("live simulation settings, concurrent applied values and persistent custom 
   await expect(page.locator(".js-plotly-plot").first()).toBeVisible();
   await page.getByLabel("Sliding history (s)").fill("30");
   await page.getByLabel("Future horizon (s)").focus();
-  await page.getByRole("button", { name: "Custom plots", exact: true }).click();
+  await page.getByRole("button", { name: "Add plot", exact: true }).click();
+  await page.getByLabel("Plot type", { exact: true }).selectOption("custom");
   await page.getByLabel("Plot title").fill("Actuator and process");
   await page
     .locator(".series-picker label")
@@ -162,15 +163,16 @@ test("live simulation settings, concurrent applied values and persistent custom 
     .first()
     .getByRole("checkbox")
     .check();
-  await page
-    .getByRole("button", { name: "Save custom plot", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Apply plot", exact: true }).click();
   await expect(
     page.getByText("Actuator and process", { exact: true }).first(),
   ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Save dashboard", exact: true })
+    .click();
+  await expect(page.getByText(/Dashboard changes are unsaved/)).toHaveCount(0);
   await page.reload();
   await expect(page.getByLabel("Sliding history (s)")).toHaveValue("30");
-  await page.getByRole("button", { name: "Custom plots", exact: true }).click();
   await expect(
     page.getByText("Actuator and process", { exact: true }).first(),
   ).toBeVisible();
