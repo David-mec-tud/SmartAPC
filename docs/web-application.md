@@ -201,6 +201,56 @@ Launch that package separately on port 18083 with an isolated project root. This
 journey blocks external browser requests and checks refreshed deep links and all
 local JS/CSS/Plotly assets.
 
+## Linear MPC objectives
+
+**Configuration → Control strategy → MV & CV optimisation objectives** has a
+mode and nonnegative integer priority for every configured MV/CV. Strategy
+autosave uses the existing revision, execution and job gates. Invalid priorities
+retain the browser draft; correcting the value resumes saving. Renaming a
+variable preserves its objective. These settings are engineering configuration,
+separate from online parameters and numeric parameter optimization.
+
+| Mode | MV objective | CV objective |
+| --- | --- | --- |
+| Maximise | Raise the predicted MV toward its live HL | Raise the prediction toward the upper band edge |
+| Minimise | Lower the predicted MV toward its live LL | Lower the prediction toward the lower band edge |
+| Minimum move | Penalize each move using the selected L2/L1 cost | Penalize changes from the free prediction with MVs held |
+
+CV edges remain live setpoint plus band offsets; external OPC UA edges retain
+precedence. MV LL/HL and maximum per-cycle moves remain hard constraints. CV
+`optimization_mode_LL/HL` remain online parameter optimization safety boundaries
+and do not define MPC bands.
+
+When modes or priorities differ from all minimum move at priority 0, Rust first
+minimizes squared CV band violations, weighted by Q (with a positive floor).
+Feasible bands therefore bound subsequent objectives. Unreachable bands remain
+soft at the best achievable recovery. It then solves priority 0, 1, 2, etc.,
+preserving each tier's optimum before continuing, within numerical tolerance.
+Only configured priorities are visited; gaps in the numbering are allowed.
+Same-priority CV and MV objectives use Q and R weights, respectively. Directional
+objectives are linear costs across the prediction horizon. Minimum-move CV costs
+are squared; MV costs retain the Boolean `use_l1` choice. A failed or non-converged
+tier uses the existing fallback and clears suggestion readiness.
+
+The default, all minimum move at priority 0, preserves the existing weighted
+soft-band Q/R calculation. Legacy TOML needs no migration. Saved settings use
+`logic.linear_mpc.mvs.<name>` and `logic.linear_mpc.cvs.<name>`, for example:
+
+```toml
+[logic.linear_mpc.mvs.u1]
+mode = "minimize"
+priority = 1
+
+[logic.linear_mpc.cvs.y1]
+mode = "maximize"
+priority = 0
+```
+
+Wire mode values are `maximize`, `minimize`, and `minimum_move`; missing entries
+default to `minimum_move` with priority `0`. Negative/fractional priorities and
+unknown modes are rejected by Rust. Existing parameter previews and tuning
+catalogs remain numeric/Boolean and exclude these choices.
+
 ## API and ownership
 
 Typed wire DTOs live in `frontend/src/api.ts`. Rust integration tests exercise

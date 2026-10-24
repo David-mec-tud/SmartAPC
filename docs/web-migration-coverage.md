@@ -82,6 +82,31 @@ aligned to that order. In-app visual inspection confirmed the order at 1280×720
 typecheck/build and four Vitest tests passed. The existing `workspace` control-test
 navigation and deployment-readiness journey passed against an isolated Rust backend.
 
+## Linear MPC objectives (2026-10-24)
+
+Per-MV/CV maximise, minimise and minimum-move objectives and integer priorities
+are configured in the browser strategy form and saved as typed
+`logic.linear_mpc` engineering settings. Rust runtime and simulation share the
+staged solver: CV band recovery, then increasing priority numbers with earlier
+optima preserved. Live external band ownership, hard MV limits/rates, L1/L2
+movement selection, strict I/O contracts and fallback readiness gates remain in
+place. Legacy default objectives retain the existing soft-band Q/R behaviour.
+
+Evidence: Rust objective tests cover all modes, conflicting CV and MV priorities,
+weight independence across priorities, negative process gains, same-priority
+L1/L2 tradeoffs, unreachable bands, cumulative limits/rates, live bands and failed
+solver readiness. Configuration/API tests cover legacy defaults, TOML roundtrip,
+typed mode/priority validation, autosave, revision and execution locks. The `mpc`
+browser journey covers edits, autosave/reload, invalid drafts, variable rename,
+closed-loop simulation within bands and execution-locked controls.
+
+Validation: `cargo fmt`, default/native `cargo check --offline` and
+`cargo test --offline` passed (134/148 tests). Frontend typecheck/build and all
+10 Vitest tests passed with Node 24. The 10 `mpc`/`workspace`/`tuning` Playwright
+journeys passed across targeted runs against isolated local Rust/OPC UA servers.
+In-app inspection confirmed the mode/priority table and saved values at desktop
+width. Serving and packaging were unchanged.
+
 ## Operating and platform limits
 
 Deployment startup guidance verified on 2026-10-23: Validate & run now lists

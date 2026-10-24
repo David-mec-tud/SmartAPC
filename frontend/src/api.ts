@@ -21,6 +21,14 @@ export interface Variables {
   cvs: string[];
   dvs: string[];
 }
+export interface MpcVariableObjective {
+  mode: "maximize" | "minimize" | "minimum_move";
+  priority: number;
+}
+export interface LinearMpcConfig {
+  mvs: Record<string, MpcVariableObjective>;
+  cvs: Record<string, MpcVariableObjective>;
+}
 export interface Mv {
   name: string;
   mv_write: string;
@@ -178,6 +186,7 @@ export interface ProjectConfig {
     p_controller: {
       pairs: { cv: string; mv: string; kp: number; bias: number }[];
     };
+    linear_mpc: LinearMpcConfig;
     custom_rust: {
       strategy_name: string;
       source_path: string;

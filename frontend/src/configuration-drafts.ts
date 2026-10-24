@@ -64,6 +64,13 @@ export function renameVariable(
     if (kind === "cv" && pair.cv === previous) pair.cv = nextName;
     if (kind === "mv" && pair.mv === previous) pair.mv = nextName;
   }
+  if (group === "mvs" || group === "cvs") {
+    const objectives = config.logic.linear_mpc[group];
+    if (previous in objectives) {
+      objectives[nextName] = objectives[previous];
+      delete objectives[previous];
+    }
+  }
   if (config.model) {
     config.model.u_order = config.model.u_order.map((name) =>
       kind !== "cv" && name === previous ? nextName : name,

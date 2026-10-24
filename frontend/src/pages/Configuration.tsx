@@ -26,6 +26,7 @@ import {
 import { MatrixEditor, resizeMatrix } from "../components/MatrixEditor";
 import { ModelCsv } from "../components/ModelCsv";
 import { IoCsv } from "../components/IoCsv";
+import { MpcObjectives } from "../components/MpcObjectives";
 import { renameVariable } from "../configuration-drafts";
 import {
   HardwareTestResults,
@@ -413,6 +414,8 @@ function Io() {
                           next.variables[group] = next.variables[group].filter(
                             (name) => name !== row.name,
                           );
+                        if (group === "mvs" || group === "cvs")
+                          delete next.logic.linear_mpc[group][row.name];
                         (next.io_definition[group] as IoRow[]).splice(index, 1);
                       })
                     }
@@ -926,6 +929,17 @@ function Strategy() {
             Add pairing
           </Button>
         </section>
+      )}
+      {cfg.logic.kind === "linear_mpc" && (
+        <MpcObjectives
+          variables={cfg.variables}
+          objectives={cfg.logic.linear_mpc}
+          onChange={(group, name, objective) =>
+            edit((next) => {
+              next.logic.linear_mpc[group][name] = objective;
+            })
+          }
+        />
       )}
       {cfg.logic.kind === "linear_mpc" && (
         <Notice>

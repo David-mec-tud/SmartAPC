@@ -48,6 +48,22 @@ signal labels in order. The entire import is validated before updating the draft
 use **Save configuration** to persist it. Manual matrix editing remains available.
 See the [CSV layout and example](docs/web-application.md#model-csv-import).
 
+## Linear MPC optimisation modes and priorities
+
+In **Configuration → Control strategy**, select **Linear MPC** and set each MV
+and CV to **Maximise**, **Minimise**, or **Minimum move**. Priority **0** is
+highest, followed by **1**, **2**, etc. Changes save automatically and require
+the project to be stopped.
+
+Maximise seeks the high edge; minimise seeks the low edge. MV objectives use
+their LL/HL limits; CV objectives use the live setpoint plus low/high band
+offsets. Minimum move penalizes MV changes and changes from the free CV
+prediction. Higher priorities take precedence, while Q/R weights balance
+objectives at the same priority. CV band recovery precedes these objectives;
+unreachable CV bands remain soft. Existing projects default to minimum move at
+priority 0 and retain the established soft-band Q/R behaviour. See the
+[solver and configuration details](docs/web-application.md#linear-mpc-objectives).
+
 ## Controller deployment handshake
 
 In **Deployment → Validate & run**, resolve the listed startup steps, then select
