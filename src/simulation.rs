@@ -372,6 +372,10 @@ impl SimulationCore {
                 simulation_cv_scalar(params, &self.config.io_definition.cvs, name, "deadband")
                     .map(SignalValue::F64)
             }
+            ("cv", "band_low" | "band_high") => {
+                simulation_cv_scalar(params, &self.config.io_definition.cvs, name, field)
+                    .map(SignalValue::F64)
+            }
             ("dv", "read") => Some(SignalValue::F64(*self.current_dv.get(name).unwrap_or(&0.0))),
             ("dv", "enable") => Some(SignalValue::Bool(true)),
             _ => None,
@@ -586,6 +590,9 @@ fn simulation_cv_scalar(
         .find(|row| row.name == name)
         .and_then(|row| match suffix {
             "deadband" => row.deadband_value,
+            // Offline execution cannot read OPC UA; use the configured initial offsets.
+            "band_low" => Some(row.band_offsets().0),
+            "band_high" => Some(row.band_offsets().1),
             _ => None,
         })
 }
@@ -908,6 +915,29 @@ mod tests {
     }
 
     #[test]
+    fn offline_cv_bands_use_initial_values_without_opc_ua() {
+        let row: CvIoDefinition = toml::from_str(
+            r#"
+            name = "y1"
+            band_low_opc = "ns=2;s=BAND_LOW"
+            band_high_opc = "ns=2;s=BAND_HIGH"
+            band_low_value = -2.0
+            band_high_value = 3.0
+        "#,
+        )
+        .expect("external bands");
+        let rows = [row];
+        assert_eq!(
+            simulation_cv_scalar(&HashMap::new(), &rows, "y1", "band_low"),
+            Some(-2.0)
+        );
+        assert_eq!(
+            simulation_cv_scalar(&HashMap::new(), &rows, "y1", "band_high"),
+            Some(3.0)
+        );
+    }
+
+    #[test]
     fn steady_state_solver_rejects_singular_system() {
         let model = LinearStateSpaceModelConfig {
             state_count: 1,
@@ -966,6 +996,10 @@ mod tests {
                 process_value: String::new(),
                 hl: Some(100.0),
                 ll: Some(-100.0),
+                band_low_opc: None,
+                band_high_opc: None,
+                band_low_value: None,
+                band_high_value: None,
                 deadband_opc: None,
                 deadband_value: Some(0.05),
                 enable: None,
@@ -1043,6 +1077,10 @@ mod tests {
                 process_value: String::new(),
                 hl: Some(100.0),
                 ll: Some(-100.0),
+                band_low_opc: None,
+                band_high_opc: None,
+                band_low_value: None,
+                band_high_value: None,
                 deadband_opc: None,
                 deadband_value: Some(0.05),
                 enable: None,

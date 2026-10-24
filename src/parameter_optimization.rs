@@ -871,8 +871,11 @@ fn simulated_input_value(
         )),
         ("cv", "process_value") => Some(SignalValue::F64(*current_cv.get(name).unwrap_or(&0.0))),
         ("cv", "enable") => Some(SignalValue::Bool(true)),
-        ("cv", "deadband") => {
-            simulation_cv_scalar(params, &config.io_definition.cvs, name).map(SignalValue::F64)
+        ("cv", "deadband") => simulation_cv_scalar(params, &config.io_definition.cvs, name, field)
+            .map(SignalValue::F64),
+        ("cv", "band_low" | "band_high") => {
+            simulation_cv_scalar(params, &config.io_definition.cvs, name, field)
+                .map(SignalValue::F64)
         }
         ("dv", "read") => Some(SignalValue::F64(*current_dv.get(name).unwrap_or(&0.0))),
         ("dv", "enable") => Some(SignalValue::Bool(true)),
@@ -903,14 +906,20 @@ fn simulation_cv_scalar(
     params: &HashMap<String, LogicParamValue>,
     rows: &[crate::project_config::CvIoDefinition],
     name: &str,
+    suffix: &str,
 ) -> Option<f64> {
-    let param_key = format!("io.cv.{name}.deadband");
+    let param_key = format!("io.cv.{name}.{suffix}");
     if let Some(LogicParamValue::F64(value)) = params.get(&param_key) {
         return Some(*value);
     }
     rows.iter()
         .find(|row| row.name == name)
-        .and_then(|row| row.deadband_value)
+        .and_then(|row| match suffix {
+            "deadband" => row.deadband_value,
+            "band_low" => Some(row.band_offsets().0),
+            "band_high" => Some(row.band_offsets().1),
+            _ => None,
+        })
 }
 
 fn scaled_model_matrices(
@@ -1208,6 +1217,10 @@ mod tests {
                 hl: Some(100.0),
                 ll: Some(-100.0),
                 deadband_value: Some(0.0),
+                band_low_opc: None,
+                band_high_opc: None,
+                band_low_value: None,
+                band_high_value: None,
                 deadband_opc: None,
                 enable: None,
             }],
@@ -1286,6 +1299,10 @@ mod tests {
                 hl: Some(100.0),
                 ll: Some(-100.0),
                 deadband_value: Some(0.0),
+                band_low_opc: None,
+                band_high_opc: None,
+                band_low_value: None,
+                band_high_value: None,
                 deadband_opc: None,
                 enable: None,
             }],

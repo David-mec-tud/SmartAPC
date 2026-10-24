@@ -191,10 +191,16 @@ struct CvIoEditorRow {
     ll: String,
     deadband_value: String,
     deadband_opc: String,
+    band_low_value: String,
+    band_high_value: String,
+    band_low_opc: String,
+    band_high_opc: String,
     enable: String,
     read_setpoint: String,
     read_process_value: String,
     read_deadband: String,
+    read_band_low: String,
+    read_band_high: String,
     read_enable: String,
     test_write: String,
 }
@@ -209,10 +215,16 @@ impl CvIoEditorRow {
             ll: String::new(),
             deadband_value: String::new(),
             deadband_opc: String::new(),
+            band_low_value: String::new(),
+            band_high_value: String::new(),
+            band_low_opc: String::new(),
+            band_high_opc: String::new(),
             enable: String::new(),
             read_setpoint: String::new(),
             read_process_value: String::new(),
             read_deadband: String::new(),
+            read_band_low: String::new(),
+            read_band_high: String::new(),
             read_enable: String::new(),
             test_write: String::new(),
         }
@@ -230,10 +242,22 @@ impl CvIoEditorRow {
                 .map(|v| format!("{v}"))
                 .unwrap_or_default(),
             deadband_opc: def.deadband_opc.clone().unwrap_or_default(),
+            band_low_value: def
+                .band_low_value
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            band_high_value: def
+                .band_high_value
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            band_low_opc: def.band_low_opc.clone().unwrap_or_default(),
+            band_high_opc: def.band_high_opc.clone().unwrap_or_default(),
             enable: def.enable.clone().unwrap_or_default(),
             read_setpoint: String::new(),
             read_process_value: String::new(),
             read_deadband: String::new(),
+            read_band_low: String::new(),
+            read_band_high: String::new(),
             read_enable: String::new(),
             test_write: String::new(),
         }
@@ -820,7 +844,11 @@ impl LogicEditorState {
         let mpc_params = linear_mpc_editor_rows(
             cfg.model.as_ref().and_then(ModelConfig::linear_state_space),
             &cfg.variables,
-            &cfg.static_cv_band_defaults(),
+            &cfg.io_definition
+                .cvs
+                .iter()
+                .map(CvIoEditorRow::from_definition)
+                .collect::<Vec<_>>(),
             &cfg.logic.params,
             &[],
         );
@@ -1521,6 +1549,8 @@ struct CvReadValues {
     setpoint: String,
     process_value: String,
     deadband: String,
+    band_low: String,
+    band_high: String,
     enable: String,
 }
 
@@ -1587,6 +1617,10 @@ enum Message {
     CvLlChanged(usize, String),
     CvDeadbandValueChanged(usize, String),
     CvDeadbandOpcChanged(usize, String),
+    CvBandLowValueChanged(usize, String),
+    CvBandHighValueChanged(usize, String),
+    CvBandLowOpcChanged(usize, String),
+    CvBandHighOpcChanged(usize, String),
     CvEnableChanged(usize, String),
     CvTestWriteChanged(usize, String),
     DvReadChanged(usize, String),
@@ -1951,7 +1985,7 @@ impl DesktopApp {
                 .as_ref()
                 .and_then(ModelConfig::linear_state_space),
             &self.variables,
-            &cv_band_defaults_from_editor_rows(&self.cv_io_rows),
+            &self.cv_io_rows,
             &self.logic_params,
             &self.logic_editor.mpc_params,
         );
@@ -3010,6 +3044,34 @@ impl DesktopApp {
                 }
                 Task::none()
             }
+            Message::CvBandLowValueChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.band_low_value = value;
+                }
+                self.refresh_linear_mpc_editor_params();
+                Task::none()
+            }
+            Message::CvBandHighValueChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.band_high_value = value;
+                }
+                self.refresh_linear_mpc_editor_params();
+                Task::none()
+            }
+            Message::CvBandLowOpcChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.band_low_opc = value;
+                }
+                self.refresh_linear_mpc_editor_params();
+                Task::none()
+            }
+            Message::CvBandHighOpcChanged(index, value) => {
+                if let Some(row) = self.cv_io_rows.get_mut(index) {
+                    row.band_high_opc = value;
+                }
+                self.refresh_linear_mpc_editor_params();
+                Task::none()
+            }
             Message::CvTestWriteChanged(index, value) => {
                 if let Some(row) = self.cv_io_rows.get_mut(index) {
                     row.test_write = value;
@@ -3076,6 +3138,8 @@ impl DesktopApp {
                         row.read_setpoint = value.setpoint;
                         row.read_process_value = value.process_value;
                         row.read_deadband = value.deadband;
+                        row.read_band_low = value.band_low;
+                        row.read_band_high = value.band_high;
                         row.read_enable = value.enable;
                     }
                     for (row, value) in self.dv_io_rows.iter_mut().zip(values.dv_values) {
@@ -5812,8 +5876,11 @@ impl DesktopApp {
             }
 
             content = content.push(
-                text("CV: configure SETPOINT, PROCESS VALUE, predefined safety LL/HL, DEADBAND, and Enable. Online optimization CV limits must stay inside the predefined LL/HL.")
+                text("CV: configure SETPOINT, PROCESS VALUE, DEADBAND, CV Band Low/High, and Enable. CV LL/HL are absolute safety limits for online optimization only. Online optimization limits must stay inside these boundaries.")
                     .size(13),
+            );
+            content = content.push(
+                text("CV Band Low/High are offsets from the live setpoint (e.g. -2 / +3). Optional OPC UA Node IDs supply live MPC band values; otherwise MPC uses local parameters initialized here. Blank band initial values keep the existing deadband defaults.").size(13),
             );
             for (index, row_data) in self.cv_io_rows.iter().enumerate() {
                 content = content.push(
@@ -5834,9 +5901,9 @@ impl DesktopApp {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("CV LL").width(Length::FillPortion(2)),
+                            text("CV LL (Safety Limit Low)").width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(3)),
-                            text_input("required for optimization", &row_data.ll)
+                            text_input("online optimization only", &row_data.ll)
                                 .on_input(move |value| Message::CvLlChanged(index, value))
                                 .width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(2)),
@@ -5845,9 +5912,9 @@ impl DesktopApp {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         row![
-                            text("CV HL").width(Length::FillPortion(2)),
+                            text("CV HL (Safety Limit High)").width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(3)),
-                            text_input("required for optimization", &row_data.hl)
+                            text_input("online optimization only", &row_data.hl)
                                 .on_input(move |value| Message::CvHlChanged(index, value))
                                 .width(Length::FillPortion(2)),
                             text_input("", "").width(Length::FillPortion(2)),
@@ -5880,6 +5947,36 @@ impl DesktopApp {
                             text_input("read", &row_data.read_deadband)
                                 .width(Length::FillPortion(2)),
                             text_input("write", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("CV Band Low").width(Length::FillPortion(2)),
+                            text_input("Node ID (optional)", &row_data.band_low_opc)
+                                .on_input(move |value| Message::CvBandLowOpcChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init offset", &row_data.band_low_value)
+                                .on_input(move |value| Message::CvBandLowValueChanged(index, value))
+                                .width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_band_low)
+                                .width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        row![
+                            text("CV Band High").width(Length::FillPortion(2)),
+                            text_input("Node ID (optional)", &row_data.band_high_opc)
+                                .on_input(move |value| Message::CvBandHighOpcChanged(index, value))
+                                .width(Length::FillPortion(3)),
+                            text_input("init offset", &row_data.band_high_value)
+                                .on_input(move |value| Message::CvBandHighValueChanged(
+                                    index, value
+                                ))
+                                .width(Length::FillPortion(2)),
+                            text_input("read", &row_data.read_band_high)
+                                .width(Length::FillPortion(2)),
+                            text_input("", "").width(Length::FillPortion(2)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -6725,7 +6822,7 @@ where
 fn linear_mpc_editor_rows(
     model: Option<&LinearStateSpaceModelConfig>,
     vars: &VariableCatalogConfig,
-    cv_band_defaults: &HashMap<String, f64>,
+    cv_rows: &[CvIoEditorRow],
     params: &HashMap<String, LogicParamValue>,
     edited_rows: &[MpcParamEditorRow],
 ) -> Vec<MpcParamEditorRow> {
@@ -6740,7 +6837,18 @@ fn linear_mpc_editor_rows(
         .iter()
         .map(|row| (row.key.clone(), row.value.clone()))
         .collect();
-    let defaults = linear_mpc_default_params(model, vars, cv_band_defaults);
+    let mut defaults =
+        linear_mpc_default_params(model, vars, &cv_band_defaults_from_editor_rows(cv_rows));
+    for row in cv_rows {
+        for (suffix, opc) in [
+            ("band_low", &row.band_low_opc),
+            ("band_high", &row.band_high_opc),
+        ] {
+            if !opc.trim().is_empty() {
+                defaults.remove(&format!("mpc.cv.{}.{suffix}", row.name));
+            }
+        }
+    }
     let mut keys: Vec<_> = defaults.keys().cloned().collect();
     keys.sort();
 
@@ -6762,16 +6870,33 @@ fn linear_mpc_editor_rows(
         .collect()
 }
 
-fn cv_band_defaults_from_editor_rows(rows: &[CvIoEditorRow]) -> HashMap<String, f64> {
+fn cv_band_defaults_from_editor_rows(rows: &[CvIoEditorRow]) -> HashMap<String, (f64, f64)> {
     let mut defaults = HashMap::new();
     for row in rows {
         let name = row.name.trim();
-        if name.is_empty() || !row.deadband_opc.trim().is_empty() {
+        if name.is_empty() {
             continue;
         }
-        if let Ok(value) = row.deadband_value.trim().parse::<f64>() {
-            defaults.insert(name.to_string(), value);
-        }
+        let deadband = if row.deadband_opc.trim().is_empty() {
+            row.deadband_value
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                .abs()
+        } else {
+            0.0
+        };
+        let low = row
+            .band_low_value
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(-deadband);
+        let high = row
+            .band_high_value
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(deadband);
+        defaults.insert(name.to_string(), (low, high));
     }
     defaults
 }
@@ -7407,11 +7532,15 @@ fn test_io_read_task(
                 let setpoint = read_optional_tag(&adapter, row.setpoint.trim()).await;
                 let process_value = read_optional_tag(&adapter, row.process_value.trim()).await;
                 let deadband = read_optional_tag(&adapter, row.deadband_opc.trim()).await;
+                let band_low = read_optional_tag(&adapter, row.band_low_opc.trim()).await;
+                let band_high = read_optional_tag(&adapter, row.band_high_opc.trim()).await;
                 let enable = read_optional_tag(&adapter, row.enable.trim()).await;
                 cv_values.push(CvReadValues {
                     setpoint,
                     process_value,
                     deadband,
+                    band_low,
+                    band_high,
                     enable,
                 });
             }
@@ -7514,6 +7643,7 @@ fn save_io_definition_task(
             let vars = build_variable_catalog(&mv_name_rows, &cv_name_rows, &dv_name_rows)?;
             cfg.variables = vars.clone();
             let custom_variables = cfg.io_definition.custom.clone();
+            let previous_io_definition = cfg.io_definition.clone();
             cfg.io_definition = build_io_definition(&vars, &mv_rows, &cv_rows, &dv_rows)?;
             // The native compatibility editor has no custom rows; retain browser-defined signals.
             cfg.io_definition.custom = custom_variables;
@@ -7526,6 +7656,7 @@ fn save_io_definition_task(
             if cfg.io.cycle_ms == 0 {
                 return Err("io.cycle_ms must be > 0".to_string());
             }
+            cfg.sync_cv_band_initial_values(&previous_io_definition);
             sync_io_initial_value_online_params(&mut cfg);
 
             project_service
@@ -8477,7 +8608,7 @@ fn build_io_definition(
         };
         let deadband_opc = optional_trimmed(&row.deadband_opc);
 
-        cvs.push(CvIoDefinition {
+        let definition = CvIoDefinition {
             name: name.clone(),
             setpoint,
             process_value,
@@ -8485,8 +8616,22 @@ fn build_io_definition(
             ll,
             deadband_opc,
             deadband_value,
+            band_low_opc: optional_trimmed(&row.band_low_opc),
+            band_high_opc: optional_trimmed(&row.band_high_opc),
+            band_low_value: parse_optional_f64(
+                &format!("CV '{}' Band Low", name),
+                &row.band_low_value,
+            )?,
+            band_high_value: parse_optional_f64(
+                &format!("CV '{}' Band High", name),
+                &row.band_high_value,
+            )?,
             enable: optional_trimmed(&row.enable),
-        });
+        };
+        definition
+            .validate_band_values()
+            .map_err(|err| err.to_string())?;
+        cvs.push(definition);
     }
 
     let mut dvs = Vec::new();
@@ -9424,13 +9569,14 @@ mod tests {
     };
 
     use super::{
-        LogicEditorState, ModelEditorState, ModelKindChoice, MovementCostChoice,
+        CvIoEditorRow, LogicEditorState, ModelEditorState, ModelKindChoice, MovementCostChoice,
         OnlineOptimizationEditorState, ParameterHierarchyItem, ParameterHierarchyScope,
-        SimulationEditorState, build_model_config_from_editor, build_simulation_config_from_editor,
-        format_duration_hms, parameter_heading_label, parameter_heading_size, parameter_hierarchy,
-        parameter_hierarchy_indent_px, parameter_leaf_label, parse_duration_hms,
-        parse_matrix_import_text, parse_mpc_initial_params, resize_string_matrix,
-        sync_io_initial_value_online_params, visible_parameter_hierarchy,
+        SimulationEditorState, build_io_definition, build_model_config_from_editor,
+        build_simulation_config_from_editor, format_duration_hms, parameter_heading_label,
+        parameter_heading_size, parameter_hierarchy, parameter_hierarchy_indent_px,
+        parameter_leaf_label, parse_duration_hms, parse_matrix_import_text,
+        parse_mpc_initial_params, resize_string_matrix, sync_io_initial_value_online_params,
+        visible_parameter_hierarchy,
     };
 
     fn model_test_vars() -> VariableCatalogConfig {
@@ -9667,6 +9813,10 @@ mod tests {
             process_value: "ns=2;s=y1_value".to_string(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(0.5),
             enable: None,
@@ -9721,6 +9871,10 @@ mod tests {
             process_value: "cv.y1.process_value".to_string(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(0.25),
             enable: None,
@@ -9780,6 +9934,51 @@ mod tests {
             .unwrap()
             .value = "L1".to_string();
         assert!(parse_mpc_initial_params(&edited_rows, &typed_cfg.logic.params).is_err());
+
+        cfg.io_definition.cvs[0].band_low_opc = Some("ns=2;s=BAND_LOW".to_string());
+        cfg.io_definition.cvs[0].band_high_value = Some(3.0);
+        let editor = LogicEditorState::from_config(&cfg);
+        assert!(
+            !editor
+                .mpc_params
+                .iter()
+                .any(|row| row.key == "mpc.cv.y1.band_low")
+        );
+        assert_eq!(
+            editor
+                .mpc_params
+                .iter()
+                .find(|row| row.key == "mpc.cv.y1.band_high")
+                .expect("local edge")
+                .value,
+            "3.0000"
+        );
+    }
+
+    #[test]
+    fn cv_band_io_editor_preserves_offsets_and_opc_sources() {
+        let vars = VariableCatalogConfig {
+            cvs: vec!["y1".to_string()],
+            ..Default::default()
+        };
+        let mut row = CvIoEditorRow::blank();
+        row.name = "y1".to_string();
+        row.band_low_opc = " ns=2;s=BAND_LOW ".to_string();
+        row.band_high_opc = "ns=2;s=BAND_HIGH".to_string();
+        row.band_low_value = "-0.000035".to_string();
+        row.band_high_value = "3".to_string();
+        let definition =
+            build_io_definition(&vars, &[], &[row.clone()], &[]).expect("I/O definition");
+        let saved = &definition.cvs[0];
+        assert_eq!(saved.band_low_opc.as_deref(), Some("ns=2;s=BAND_LOW"));
+        let reloaded = CvIoEditorRow::from_definition(saved);
+        assert_eq!(reloaded.band_low_value, "-0.000035");
+        assert_eq!(reloaded.band_high_value, "3");
+        assert_eq!(reloaded.band_high_opc, "ns=2;s=BAND_HIGH");
+        row.band_low_value = "4".to_string();
+        assert!(build_io_definition(&vars, &[], &[row.clone()], &[]).is_err());
+        row.band_low_value = "NaN".to_string();
+        assert!(build_io_definition(&vars, &[], &[row], &[]).is_err());
     }
 
     #[test]

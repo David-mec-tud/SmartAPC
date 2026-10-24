@@ -728,6 +728,8 @@ fn default_numeric_input_baseline(config: &ProjectConfig, signal_name: &str) -> 
             if let Some(row) = config.io_definition.cvs.iter().find(|row| row.name == name) {
                 return match suffix {
                     "deadband" => row.deadband_value.unwrap_or(0.0),
+                    "band_low" => row.band_offsets().0,
+                    "band_high" => row.band_offsets().1,
                     _ => 0.0,
                 };
             }
@@ -871,6 +873,10 @@ mod tests {
                 process_value: "ns=2;s=y1_ist".to_string(),
                 hl: Some(100.0),
                 ll: Some(-100.0),
+                band_low_opc: None,
+                band_high_opc: None,
+                band_low_value: None,
+                band_high_value: None,
                 deadband_opc: None,
                 deadband_value: Some(2.0),
                 enable: Some("ns=2;s=y1_enable".to_string()),

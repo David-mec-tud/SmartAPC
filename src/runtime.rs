@@ -1245,8 +1245,9 @@ pub(crate) fn build_logic(
                 config.variables.clone(),
                 config.logic.cycle_ms,
                 config.logic.params.clone(),
-                config.static_cv_band_defaults(),
-            );
+                config.cv_band_defaults(),
+            )
+            .with_io_contract(io);
             if !logic.is_configured() {
                 bail!("Linear MPC has no usable MV/CV model configuration");
             }
@@ -1691,6 +1692,110 @@ mod tests {
 
         let written = adapter.read("ns=2;s=U1_WRITE").await.expect("read output");
         assert_eq!(written, SignalValue::F64(1.0));
+    }
+
+    #[tokio::test]
+    async fn opc_cv_band_changes_reach_mpc_outputs_and_diagnostics() {
+        let mut cfg = base_config();
+        cfg.variables.mvs = vec!["u1".to_string()];
+        cfg.variables.cvs = vec!["y1".to_string()];
+        cfg.io_definition = toml::from_str(
+            r#"
+            [[mvs]]
+            name = "u1"
+            mv_write = "ns=2;s=U1_WRITE"
+            ll = -10.0
+            hl = 10.0
+            [[cvs]]
+            name = "y1"
+            setpoint = "ns=2;s=Y1_SETPOINT"
+            process_value = "ns=2;s=Y1_PROCESS_VALUE"
+            band_low_opc = "ns=2;s=Y1_BAND_LOW"
+            band_high_opc = "ns=2;s=Y1_BAND_HIGH"
+            band_low_value = -0.5
+            band_high_value = 0.5
+        "#,
+        )
+        .expect("I/O definition");
+        cfg.model = Some(ModelConfig::LinearStateSpace {
+            model: crate::project_config::LinearStateSpaceModelConfig {
+                state_count: 1,
+                u_order: vec!["u1".to_string()],
+                y_order: vec!["y1".to_string()],
+                a: vec![vec![-1.0]],
+                b: vec![vec![1.0]],
+                c: vec![vec![1.0]],
+                d: vec![vec![0.0]],
+            },
+        });
+        cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("runtime I/O");
+        cfg.sync_active_online_params();
+
+        let adapter = Arc::new(OpcUaClientAdapter::new("mock://runtime-cv-bands"));
+        seed_protocol_nodes(adapter.as_ref(), &cfg).expect("seed");
+        adapter.seed_node("ns=2;s=Y1_SETPOINT", SignalValue::F64(1.0));
+        adapter.seed_node("ns=2;s=Y1_BAND_LOW", SignalValue::F64(-2.0));
+        adapter.seed_node("ns=2;s=Y1_BAND_HIGH", SignalValue::F64(2.0));
+        let directory = tempdir().expect("tempdir");
+        let log_path = directory.path().join("runtime.log");
+        let logic = build_logic(&cfg, &cfg.io, directory.path()).expect("MPC");
+        let mut core = RuntimeCore::new(
+            cfg,
+            adapter.clone(),
+            Box::new(NoneWatchdog),
+            logic,
+            None,
+            SqliteStorage::new(directory.path().join("runtime.sqlite")).expect("storage"),
+            File::create(&log_path).expect("log"),
+        )
+        .await
+        .expect("runtime");
+        core.tick_once().await.expect("wide-band cycle");
+        let wide_command = core.last_outputs["mv.u1.write"]
+            .as_f64()
+            .expect("numeric suggestion");
+        assert!(wide_command.abs() < 1e-8);
+        assert!(
+            core.set_params(HashMap::from([(
+                "mpc.cv.y1.band_low".to_string(),
+                LogicParamValue::F64(-5.0)
+            )]))
+            .is_err()
+        );
+
+        // Make the next I/O/controller cycles due without a wall-clock sleep.
+        adapter.seed_node("ns=2;s=Y1_BAND_LOW", SignalValue::F64(-0.1));
+        adapter.seed_node("ns=2;s=Y1_BAND_HIGH", SignalValue::F64(3.0));
+        core.last_io_cycle = None;
+        core.last_controller_cycle = None;
+        core.tick_once().await.expect("tightened-band cycle");
+        let tight_command = core.last_outputs["mv.u1.write"]
+            .as_f64()
+            .expect("numeric suggestion");
+        assert!(tight_command > wide_command + 0.1);
+        assert_eq!(core.last_inputs["cv.y1.band_low"], SignalValue::F64(-0.1));
+
+        let records: Vec<serde_json::Value> = fs::read_to_string(log_path)
+            .expect("log")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("structured record"))
+            .collect();
+        let record = records
+            .iter()
+            .rev()
+            .find(|record| record["event"] == "runtime_cycle")
+            .expect("cycle");
+        assert_eq!(
+            record["user_logs"][0]["values"]["mpc.target.cv.y1.low"]["value"],
+            json!(0.9)
+        );
+        assert_eq!(
+            record["user_logs"][0]["values"]["mpc.target.cv.y1.high"]["value"],
+            json!(4.0)
+        );
+        assert!(record["online_params"].get("mpc.cv.y1.band_low").is_none());
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use nalgebra::{DMatrix, DVector};
@@ -6,7 +6,9 @@ use osqp::{CscMatrix, Problem, Settings, Status};
 
 use crate::{
     logic::{ControlLogic, LogicMetadata, LogicUserLog, ParameterSchemaEntry},
-    project_config::{LinearStateSpaceModelConfig, LogicParamValue, VariableCatalogConfig},
+    project_config::{
+        IoConfig, LinearStateSpaceModelConfig, LogicParamValue, VariableCatalogConfig,
+    },
     types::{RuntimeState, SignalValue},
 };
 
@@ -29,6 +31,7 @@ pub struct LinearMpcLogic {
     cycle_s: f64,
     params: HashMap<String, LogicParamValue>,
     defaults: HashMap<String, LogicParamValue>,
+    external_band_params: HashSet<String>,
     x_hat: DVector<f64>,
     y_bias: DVector<f64>,
     covariance: DMatrix<f64>,
@@ -79,7 +82,7 @@ impl LinearMpcLogic {
         vars: VariableCatalogConfig,
         cycle_ms: u64,
         params: HashMap<String, LogicParamValue>,
-        cv_band_defaults: HashMap<String, f64>,
+        cv_band_defaults: HashMap<String, (f64, f64)>,
     ) -> Self {
         let defaults = linear_mpc_default_params(&model, &vars, &cv_band_defaults);
         let mv_count = vars.mvs.len();
@@ -103,7 +106,26 @@ impl LinearMpcLogic {
             vars,
             params,
             defaults,
+            external_band_params: HashSet::new(),
         }
+    }
+
+    pub(crate) fn with_io_contract(mut self, io: &IoConfig) -> Self {
+        // Keep externally driven offsets out of the parameter API, including stale saved tuning.
+        for cv in &self.vars.cvs {
+            for suffix in ["band_low", "band_high"] {
+                if io
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == format!("cv.{cv}.{suffix}"))
+                {
+                    let key = format!("mpc.cv.{cv}.{suffix}");
+                    self.params.remove(&key);
+                    self.external_band_params.insert(key);
+                }
+            }
+        }
+        self
     }
 
     pub fn is_configured(&self) -> bool {
@@ -119,7 +141,12 @@ impl LinearMpcLogic {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.defaults.keys().cloned().collect();
+        let mut names: Vec<_> = self
+            .defaults
+            .keys()
+            .filter(|key| !self.external_band_params.contains(*key))
+            .cloned()
+            .collect();
         names.sort();
         names
     }
@@ -283,9 +310,21 @@ impl LinearMpcLogic {
         }
     }
 
-    fn band_edges(&self, cv: &str, setpoint: f64) -> (f64, f64) {
-        let low_offset = self.f64_param(&format!("mpc.cv.{cv}.band_low"), 0.0);
-        let high_offset = self.f64_param(&format!("mpc.cv.{cv}.band_high"), 0.0);
+    fn band_edges(
+        &self,
+        cv: &str,
+        setpoint: f64,
+        inputs: &HashMap<String, SignalValue>,
+    ) -> (f64, f64) {
+        let offset = |suffix: &str| {
+            inputs
+                .get(&format!("cv.{cv}.{suffix}"))
+                .and_then(SignalValue::as_f64)
+                .filter(|value| value.is_finite())
+                .unwrap_or_else(|| self.f64_param(&format!("mpc.cv.{cv}.{suffix}"), 0.0))
+        };
+        let low_offset = offset("band_low");
+        let high_offset = offset("band_high");
         let low = setpoint + low_offset.min(high_offset);
         let high = setpoint + low_offset.max(high_offset);
         (low, high)
@@ -443,7 +482,7 @@ impl LinearMpcLogic {
         model: &DiscreteModel,
         current_mv: &[f64],
         current_dv: &[f64],
-        setpoints: &[f64],
+        bands: &[(f64, f64)],
         prediction_horizon: usize,
         control_horizon: usize,
     ) -> MpcProblemData {
@@ -461,9 +500,8 @@ impl LinearMpcLogic {
 
         let mut target = base_prediction.clone();
         for step in 0..prediction_horizon {
-            for (cv_index, cv) in self.vars.cvs.iter().enumerate() {
+            for (cv_index, &(low, high)) in bands.iter().enumerate() {
                 let row = step * self.vars.cvs.len() + cv_index;
-                let (low, high) = self.band_edges(cv, setpoints[cv_index]);
                 target[row] = base_prediction[row].clamp(low, high);
             }
         }
@@ -722,7 +760,7 @@ impl LinearMpcLogic {
         &mut self,
         solution: &MpcSolution,
         data: &MpcProblemData,
-        setpoints: &[f64],
+        bands: &[(f64, f64)],
         next_mv: &[f64],
     ) {
         let mut values = HashMap::new();
@@ -749,7 +787,7 @@ impl LinearMpcLogic {
             );
         }
         for (cv_index, cv) in self.vars.cvs.iter().enumerate() {
-            let (low, high) = self.band_edges(cv, setpoints[cv_index]);
+            let (low, high) = bands[cv_index];
             values.insert(format!("mpc.target.cv.{cv}.low"), SignalValue::F64(low));
             values.insert(format!("mpc.target.cv.{cv}.high"), SignalValue::F64(high));
         }
@@ -899,11 +937,19 @@ impl ControlLogic for LinearMpcLogic {
             .usize_param("mpc.control_horizon", DEFAULT_CONTROL_HORIZON)
             .min(prediction_horizon);
         let limits = self.mv_limits(inputs);
+        // Resolve once so the optimizer and its diagnostic log use the same live band.
+        let bands: Vec<_> = self
+            .vars
+            .cvs
+            .iter()
+            .zip(&setpoints)
+            .map(|(cv, setpoint)| self.band_edges(cv, *setpoint, inputs))
+            .collect();
         let data = self.build_problem_data(
             &discrete,
             &current_mv,
             &current_dv,
-            &setpoints,
+            &bands,
             prediction_horizon,
             control_horizon,
         );
@@ -922,7 +968,7 @@ impl ControlLogic for LinearMpcLogic {
         }
 
         self.suggestion_succeeded = !solution.fallback;
-        self.emit_logs(&solution, &data, &setpoints, &next_mv);
+        self.emit_logs(&solution, &data, &bands, &next_mv);
         if !self.shadow_mode {
             self.last_mv = next_mv;
         }
@@ -957,6 +1003,9 @@ impl ControlLogic for LinearMpcLogic {
 
     fn set_params(&mut self, params: HashMap<String, LogicParamValue>) {
         for (key, value) in params {
+            if self.external_band_params.contains(&key) {
+                continue;
+            }
             if key.starts_with("io.") {
                 self.params.insert(key, value);
                 continue;
@@ -978,6 +1027,7 @@ impl ControlLogic for LinearMpcLogic {
                 out.insert(key.clone(), value.clone());
             }
         }
+        out.retain(|key, _| !self.external_band_params.contains(key));
         out
     }
 
@@ -989,7 +1039,7 @@ impl ControlLogic for LinearMpcLogic {
 pub fn linear_mpc_default_params(
     model: &LinearStateSpaceModelConfig,
     vars: &VariableCatalogConfig,
-    cv_band_defaults: &HashMap<String, f64>,
+    cv_band_defaults: &HashMap<String, (f64, f64)>,
 ) -> HashMap<String, LogicParamValue> {
     let mut defaults = HashMap::new();
     defaults.insert(
@@ -1006,10 +1056,10 @@ pub fn linear_mpc_default_params(
     );
 
     for cv in &vars.cvs {
-        let band = cv_band_defaults.get(cv).copied().unwrap_or(0.0).abs();
+        let (low, high) = cv_band_defaults.get(cv).copied().unwrap_or((0.0, 0.0));
         defaults.insert(format!("mpc.cv.{cv}.q"), LogicParamValue::F64(DEFAULT_CV_Q));
-        defaults.insert(format!("mpc.cv.{cv}.band_low"), LogicParamValue::F64(-band));
-        defaults.insert(format!("mpc.cv.{cv}.band_high"), LogicParamValue::F64(band));
+        defaults.insert(format!("mpc.cv.{cv}.band_low"), LogicParamValue::F64(low));
+        defaults.insert(format!("mpc.cv.{cv}.band_high"), LogicParamValue::F64(high));
         defaults.insert(
             format!("mpc.kalman.cv.{cv}.r"),
             LogicParamValue::F64(DEFAULT_MEASUREMENT_R),
@@ -1506,6 +1556,51 @@ mod tests {
             .and_then(SignalValue::as_f64)
             .expect("u");
         assert!(u > 0.0, "u={u}");
+    }
+
+    #[test]
+    fn external_cv_band_edge_overrides_tuning_and_uses_initial_fallback() {
+        let mut logic = one_by_one_logic();
+        logic
+            .defaults
+            .insert("mpc.cv.y1.band_low".to_string(), LogicParamValue::F64(-2.0));
+        logic.params.insert(
+            "mpc.cv.y1.band_low".to_string(),
+            LogicParamValue::F64(-99.0),
+        );
+        logic
+            .params
+            .insert("mpc.cv.y1.band_high".to_string(), LogicParamValue::F64(3.0));
+        let io = IoConfig {
+            inputs: vec![crate::project_config::SignalPoint {
+                name: "cv.y1.band_low".to_string(),
+                signal_type: crate::types::SignalType::F64,
+                address: "ns=2;s=BAND_LOW".to_string(),
+                opc_tag: None,
+            }],
+            ..IoConfig::default()
+        };
+        let mut logic = logic.with_io_contract(&io);
+        logic.set_params(HashMap::from([(
+            "mpc.cv.y1.band_low".to_string(),
+            LogicParamValue::F64(-88.0),
+        )]));
+        assert!(!logic.current_params().contains_key("mpc.cv.y1.band_low"));
+        assert!(
+            !logic
+                .parameter_schema()
+                .iter()
+                .any(|entry| entry.name == "mpc.cv.y1.band_low")
+        );
+        assert!(logic.current_params().contains_key("mpc.cv.y1.band_high"));
+
+        let mut inputs = HashMap::from([("cv.y1.band_low".to_string(), SignalValue::F64(-1.0))]);
+        assert_eq!(logic.band_edges("y1", 100.0, &inputs), (99.0, 103.0));
+        assert_eq!(logic.band_edges("y1", 110.0, &inputs), (109.0, 113.0));
+        inputs.insert("cv.y1.band_low".to_string(), SignalValue::F64(f64::NAN));
+        assert_eq!(logic.band_edges("y1", 100.0, &inputs), (98.0, 103.0));
+        inputs.clear();
+        assert_eq!(logic.band_edges("y1", 100.0, &inputs), (98.0, 103.0));
     }
 
     #[test]

@@ -71,6 +71,11 @@
 - Keep online parameters limited to:
   - active logic parameters
   - active static I/O parameters (values without an OPC UA Node ID that are runtime-editable)
+- CV band offsets use optional `cv.<name>.band_low/high` OPC UA inputs. Externally supplied
+  edges take precedence and must be excluded from local MPC tuning and parameter optimization.
+  Keep generated strategy contracts compatible with these optional inputs. Offline execution
+  uses configured initial band offsets, with legacy static deadband defaults for blank values.
+- I/O CV LL/HL are absolute online optimization safety boundaries, not controller constraints.
 - Linear MPC defaults to squared (L2) MV movement cost. Per-MV `mpc.mv.<name>.use_l1`
   is a boolean manual/online selection for absolute (L1) movement cost and must stay out of
   numeric parameter optimization. Offline/online tuning scores retain squared MV movement.

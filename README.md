@@ -253,7 +253,26 @@ offline actuator scoring and online delta-MV scoring continue to use squared mov
 of the controller's selected norm.
 
 CV bands are relative to the live setpoint. Error inside the band is not penalized; error outside
-the band is optimized toward the nearest boundary. Runtime and simulation logs expose plot-ready
+the band is optimized toward the nearest boundary. In **I/O Definition**, `CV Band Low` and
+`CV Band High` accept independent initial offsets and optional OPC UA Node IDs. For example,
+offsets `-2` and `+3` with setpoint `100` give a target band of `98` to `103`.
+Each configured Node ID supplies the corresponding live `cv.<name>.band_low` or
+`cv.<name>.band_high` input and takes precedence over local MPC tuning. That edge is excluded
+from local MPC parameter editing and parameter optimization. Without a Node ID, the initial
+offset seeds the existing `mpc.cv.<name>.band_low/high` online parameter. Changing an initial
+offset in I/O Definition updates that local parameter; other I/O edits preserve saved tuning.
+Blank initial offsets retain the legacy defaults from the static deadband (`-abs(deadband)` /
+`+abs(deadband)`, or zero when no static deadband exists). Simulation and offline tests use
+initial offsets for external bands; they do not read OPC UA. If a live band input is unavailable
+or non-finite, MPC resolves that edge using its configured initial/default offset; communication
+failures still follow the existing runtime fault handling.
+
+`CV LL (Safety Limit Low)` and `CV HL (Safety Limit High)` in I/O Definition are absolute
+boundaries used only for online optimization safety. Online optimization may use tighter CV
+limits inside them. Touching an optimization limit stops tuning and restores the original
+parameters; these fields do not constrain MPC predictions or stop ordinary controller execution.
+
+Runtime and simulation logs expose plot-ready
 MPC diagnostics such as `mpc.xhat.*`, `mpc.bias.cv.*`, `mpc.du.*`, `mpc.target.*`,
 `mpc.pred.free.*`, `mpc.pred.mpc.*`, `future_pred_*`, and `mpc.status.*`.
 
@@ -366,6 +385,9 @@ Static I/O values without OPC UA Node IDs are exposed as online parameters:
 - `io.mv.<name>.hl`
 - `io.mv.<name>.ll`
 - `io.cv.<name>.deadband`
+
+Static MPC CV bands use `mpc.cv.<name>.band_low` and `mpc.cv.<name>.band_high`; an edge with
+an OPC UA Node ID is supplied through its I/O input instead of an editable online parameter.
 
 ## Important Notes
 

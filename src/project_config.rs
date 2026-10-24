@@ -326,6 +326,19 @@ impl ProjectConfig {
                 format!("cv.{cv}.process_value"),
                 SignalType::F64,
             ));
+            if let Some(row) = self.io_definition.cvs.iter().find(|row| row.name == *cv) {
+                for (suffix, opc) in [
+                    ("band_low", &row.band_low_opc),
+                    ("band_high", &row.band_high_opc),
+                ] {
+                    if !opc.as_deref().unwrap_or("").trim().is_empty() {
+                        inputs.push(simulation_signal_point(
+                            format!("cv.{cv}.{suffix}"),
+                            SignalType::F64,
+                        ));
+                    }
+                }
+            }
         }
 
         for dv in &self.variables.dvs {
@@ -440,8 +453,12 @@ impl ProjectConfig {
                     defaults.extend(linear_mpc_default_params(
                         model,
                         &self.variables,
-                        &self.static_cv_band_defaults(),
+                        &self.cv_band_defaults(),
                     ));
+                    // An external band edge has one owner: its OPC UA input, not online tuning.
+                    for key in self.io_definition.external_mpc_band_params() {
+                        defaults.remove(&key);
+                    }
                 }
             }
             LogicKind::CustomRust => {
@@ -641,16 +658,46 @@ impl ProjectConfig {
         None
     }
 
-    pub fn static_cv_band_defaults(&self) -> HashMap<String, f64> {
-        let mut values = HashMap::new();
+    pub fn cv_band_defaults(&self) -> HashMap<String, (f64, f64)> {
+        self.io_definition
+            .cvs
+            .iter()
+            .map(|cv| (cv.name.clone(), cv.band_offsets()))
+            .collect()
+    }
+
+    pub(crate) fn sync_cv_band_initial_values(&mut self, previous: &IoDefinitionConfig) {
+        // Saving a changed I/O initial value updates its local MPC parameter. Other I/O edits
+        // preserve saved MPC tuning; external edges keep their initial value only as a fallback.
+        if self.logic.kind != LogicKind::LinearMpc {
+            return;
+        }
         for cv in &self.io_definition.cvs {
-            if cv.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
-                if let Some(value) = cv.deadband_value {
-                    values.insert(cv.name.clone(), value);
+            let old = previous.cvs.iter().find(|row| row.name == cv.name);
+            for (suffix, value, old_value, opc) in [
+                (
+                    "band_low",
+                    cv.band_low_value,
+                    old.and_then(|row| row.band_low_value),
+                    &cv.band_low_opc,
+                ),
+                (
+                    "band_high",
+                    cv.band_high_value,
+                    old.and_then(|row| row.band_high_value),
+                    &cv.band_high_opc,
+                ),
+            ] {
+                if opc.as_deref().unwrap_or("").trim().is_empty() && value != old_value {
+                    let key = format!("mpc.cv.{}.{suffix}", cv.name);
+                    if let Some(value) = value {
+                        self.logic.params.insert(key, LogicParamValue::F64(value));
+                    } else {
+                        self.logic.params.remove(&key);
+                    }
                 }
             }
         }
-        values
     }
 
     pub fn sidebar_tasks(&self) -> Vec<SidebarTask> {
@@ -947,6 +994,21 @@ pub struct IoDefinitionConfig {
 }
 
 impl IoDefinitionConfig {
+    pub(crate) fn external_mpc_band_params(&self) -> HashSet<String> {
+        self.cvs
+            .iter()
+            .flat_map(|cv| {
+                [
+                    ("band_low", &cv.band_low_opc),
+                    ("band_high", &cv.band_high_opc),
+                ]
+                .into_iter()
+                .filter(|(_, opc)| !opc.as_deref().unwrap_or("").trim().is_empty())
+                .map(|(suffix, _)| format!("mpc.cv.{}.{suffix}", cv.name))
+            })
+            .collect()
+    }
+
     pub(crate) fn validate(&self, vars: &VariableCatalogConfig) -> Result<()> {
         validate_named_entries("mv", &self.mvs, |row| &row.name, |name| vars.has_mv(name))?;
         validate_named_entries("cv", &self.cvs, |row| &row.name, |name| vars.has_cv(name))?;
@@ -974,6 +1036,7 @@ impl IoDefinitionConfig {
             }
         }
         for row in &self.cvs {
+            row.validate_band_values()?;
             match (row.ll, row.hl) {
                 (Some(ll), Some(hl)) if ll >= hl => {
                     bail!(
@@ -1010,6 +1073,9 @@ impl IoDefinitionConfig {
             let Some(row) = self.cvs.iter().find(|row| row.name == *name) else {
                 return false;
             };
+            if row.validate_band_values().is_err() {
+                return false;
+            }
             if matches!((row.ll, row.hl), (Some(ll), Some(hl)) if ll >= hl)
                 || matches!((row.ll, row.hl), (Some(_), None) | (None, Some(_)))
             {
@@ -1135,6 +1201,20 @@ impl IoDefinitionConfig {
                         opc_tag: None,
                     },
                 );
+            }
+
+            for (suffix, opc) in [
+                ("band_low", &row.band_low_opc),
+                ("band_high", &row.band_high_opc),
+            ] {
+                if let Some(address) = optional_trimmed(opc.as_deref().unwrap_or("")) {
+                    inputs.push(SignalPoint {
+                        name: format!("cv.{}.{suffix}", name),
+                        signal_type: SignalType::F64,
+                        address,
+                        opc_tag: None,
+                    });
+                }
             }
 
             if let Some(deadband_opc) = optional_trimmed(row.deadband_opc.as_deref().unwrap_or(""))
@@ -1298,12 +1378,49 @@ pub struct CvIoDefinition {
     pub hl: Option<f64>,
     #[serde(default)]
     pub ll: Option<f64>,
+    /// MPC target offsets from the live setpoint. A Node ID takes precedence over local tuning.
+    #[serde(default)]
+    pub band_low_opc: Option<String>,
+    #[serde(default)]
+    pub band_high_opc: Option<String>,
+    #[serde(default)]
+    pub band_low_value: Option<f64>,
+    #[serde(default)]
+    pub band_high_value: Option<f64>,
     #[serde(default)]
     pub deadband_opc: Option<String>,
     #[serde(default)]
     pub deadband_value: Option<f64>,
     #[serde(default)]
     pub enable: Option<String>,
+}
+
+impl CvIoDefinition {
+    pub(crate) fn band_offsets(&self) -> (f64, f64) {
+        // Preserve legacy projects: a static deadband seeds symmetric MPC offsets.
+        let deadband = if self.deadband_opc.as_deref().unwrap_or("").trim().is_empty() {
+            self.deadband_value.unwrap_or(0.0).abs()
+        } else {
+            0.0
+        };
+        (
+            self.band_low_value.unwrap_or(-deadband),
+            self.band_high_value.unwrap_or(deadband),
+        )
+    }
+
+    pub(crate) fn validate_band_values(&self) -> Result<()> {
+        for (label, value) in [("Low", self.band_low_value), ("High", self.band_high_value)] {
+            if value.is_some_and(|value| !value.is_finite()) {
+                bail!("CV '{}' Band {} must be finite", self.name, label);
+            }
+        }
+        if matches!((self.band_low_value, self.band_high_value), (Some(low), Some(high)) if low > high)
+        {
+            bail!("CV '{}' Band Low must not exceed Band High", self.name);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3052,6 +3169,10 @@ mod tests {
             process_value: String::new(),
             hl: Some(10.0),
             ll: Some(-10.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: None,
             enable: None,
@@ -3078,6 +3199,129 @@ mod tests {
             stale_timeout_ms: 1000,
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn cv_band_opc_inputs_roundtrip_without_becoming_outputs() {
+        let mut cfg = ProjectConfig::new("bands");
+        cfg.variables.cvs = vec!["y1".to_string()];
+        add_predefined_y1_limits(&mut cfg);
+        let row = &mut cfg.io_definition.cvs[0];
+        row.band_low_opc = Some("  ns=2;s=Y1_BAND_LOW  ".to_string());
+        row.band_high_opc = Some("ns=2;s=Y1_BAND_HIGH".to_string());
+        row.band_low_value = Some(-2.0);
+        row.band_high_value = Some(3.0);
+        cfg.rebuild_runtime_io_from_definition()
+            .expect("derive I/O");
+
+        let decoded = from_toml_str(&to_toml_string(&cfg).expect("encode")).expect("decode");
+        assert_eq!(decoded.cv_band_defaults()["y1"], (-2.0, 3.0));
+        for (suffix, address) in [
+            ("band_low", "ns=2;s=Y1_BAND_LOW"),
+            ("band_high", "ns=2;s=Y1_BAND_HIGH"),
+        ] {
+            let signal = format!("cv.y1.{suffix}");
+            let input = decoded
+                .io
+                .inputs
+                .iter()
+                .find(|point| point.name == signal)
+                .expect("band input");
+            assert_eq!(input.address, address);
+            assert_eq!(input.signal_type, SignalType::F64);
+            assert!(!decoded.io.outputs.iter().any(|point| point.name == signal));
+        }
+    }
+
+    #[test]
+    fn cv_band_defaults_preserve_legacy_deadband_and_validate_offsets() {
+        let mut row: CvIoDefinition =
+            toml::from_str("name = 'y1'\ndeadband_value = 2.0").expect("legacy row");
+        assert_eq!(row.band_offsets(), (-2.0, 2.0));
+        assert!(row.band_low_opc.is_none());
+        assert!(row.band_high_opc.is_none());
+        row.band_low_value = Some(-1.0);
+        row.band_high_value = Some(3.0);
+        assert_eq!(row.band_offsets(), (-1.0, 3.0));
+        row.validate_band_values().expect("asymmetric band");
+        row.band_low_value = Some(4.0);
+        assert!(row.validate_band_values().is_err());
+        row.band_low_value = Some(f64::NAN);
+        assert!(row.validate_band_values().is_err());
+    }
+
+    #[test]
+    fn external_cv_band_edges_are_excluded_from_parameter_optimization() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+        cfg.logic.kind = LogicKind::LinearMpc;
+        add_predefined_y1_limits(&mut cfg);
+        cfg.io_definition.cvs[0].band_low_opc = Some("ns=2;s=BAND_LOW".to_string());
+        cfg.io_definition.cvs[0].band_high_value = Some(3.0);
+        cfg.logic.params.insert(
+            "mpc.cv.y1.band_low".to_string(),
+            LogicParamValue::F64(-99.0),
+        );
+        cfg.sync_active_online_params();
+        assert!(!cfg.logic.params.contains_key("mpc.cv.y1.band_low"));
+        assert_eq!(
+            cfg.logic.params["mpc.cv.y1.band_high"],
+            LogicParamValue::F64(3.0)
+        );
+        assert!(
+            !cfg.online_optimization_param_defaults()
+                .contains_key("mpc.cv.y1.band_low")
+        );
+        cfg.normalize_optimization_config();
+        assert!(
+            !cfg.optimization
+                .parameters
+                .iter()
+                .any(|row| row.key == "mpc.cv.y1.band_low")
+        );
+        assert!(
+            cfg.optimization
+                .parameters
+                .iter()
+                .any(|row| row.key == "mpc.cv.y1.band_high")
+        );
+        cfg.io.inputs.clear();
+        cfg.io.outputs.clear();
+        let simulation_io = cfg
+            .build_simulation_logic_io()
+            .expect("minimal simulation I/O");
+        assert!(
+            simulation_io
+                .inputs
+                .iter()
+                .any(|point| point.name == "cv.y1.band_low")
+        );
+    }
+
+    #[test]
+    fn saving_cv_band_initial_values_preserves_unrelated_mpc_tuning() {
+        let mut cfg = valid_config_with_variables();
+        cfg.model = Some(sample_linear_model());
+        cfg.logic.kind = LogicKind::LinearMpc;
+        add_predefined_y1_limits(&mut cfg);
+        cfg.io_definition.cvs[0].band_low_value = Some(-1.0);
+        cfg.io_definition.cvs[0].band_high_value = Some(3.0);
+        cfg.sync_active_online_params();
+        cfg.logic
+            .params
+            .insert("mpc.cv.y1.band_high".to_string(), LogicParamValue::F64(4.0));
+        let previous = cfg.io_definition.clone();
+        cfg.io_definition.cvs[0].band_low_value = Some(-2.0);
+        cfg.sync_cv_band_initial_values(&previous);
+        cfg.sync_active_online_params();
+        assert_eq!(
+            cfg.logic.params["mpc.cv.y1.band_low"],
+            LogicParamValue::F64(-2.0)
+        );
+        assert_eq!(
+            cfg.logic.params["mpc.cv.y1.band_high"],
+            LogicParamValue::F64(4.0)
+        );
     }
 
     #[test]
@@ -3521,6 +3765,10 @@ description = "SmartAPC controller runtime"
             process_value: String::new(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3584,6 +3832,10 @@ description = "SmartAPC controller runtime"
             process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3694,6 +3946,10 @@ description = "SmartAPC controller runtime"
             process_value: "ns=2;s=Y1_PV".to_string(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(0.0),
             enable: None,
@@ -3887,6 +4143,10 @@ description = "SmartAPC controller runtime"
             process_value: "ns=2;s=Y1_PROCESS_VALUE".to_string(),
             hl: Some(100.0),
             ll: Some(-100.0),
+            band_low_opc: None,
+            band_high_opc: None,
+            band_low_value: None,
+            band_high_value: None,
             deadband_opc: None,
             deadband_value: Some(2.0),
             enable: None,
