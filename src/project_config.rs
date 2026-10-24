@@ -1727,6 +1727,8 @@ pub struct LogicConfig {
     #[serde(default)]
     pub p_controller: PControllerLogicConfig,
     #[serde(default)]
+    pub linear_mpc: LinearMpcConfig,
+    #[serde(default)]
     pub custom_rust: CustomRustLogicConfig,
     #[serde(default)]
     pub params: HashMap<String, LogicParamValue>,
@@ -1740,11 +1742,40 @@ impl Default for LogicConfig {
             cycle_ms: default_cycle_ms(),
             kind: LogicKind::PController,
             p_controller: PControllerLogicConfig::default(),
+            linear_mpc: LinearMpcConfig::default(),
             custom_rust: CustomRustLogicConfig::default(),
             params: HashMap::new(),
             initial_values: HashMap::new(),
         }
     }
+}
+
+/// Engineering choices, deliberately separate from numeric online/tuning parameters.
+/// Missing entries retain the existing minimum-movement objective at priority zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinearMpcConfig {
+    #[serde(default)]
+    pub mvs: HashMap<String, MpcVariableObjective>,
+    #[serde(default)]
+    pub cvs: HashMap<String, MpcVariableObjective>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MpcVariableObjective {
+    #[serde(default)]
+    pub mode: MpcOptimizationMode,
+    /// Lower numbers take precedence, independently of the Q/R weight magnitude.
+    #[serde(default)]
+    pub priority: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MpcOptimizationMode {
+    Maximize,
+    Minimize,
+    #[default]
+    MinimumMove,
 }
 
 impl LogicConfig {
@@ -4395,6 +4426,42 @@ description = "SmartAPC controller runtime"
     }
 
     #[test]
+    fn mpc_objectives_are_typed_persistent_and_default_for_legacy_projects() {
+        let mut logic: LogicConfig = toml::from_str("kind = 'linear_mpc'").unwrap();
+        assert!(logic.linear_mpc.mvs.is_empty());
+        assert_eq!(
+            MpcVariableObjective::default().mode,
+            MpcOptimizationMode::MinimumMove
+        );
+        assert_eq!(MpcVariableObjective::default().priority, 0);
+        logic.linear_mpc.mvs.insert(
+            "u1".into(),
+            MpcVariableObjective {
+                mode: MpcOptimizationMode::Minimize,
+                priority: 2,
+            },
+        );
+        logic.linear_mpc.cvs.insert(
+            "y1".into(),
+            MpcVariableObjective {
+                mode: MpcOptimizationMode::Maximize,
+                priority: 0,
+            },
+        );
+        let encoded = toml::to_string(&logic).unwrap();
+        let restored: LogicConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(restored.linear_mpc.mvs, logic.linear_mpc.mvs);
+        assert_eq!(restored.linear_mpc.cvs, logic.linear_mpc.cvs);
+        for invalid in [
+            serde_json::json!({"mode": "maximize", "priority": -1}),
+            serde_json::json!({"mode": "minimize", "priority": 1.5}),
+            serde_json::json!({"mode": "invalid", "priority": 0}),
+        ] {
+            assert!(serde_json::from_value::<MpcVariableObjective>(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn linear_mpc_syncs_active_online_params() {
         let mut cfg = ProjectConfig::new("demo");
         cfg.variables.mvs = vec!["u1".to_string()];
@@ -4437,6 +4504,13 @@ description = "SmartAPC controller runtime"
             },
         });
         cfg.logic.kind = LogicKind::LinearMpc;
+        cfg.logic.linear_mpc.cvs.insert(
+            "y1".into(),
+            MpcVariableObjective {
+                mode: MpcOptimizationMode::Maximize,
+                priority: 2,
+            },
+        );
         cfg.logic
             .params
             .insert("custom_gain".to_string(), LogicParamValue::F64(5.0));
@@ -4459,6 +4533,13 @@ description = "SmartAPC controller runtime"
         assert!(cfg.logic.params.contains_key("io.mv.u1.hl"));
         assert!(!cfg.logic.params.contains_key("custom_gain"));
         assert!(cfg.linear_mpc_is_configured_for(&cfg.io));
+        assert_eq!(cfg.logic.linear_mpc.cvs["y1"].priority, 2);
+        assert!(
+            !cfg.logic
+                .params
+                .keys()
+                .any(|key| key.ends_with(".priority") || key.ends_with(".mode"))
+        );
 
         cfg.normalize_optimization_config();
         let q_row = cfg

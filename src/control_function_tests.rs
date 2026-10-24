@@ -897,6 +897,7 @@ mod tests {
                 }],
             },
             custom_rust: Default::default(),
+            linear_mpc: Default::default(),
             params: HashMap::new(),
             initial_values: HashMap::new(),
         };

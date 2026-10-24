@@ -837,6 +837,20 @@ mod model_csv_tests {
         .unwrap();
 
         cfg.logic.kind = crate::project_config::LogicKind::LinearMpc;
+        cfg.logic.linear_mpc.cvs.insert(
+            "y1".into(),
+            crate::project_config::MpcVariableObjective {
+                mode: crate::project_config::MpcOptimizationMode::Maximize,
+                priority: 0,
+            },
+        );
+        cfg.logic.linear_mpc.mvs.insert(
+            "u1".into(),
+            crate::project_config::MpcVariableObjective {
+                mode: crate::project_config::MpcOptimizationMode::Minimize,
+                priority: 2,
+            },
+        );
         let response = server
             .post("/api/projects/strategy/strategy/parameters")
             .json(&cfg)
@@ -862,6 +876,26 @@ mod model_csv_tests {
             saved.logic.params["mpc.mv.u1.use_l1"],
             LogicParamValue::Bool(true)
         );
+        assert_eq!(saved.logic.linear_mpc.cvs, cfg.logic.linear_mpc.cvs);
+        assert_eq!(saved.logic.linear_mpc.mvs, cfg.logic.linear_mpc.mvs);
+        for invalid in [json!(-1), json!(0.5)] {
+            let mut invalid_request = json!({"revision": config_revision(&projects, "strategy").unwrap(), "config": saved.logic});
+            invalid_request["config"]["linear_mpc"]["cvs"]["y1"]["priority"] = invalid;
+            server
+                .put("/api/projects/strategy/strategy/config")
+                .json(&invalid_request)
+                .await
+                .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(
+                projects
+                    .load_config("strategy")
+                    .unwrap()
+                    .logic
+                    .linear_mpc
+                    .cvs,
+                saved.logic.linear_mpc.cvs
+            );
+        }
         assert_eq!(
             serde_json::to_value(&saved.io_definition).unwrap(),
             serde_json::to_value(&cfg.io_definition).unwrap()

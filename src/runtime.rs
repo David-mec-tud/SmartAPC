@@ -1247,6 +1247,7 @@ pub(crate) fn build_logic(
                 config.logic.params.clone(),
                 config.cv_band_defaults(),
             )
+            .with_objectives(config.logic.linear_mpc.clone())
             .with_io_contract(io);
             if !logic.is_configured() {
                 bail!("Linear MPC has no usable MV/CV model configuration");
@@ -1410,6 +1411,7 @@ mod tests {
                 }],
             },
             custom_rust: Default::default(),
+            linear_mpc: Default::default(),
             params: HashMap::new(),
             initial_values: HashMap::new(),
         };

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use nalgebra::{DMatrix, DVector};
@@ -7,7 +7,8 @@ use osqp::{CscMatrix, Problem, Settings, Status};
 use crate::{
     logic::{ControlLogic, LogicMetadata, LogicUserLog, ParameterSchemaEntry},
     project_config::{
-        IoConfig, LinearStateSpaceModelConfig, LogicParamValue, VariableCatalogConfig,
+        IoConfig, LinearMpcConfig, LinearStateSpaceModelConfig, LogicParamValue,
+        MpcOptimizationMode, MpcVariableObjective, VariableCatalogConfig,
     },
     types::{RuntimeState, SignalValue},
 };
@@ -32,6 +33,7 @@ pub struct LinearMpcLogic {
     params: HashMap<String, LogicParamValue>,
     defaults: HashMap<String, LogicParamValue>,
     external_band_params: HashSet<String>,
+    objectives: LinearMpcConfig,
     x_hat: DVector<f64>,
     y_bias: DVector<f64>,
     covariance: DMatrix<f64>,
@@ -65,6 +67,137 @@ struct MpcProblemData {
     target: DVector<f64>,
     phi: DMatrix<f64>,
     free_prediction: DVector<f64>,
+    bands: Vec<(f64, f64)>,
+}
+
+/// A convex priority tier. Quadratic projections and the total linear cost can
+/// be locked after solving, preserving its optimum for all lower-priority tiers.
+struct PriorityTier {
+    quadratic: Vec<(DVector<f64>, f64)>,
+    linear: DVector<f64>,
+}
+
+impl PriorityTier {
+    fn new(variable_count: usize) -> Self {
+        Self {
+            quadratic: Vec::new(),
+            linear: DVector::zeros(variable_count),
+        }
+    }
+}
+
+struct PriorityConstraints {
+    rows: Vec<DVector<f64>>,
+    lower: Vec<f64>,
+    upper: Vec<f64>,
+}
+
+impl PriorityConstraints {
+    fn add(&mut self, row: DVector<f64>, low: f64, high: f64) {
+        self.rows.push(row);
+        self.lower.push(low);
+        self.upper.push(high);
+    }
+
+    fn solve(&self, tier: &PriorityTier) -> Result<DVector<f64>> {
+        let count = tier.linear.len();
+        let mut p = DMatrix::zeros(count, count);
+        // Scaling a whole tier leaves its optimum unchanged and avoids using
+        // enormous weights to approximate precedence between priority levels.
+        let scale = tier
+            .quadratic
+            .iter()
+            .map(|(_, weight)| *weight)
+            .chain(tier.linear.iter().map(|value| value.abs()))
+            .fold(MIN_WEIGHT, f64::max);
+        for (row, weight) in &tier.quadratic {
+            let nonzero: Vec<_> = row
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value != 0.0)
+                .collect();
+            for &(i, a) in &nonzero {
+                for &(j, b) in &nonzero {
+                    p[(i, j)] += 2.0 * weight / scale * a * b;
+                }
+            }
+        }
+        let gradient = &tier.linear / scale;
+        // OSQP represents unbounded edges with finite +/-1e30. IEEE infinity
+        // makes its duality-gap check evaluate 0*infinity at a zero solution.
+        let solver_lower: Vec<_> = self.lower.iter().map(|v| v.max(-1e30)).collect();
+        let solver_upper: Vec<_> = self.upper.iter().map(|v| v.min(1e30)).collect();
+        let settings = Settings::default()
+            .verbose(false)
+            .eps_abs(1e-7)
+            .eps_rel(1e-7)
+            .max_iter(10_000)
+            // Pure linear tiers can drive adaptive rho to its maximum near a
+            // zero L1 optimum, amplifying dual residual roundoff indefinitely.
+            .adaptive_rho(!tier.quadratic.is_empty())
+            .polishing(false);
+        let mut problem = Problem::new(
+            CscMatrix::from_column_iter(count, count, p.iter().copied()).into_upper_tri(),
+            gradient.as_slice(),
+            CscMatrix::from_row_iter(
+                self.rows.len(),
+                count,
+                self.rows.iter().flat_map(|row| row.iter().copied()),
+            ),
+            &solver_lower,
+            &solver_upper,
+            &settings,
+        )
+        .context("failed to set up prioritized MPC problem")?;
+        // A non-converged tier cannot establish an optimum for the next tier.
+        // Propagate failure to the existing safe fallback/readiness path.
+        let values = match problem.solve() {
+            Status::Solved(solution) => DVector::from_column_slice(solution.x()),
+            Status::SolvedInaccurate(_) => bail!("osqp_priority_solved_inaccurate"),
+            Status::MaxIterationsReached(_) => bail!("osqp_priority_max_iterations_reached"),
+            Status::TimeLimitReached(_) => bail!("osqp_priority_time_limit_reached"),
+            Status::PrimalInfeasible(_) | Status::PrimalInfeasibleInaccurate(_) => {
+                bail!("osqp_priority_primal_infeasible")
+            }
+            Status::DualInfeasible(_) | Status::DualInfeasibleInaccurate(_) => {
+                bail!("osqp_priority_dual_infeasible")
+            }
+            _ => bail!("osqp_priority_failed"),
+        };
+        if !values.iter().all(|value| value.is_finite()) {
+            bail!("prioritized MPC returned non-finite values");
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            let value = row.dot(&values);
+            let tolerance = 1e-5 * (1.0 + value.abs());
+            if value < self.lower[index] - tolerance || value > self.upper[index] + tolerance {
+                bail!("prioritized MPC violated constraint {index}");
+            }
+        }
+        Ok(values)
+    }
+
+    fn lock(&mut self, tier: &PriorityTier, solution: &DVector<f64>) {
+        // For a convex quadratic + linear cost, all minimizers have identical
+        // quadratic projections and identical total linear cost. Freezing these
+        // preserves the entire optimum face, including L1 movement alternatives.
+        for row in tier
+            .quadratic
+            .iter()
+            .map(|(row, _)| row)
+            .chain(std::iter::once(&tier.linear))
+        {
+            let scale = row.amax();
+            if scale == 0.0 {
+                continue;
+            }
+            let normalized = row / scale;
+            let value = normalized.dot(solution);
+            // Equality rows also let OSQP use its equality-specific penalty;
+            // a tiny inequality interval stalls conflicting lower-tier costs.
+            self.add(normalized, value, value);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +240,30 @@ impl LinearMpcLogic {
             params,
             defaults,
             external_band_params: HashSet::new(),
+            objectives: LinearMpcConfig::default(),
         }
+    }
+
+    pub(crate) fn with_objectives(mut self, objectives: LinearMpcConfig) -> Self {
+        self.objectives = objectives;
+        self
+    }
+
+    fn mv_objective(&self, mv: &str) -> MpcVariableObjective {
+        self.objectives.mvs.get(mv).copied().unwrap_or_default()
+    }
+
+    fn cv_objective(&self, cv: &str) -> MpcVariableObjective {
+        self.objectives.cvs.get(cv).copied().unwrap_or_default()
+    }
+
+    fn has_ranked_objectives(&self) -> bool {
+        self.vars
+            .mvs
+            .iter()
+            .map(|mv| self.mv_objective(mv))
+            .chain(self.vars.cvs.iter().map(|cv| self.cv_objective(cv)))
+            .any(|objective| objective != MpcVariableObjective::default())
     }
 
     pub(crate) fn with_io_contract(mut self, io: &IoConfig) -> Self {
@@ -530,6 +686,7 @@ impl LinearMpcLogic {
             target,
             phi,
             free_prediction,
+            bands: bands.to_vec(),
         }
     }
 
@@ -578,6 +735,11 @@ impl LinearMpcLogic {
         limits: &[(f64, f64)],
         control_horizon: usize,
     ) -> Result<MpcSolution> {
+        // Keep the established all-minimum-move, equal-priority Q/R tradeoff for
+        // existing projects. Economic goals or distinct priorities use staged QPs.
+        if self.has_ranked_objectives() {
+            return self.solve_ranked_mpc(data, current_mv, limits, control_horizon);
+        }
         let mv_count = self.vars.mvs.len();
         let variable_count = mv_count * control_horizon;
         if variable_count == 0 {
@@ -698,6 +860,139 @@ impl LinearMpcLogic {
             fallback: false,
             status_code,
             status_message,
+        })
+    }
+
+    fn solve_ranked_mpc(
+        &self,
+        data: &MpcProblemData,
+        current_mv: &[f64],
+        limits: &[(f64, f64)],
+        control_horizon: usize,
+    ) -> Result<MpcSolution> {
+        let mv_count = self.vars.mvs.len();
+        let move_count = mv_count * control_horizon;
+        let prediction_count = data.base_prediction.len();
+        let l1_moves: Vec<_> = (0..move_count)
+            .filter(|index| {
+                let mv = &self.vars.mvs[index % mv_count];
+                self.mv_objective(mv).mode == MpcOptimizationMode::MinimumMove
+                    && self.mv_uses_l1(mv)
+            })
+            .collect();
+        let count = move_count + prediction_count + l1_moves.len();
+        let mut constraints = PriorityConstraints {
+            rows: Vec::new(),
+            lower: Vec::new(),
+            upper: Vec::new(),
+        };
+        let (mv_constraints, lower, upper) =
+            self.constraint_matrix(current_mv, limits, control_horizon);
+        for r in 0..mv_constraints.nrows() {
+            let mut row = DVector::zeros(count);
+            for c in 0..move_count {
+                row[c] = mv_constraints[(r, c)];
+            }
+            constraints.add(row, lower[r], upper[r]);
+        }
+
+        let mut recovery = PriorityTier::new(count);
+        let mut tiers = BTreeMap::<u32, PriorityTier>::new();
+        for r in 0..prediction_count {
+            let cv_index = r % self.vars.cvs.len();
+            let cv = &self.vars.cvs[cv_index];
+            let objective = self.cv_objective(cv);
+            let mut prediction = DVector::zeros(count);
+            for c in 0..move_count {
+                prediction[c] = data.phi[(r, c)];
+            }
+            let mut band_row = prediction.clone();
+            band_row[move_count + r] = 1.0;
+            let (low, high) = data.bands[cv_index];
+            constraints.add(
+                band_row,
+                low - data.base_prediction[r],
+                high - data.base_prediction[r],
+            );
+            let mut slack = DVector::zeros(count);
+            slack[move_count + r] = 1.0;
+            // CV bands remain soft when physically unreachable. Recover them
+            // before economic objectives; never trade a feasible band for profit.
+            recovery
+                .quadratic
+                .push((slack, self.cv_weight(cv).max(MIN_WEIGHT)));
+
+            let weight = self.cv_weight(cv);
+            if weight == 0.0 {
+                continue;
+            }
+            let tier = tiers
+                .entry(objective.priority)
+                .or_insert_with(|| PriorityTier::new(count));
+            match objective.mode {
+                MpcOptimizationMode::MinimumMove => tier.quadratic.push((prediction, weight)),
+                MpcOptimizationMode::Maximize => tier.linear -= prediction * weight,
+                MpcOptimizationMode::Minimize => tier.linear += prediction * weight,
+            }
+        }
+        for step in 0..control_horizon {
+            for (mv_index, mv) in self.vars.mvs.iter().enumerate() {
+                let objective = self.mv_objective(mv);
+                let tier = tiers
+                    .entry(objective.priority)
+                    .or_insert_with(|| PriorityTier::new(count));
+                let weight = self.mv_weight(mv);
+                let variable = step * mv_count + mv_index;
+                let mut row = DVector::zeros(count);
+                if objective.mode == MpcOptimizationMode::MinimumMove {
+                    row[variable] = 1.0;
+                    if let Some(index) = l1_moves.iter().position(|v| *v == variable) {
+                        let auxiliary = move_count + prediction_count + index;
+                        tier.linear[auxiliary] = weight;
+                        for sign in [-1.0, 1.0] {
+                            let mut bound = &row * sign;
+                            bound[auxiliary] = -1.0;
+                            constraints.add(bound, f64::NEG_INFINITY, 0.0);
+                        }
+                    } else {
+                        tier.quadratic.push((row, weight));
+                    }
+                } else {
+                    for prior in 0..=step {
+                        row[prior * mv_count + mv_index] = 1.0;
+                    }
+                    // The final controlled MV is held over the remaining prediction horizon.
+                    let repeats = if step + 1 == control_horizon {
+                        prediction_count / self.vars.cvs.len() - step
+                    } else {
+                        1
+                    };
+                    let sign = if objective.mode == MpcOptimizationMode::Maximize {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    tier.linear += row * (sign * weight * repeats as f64);
+                }
+            }
+        }
+
+        let mut solution = constraints.solve(&recovery).context("CV band recovery")?;
+        constraints.lock(&recovery, &solution);
+        for (priority, tier) in &tiers {
+            solution = constraints
+                .solve(tier)
+                .with_context(|| format!("MPC priority {priority}"))?;
+            constraints.lock(tier, &solution);
+        }
+        let delta_u = solution.rows(0, move_count).as_slice().to_vec();
+        Ok(MpcSolution {
+            controlled_prediction: &data.base_prediction
+                + &data.phi * DVector::from_vec(delta_u.clone()),
+            delta_u,
+            fallback: false,
+            status_code: 1.0,
+            status_message: "osqp_priority_solved".to_string(),
         })
     }
 
@@ -956,7 +1251,7 @@ impl ControlLogic for LinearMpcLogic {
         let solution = self
             .solve_mpc(&data, &current_mv, &limits, control_horizon)
             .unwrap_or_else(|err| {
-                self.fallback_solution(&data, &current_mv, &limits, err.to_string())
+                self.fallback_solution(&data, &current_mv, &limits, format!("{err:#}"))
             });
 
         let mut outputs = HashMap::new();
@@ -1180,12 +1475,12 @@ fn linear_mpc_param_description(name: &str) -> String {
             "Kalman measurement noise variance for one CV".to_string()
         }
     } else if name.contains(".cv.") && name.ends_with(".q") {
-        "CV tracking weight outside the soft band".to_string()
+        "CV band recovery and objective weight; balances objectives sharing a priority".to_string()
     } else if name.contains(".mv.") && name.ends_with(".r") {
-        "MV move weight: scales the selected squared (L2) or absolute (L1) movement cost"
+        "MV objective weight: scales minimum movement (L2/L1) or directional cost within a priority"
             .to_string()
     } else if name.contains(".mv.") && name.ends_with(".use_l1") {
-        "MV movement cost: false uses squared movement (L2); true uses absolute movement (L1). Changing modes may require retuning the move weight.".to_string()
+        "MV minimum-move cost: false uses squared movement (L2); true uses absolute movement (L1). Maximise/minimise use directional costs. Changing modes may require retuning the weight.".to_string()
     } else {
         format!("Linear MPC parameter '{name}'")
     }
@@ -1258,7 +1553,265 @@ mod tests {
             target: DVector::from_column_slice(targets),
             phi: DMatrix::identity(targets.len(), targets.len()),
             free_prediction: DVector::zeros(targets.len()),
+            bands: vec![(-10.0, 10.0)],
         }
+    }
+
+    fn objective(mode: MpcOptimizationMode, priority: u32) -> MpcVariableObjective {
+        MpcVariableObjective { mode, priority }
+    }
+
+    #[test]
+    fn cv_modes_seek_band_edges_and_minimum_move_holds_the_free_prediction() {
+        let mut logic = one_by_one_logic();
+        logic
+            .objectives
+            .mvs
+            .insert("u1".into(), objective(MpcOptimizationMode::MinimumMove, 2));
+        let mut data = independent_move_problem(&[0.0]);
+        data.bands = vec![(-0.75, 0.5)];
+        for (mode, expected) in [
+            (MpcOptimizationMode::Maximize, 0.5),
+            (MpcOptimizationMode::Minimize, -0.75),
+            (MpcOptimizationMode::MinimumMove, 0.0),
+        ] {
+            logic.objectives.cvs.insert("y1".into(), objective(mode, 0));
+            let solution = logic.solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1).unwrap();
+            assert!(
+                (solution.controlled_prediction[0] - expected).abs() < 1e-4,
+                "{mode:?}: {solution:?}"
+            );
+        }
+        // Maximising a CV with negative process gain must decrease its MV.
+        data.phi[(0, 0)] = -1.0;
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1).unwrap();
+        assert!((solution.delta_u[0] + 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn cv_priorities_override_conflicting_lower_priorities_regardless_of_weights() {
+        let mut logic = one_by_one_logic();
+        logic.vars.cvs.push("y2".into());
+        logic
+            .objectives
+            .mvs
+            .insert("u1".into(), objective(MpcOptimizationMode::MinimumMove, 9));
+        let data = MpcProblemData {
+            base_prediction: DVector::zeros(2),
+            target: DVector::zeros(2),
+            free_prediction: DVector::zeros(2),
+            phi: DMatrix::from_element(2, 1, 1.0),
+            bands: vec![(-1.0, 1.0); 2],
+        };
+        logic
+            .params
+            .insert("mpc.cv.y2.q".into(), LogicParamValue::F64(1_000_000.0));
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        logic
+            .objectives
+            .cvs
+            .insert("y2".into(), objective(MpcOptimizationMode::Minimize, 4));
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1).unwrap();
+        assert!((solution.delta_u[0] - 1.0).abs() < 1e-4, "{solution:?}");
+        logic.objectives.cvs.get_mut("y1").unwrap().priority = 4;
+        logic.objectives.cvs.get_mut("y2").unwrap().priority = 0;
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-10.0, 10.0)], 1).unwrap();
+        assert!((solution.delta_u[0] + 1.0).abs() < 1e-4, "{solution:?}");
+    }
+
+    #[test]
+    fn mv_modes_and_cv_minimum_move_respect_cross_variable_priorities() {
+        let mut logic = one_by_one_logic();
+        let mut data = independent_move_problem(&[0.0]);
+        data.bands = vec![(-2.0, 2.0)];
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::MinimumMove, 3));
+        for (mode, expected) in [
+            (MpcOptimizationMode::Maximize, 0.6),
+            (MpcOptimizationMode::Minimize, -0.4),
+        ] {
+            logic.objectives.mvs.insert("u1".into(), objective(mode, 0));
+            let solution = logic.solve_mpc(&data, &[0.0], &[(-0.4, 0.6)], 1).unwrap();
+            assert!(
+                (solution.delta_u[0] - expected).abs() < 1e-4,
+                "{solution:?}"
+            );
+        }
+        logic.objectives.cvs.get_mut("y1").unwrap().priority = 0;
+        logic.objectives.mvs.get_mut("u1").unwrap().priority = 1;
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-0.4, 0.6)], 1).unwrap();
+        assert!(solution.delta_u[0].abs() < 1e-4, "{solution:?}");
+    }
+
+    #[test]
+    fn same_priority_uses_weights_and_selected_l1_or_l2_movement_cost() {
+        let mut logic = one_by_one_logic();
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        logic
+            .params
+            .insert("mpc.mv.u1.r".into(), LogicParamValue::F64(1.0));
+        let data = independent_move_problem(&[0.0]);
+        // min -du + du^2 has its minimizer at 0.5.
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-1.0, 1.0)], 1).unwrap();
+        assert!((solution.delta_u[0] - 0.5).abs() < 1e-4, "{solution:?}");
+        logic
+            .params
+            .insert("mpc.mv.u1.use_l1".into(), LogicParamValue::Bool(true));
+        logic
+            .params
+            .insert("mpc.mv.u1.r".into(), LogicParamValue::F64(2.0));
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-1.0, 1.0)], 1).unwrap();
+        assert!(solution.delta_u[0].abs() < 1e-4, "{solution:?}");
+        logic
+            .params
+            .insert("mpc.mv.u1.r".into(), LogicParamValue::F64(0.2));
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-1.0, 1.0)], 1).unwrap();
+        assert!((solution.delta_u[0] - 1.0).abs() < 1e-4, "{solution:?}");
+    }
+
+    #[test]
+    fn lower_priorities_can_use_the_full_higher_priority_l1_optimum_face() {
+        let mut logic = one_by_one_logic();
+        logic.vars.mvs.push("u2".into());
+        logic.vars.cvs.push("y2".into());
+        for mv in ["u1", "u2"] {
+            logic
+                .params
+                .insert(format!("mpc.mv.{mv}.use_l1"), LogicParamValue::Bool(true));
+            logic
+                .params
+                .insert(format!("mpc.mv.{mv}.r"), LogicParamValue::F64(1.0));
+        }
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        logic
+            .objectives
+            .cvs
+            .insert("y2".into(), objective(MpcOptimizationMode::Maximize, 1));
+        let data = MpcProblemData {
+            base_prediction: DVector::zeros(2),
+            target: DVector::zeros(2),
+            free_prediction: DVector::zeros(2),
+            phi: DMatrix::from_row_slice(2, 2, &[1.0, 1.0, 1.0, -1.0]),
+            bands: vec![(0.0, 1.0), (-1.0, 1.0)],
+        };
+        // Priority zero has cost -u1-u2+|u1|+|u2|: every nonnegative
+        // feasible pair is optimal. Priority one may still choose (1, 0).
+        let solution = logic
+            .solve_mpc(&data, &[0.0, 0.0], &[(-1.0, 1.0); 2], 1)
+            .unwrap();
+        assert!((solution.delta_u[0] - 1.0).abs() < 1e-4, "{solution:?}");
+        assert!(solution.delta_u[1].abs() < 1e-4, "{solution:?}");
+    }
+
+    #[test]
+    fn band_recovery_precedes_economic_objectives_even_when_unreachable() {
+        let mut logic = one_by_one_logic();
+        logic
+            .objectives
+            .mvs
+            .insert("u1".into(), objective(MpcOptimizationMode::Minimize, 0));
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 1));
+        let mut data = independent_move_problem(&[0.0]);
+        data.bands = vec![(0.5, 0.75)];
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-1.0, 1.0)], 1).unwrap();
+        assert!((solution.delta_u[0] - 0.5).abs() < 1e-4, "{solution:?}");
+        logic
+            .params
+            .insert("mpc.mv.u1.max_delta_u".into(), LogicParamValue::F64(0.2));
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-1.0, 1.0)], 1).unwrap();
+        assert!((solution.delta_u[0] - 0.2).abs() < 1e-4, "{solution:?}");
+    }
+
+    #[test]
+    fn ranked_mpc_preserves_cumulative_mv_limits_and_move_rate_over_the_horizon() {
+        let mut logic = one_by_one_logic();
+        logic
+            .objectives
+            .mvs
+            .insert("u1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::MinimumMove, 2));
+        logic
+            .params
+            .insert("mpc.mv.u1.max_delta_u".into(), LogicParamValue::F64(0.25));
+        let data = MpcProblemData {
+            base_prediction: DVector::zeros(3),
+            target: DVector::zeros(3),
+            free_prediction: DVector::zeros(3),
+            phi: DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+            bands: vec![(-10.0, 10.0)],
+        };
+        let solution = logic.solve_mpc(&data, &[0.0], &[(-0.5, 0.4)], 2).unwrap();
+        assert!((solution.delta_u[0] - 0.25).abs() < 1e-4, "{solution:?}");
+        assert!((solution.delta_u[1] - 0.15).abs() < 1e-4, "{solution:?}");
+        assert!((solution.controlled_prediction[2] - 0.4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn ranked_objectives_follow_live_external_cv_bands_and_solver_failures_clear_readiness() {
+        let mut logic = one_by_one_logic();
+        // Direct feedthrough isolates the live band contract from plant lag.
+        logic.model.c = vec![vec![0.0]];
+        logic.model.d = vec![vec![1.0]];
+        logic
+            .objectives
+            .cvs
+            .insert("y1".into(), objective(MpcOptimizationMode::Maximize, 0));
+        logic
+            .objectives
+            .mvs
+            .insert("u1".into(), objective(MpcOptimizationMode::MinimumMove, 1));
+        let mut inputs = HashMap::from([
+            ("cv.y1.process_value".into(), SignalValue::F64(0.0)),
+            ("cv.y1.setpoint".into(), SignalValue::F64(0.0)),
+            ("mv.u1.read".into(), SignalValue::F64(0.0)),
+            ("cv.y1.band_low".into(), SignalValue::F64(-1.0)),
+            ("cv.y1.band_high".into(), SignalValue::F64(0.3)),
+        ]);
+        for high in [0.3, 0.6] {
+            inputs.insert("cv.y1.band_high".into(), SignalValue::F64(high));
+            let outputs = logic.step(&inputs, RuntimeState::Running).unwrap();
+            let mv = outputs["mv.u1.write"].as_f64().unwrap();
+            assert!(
+                (mv - high).abs() < 1e-4,
+                "mv={mv}, high={high}, logs={:?}",
+                logic.pending_logs
+            );
+            assert!(logic.suggestion_succeeded());
+        }
+        inputs.insert("mv.u1.ll".into(), SignalValue::F64(5.0));
+        inputs.insert("mv.u1.hl".into(), SignalValue::F64(6.0));
+        logic.step(&inputs, RuntimeState::Running).unwrap();
+        assert!(!logic.suggestion_succeeded());
+        assert!(
+            logic.pending_logs[0]
+                .message
+                .contains("osqp_priority_primal_infeasible")
+        );
+        assert_eq!(
+            logic.pending_logs[0].values["mpc.status.fallback"],
+            SignalValue::Bool(true)
+        );
     }
 
     #[test]

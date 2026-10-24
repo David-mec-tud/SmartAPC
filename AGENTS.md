@@ -85,6 +85,16 @@
 - Linear MPC defaults to squared (L2) MV movement cost. Per-MV `mpc.mv.<name>.use_l1`
   is a boolean manual/online selection for absolute (L1) movement cost and must stay out of
   numeric parameter optimization. Offline/online tuning scores retain squared MV movement.
+- Linear MPC per-MV/CV objectives live in `logic.linear_mpc.mvs/cvs.<name>` with
+  typed `maximize`/`minimize`/`minimum_move` modes and nonnegative integer priorities
+  (0 highest). Keep these out of numeric tuning/online parameters. Default all
+  minimum move at priority 0 preserves the legacy soft-band Q/R objective. Other
+  selections recover CV bands first, then solve priorities in order while preserving
+  prior optima within solver tolerance; Q/R balance goals sharing a priority. MV
+  limits/rates stay hard, CV bands stay soft when unreachable, and external CV band
+  ownership is unchanged. Failed/non-converged tiers use fallback and clear readiness.
+  Successful prioritized solves log `osqp_priority_solved` through the existing
+  structured MPC log; failed statuses use compact `osqp_priority_*` messages.
 - Ensure logging additions are structured and testable (runtime log entries must be machine-parseable).
 - Online optimization events must remain structured. Manual/safety/execution stops restore the
   original parameters before the next controller calculation; only normal convergence/completion
