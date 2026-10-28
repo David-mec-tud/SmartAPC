@@ -2,6 +2,13 @@
 
 SmartAPC V1 is modular control software written in Rust for OT and industrial environments.
 
+## Feature showcase / GitHub Pages
+
+The static feature showcase lives in [`docs/index.html`](docs/index.html), with
+real demo screenshots and no build step. To publish it, push these files and select
+**Settings → Pages → Deploy from a branch → main → /docs** on GitHub. See the
+[Pages setup and preview guide](docs/README.md) for details.
+
 ## Browser workspace (October 2026)
 
 SmartAPC runs as a local React/TypeScript application served by Rust/Axum. The

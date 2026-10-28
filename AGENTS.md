@@ -9,6 +9,7 @@
 - Repository map:
   - `src/` -> runtime, desktop GUI, web API, protocol adapters, logic, virtual hardware.
   - `projects/` -> per-project configs, runtime DB/logs, custom strategy artifacts.
+  - `docs/index.html`, `docs/assets/` -> static GitHub Pages feature showcase and demo screenshots.
   - `README.md` -> current product status, run commands, custom strategy guide.
 - Primary run modes:
   - `cargo run --features legacy-native -- desktop` (optional native compatibility UI)
@@ -39,6 +40,11 @@
   - `cargo check`
   - `cargo test`
 - If a gate cannot run, document why and what remains unverified.
+- Showcase-only changes in `docs/index.html` and `docs/assets/` use the docs-only
+  exception. Preview desktop/mobile layouts, verify local assets and links, and
+  exercise gallery keyboard navigation and its no-JavaScript fallback. Publish
+  from `main` and `/docs`; see `docs/README.md`. Use isolated demo projects for
+  screenshots, never existing plant projects or hardware.
 - For browser application changes also run `npm run typecheck`, `npm run build`,
   and `npm test` in `frontend/`. Use `npm run test:e2e` for meaningful browser
   workflows against the isolated Rust backend, with Node.js 22 or newer.
